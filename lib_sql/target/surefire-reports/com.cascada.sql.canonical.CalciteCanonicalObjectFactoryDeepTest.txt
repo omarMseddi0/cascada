@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.cascada.sql.canonical.CalciteCanonicalObjectFactoryDeepTest
--------------------------------------------------------------------------------
-Tests run: 30, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.116 s -- in com.cascada.sql.canonical.CalciteCanonicalObjectFactoryDeepTest

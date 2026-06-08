@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.cascada.cache.domain.safety.SafetyRulesTest$PartialDayBucket
--------------------------------------------------------------------------------
-Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.003 s -- in com.cascada.cache.domain.safety.SafetyRulesTest$PartialDayBucket

@@ -54,7 +54,107 @@ public final class FrameMergeService {
                 : mergeGlobalAggregate(nonEmpty, canonicalObject);
 
         ResultFrame reconstructed = reconstructAverages(merged, canonicalObject);
-        return applyPostProcessing(reconstructed, canonicalObject);
+        ResultFrame withComposites = reconstructCompositeAliases(reconstructed, canonicalObject);
+        return applyPostProcessing(withComposites, canonicalObject);
+    }
+
+    // --- composite aliases (e.g. SUM(a) + SUM(b) AS total_bytes) ---------------------------------
+
+    /** A composite-alias term: an aggregate column reference and the +/- sign it is combined with. */
+    private record CompositeTerm(String columnReference, boolean add) {
+    }
+
+    private static final Pattern COMPOSITE_TERM =
+            Pattern.compile("\\s*([+-])?\\s*((?:SUM|COUNT|MIN|MAX|AVG)\\s*\\([^)]*\\)|[A-Za-z_][A-Za-z0-9_]*)",
+                    Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Rebuilds composite aliases after the merge, porting {@code reconstruct_composite_aliases} in
+     * {@code merging.py}. Spark/the cache stores the raw ingredient columns (e.g. {@code SUM(a)},
+     * {@code SUM(b)}); the canonical object carries the formula (e.g. {@code SUM(a) + SUM(b)}) and the
+     * alias (e.g. {@code total_bytes}). Without this, a query like {@code SUM(a)+SUM(b) AS total_bytes}
+     * would come back from cache WITHOUT the {@code total_bytes} column (the KeyError the Python fix
+     * targets). Only additive composites ({@code +}/{@code -} of aggregate-of-column terms) are
+     * reconstructed in memory; anything more exotic was never cacheable (it would have bypassed).
+     */
+    private ResultFrame reconstructCompositeAliases(ResultFrame frame, CanonicalQueryObject canonicalObject) {
+        Map<String, String> compositeAliases = canonicalObject.metadata().compositeAliases();
+        if (compositeAliases.isEmpty() || frame.isEmpty()) {
+            return frame;
+        }
+
+        // Resolve each alias's formula into terms whose column actually exists in the frame.
+        Map<String, List<CompositeTerm>> resolved = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : compositeAliases.entrySet()) {
+            String alias = entry.getKey();
+            if (frame.columnNames().contains(alias)) {
+                continue; // already present (Bug #5 guard from merging.py)
+            }
+            List<CompositeTerm> terms = parseCompositeFormula(entry.getValue(), frame.columnNames());
+            if (terms != null) {
+                resolved.put(alias, terms);
+            }
+        }
+        if (resolved.isEmpty()) {
+            return frame;
+        }
+
+        ResultFrame.Builder builder = ResultFrame.builder();
+        for (String column : frame.columnNames()) {
+            builder.column(column, frame.columnType(column));
+        }
+        resolved.keySet().forEach(alias -> builder.column(alias, ColumnType.DOUBLE));
+
+        for (Map<String, Object> row : frame.rows()) {
+            Map<String, Object> rebuilt = new LinkedHashMap<>(row);
+            resolved.forEach((alias, terms) -> {
+                double value = 0.0;
+                for (CompositeTerm term : terms) {
+                    double termValue = asDouble(row.get(term.columnReference()));
+                    value += term.add() ? termValue : -termValue;
+                }
+                rebuilt.put(alias, value);
+            });
+            builder.row(rebuilt);
+        }
+        return builder.build();
+    }
+
+    /**
+     * Parse an additive composite formula into terms, mapping each aggregate reference to the actual
+     * frame column (case/space-insensitive, matching {@code _spark_formula_to_pandas}). Returns
+     * {@code null} if any term cannot be resolved to a present column — then the alias is left absent
+     * rather than computed from a wrong column.
+     */
+    private List<CompositeTerm> parseCompositeFormula(String formula, List<String> availableColumns) {
+        List<CompositeTerm> terms = new ArrayList<>();
+        Matcher matcher = COMPOSITE_TERM.matcher(formula);
+        int matchedTo = 0;
+        while (matcher.find()) {
+            boolean add = !"-".equals(matcher.group(1));
+            String token = matcher.group(2);
+            String resolvedColumn = resolveColumn(token, availableColumns);
+            if (resolvedColumn == null) {
+                return null;
+            }
+            terms.add(new CompositeTerm(resolvedColumn, add));
+            matchedTo = matcher.end();
+        }
+        // Reject anything we did not fully consume (e.g. *, /, parenthesised sub-expressions).
+        if (terms.isEmpty() || formula.substring(matchedTo).trim().length() > 0) {
+            return null;
+        }
+        return terms;
+    }
+
+    private String resolveColumn(String token, List<String> availableColumns) {
+        String normalizedToken = token.replace("`", "").replace(" ", "").toLowerCase(Locale.ROOT);
+        for (String column : availableColumns) {
+            if (column.replace("`", "").replace(" ", "").toLowerCase(Locale.ROOT).equals(normalizedToken)) {
+                return column;
+            }
+        }
+        return null;
     }
 
     // --- time-series path -----------------------------------------------------------------------
@@ -104,12 +204,24 @@ public final class FrameMergeService {
         List<String> dimensionColumns = dimensionColumns(frames.get(0), canonicalObject, false);
         List<String> measureColumns = measureColumns(frames.get(0), canonicalObject, dimensionColumns, false);
 
+        // RC (Bug #3 in merging.py): floor the time column by the fixed step BEFORE grouping, so a
+        // cached bucket row (already aligned) and a Spark gap row in the same fixed-step window collapse
+        // to the same group key instead of being counted as two distinct groups. Only when the time
+        // column is itself a grouped dimension here.
+        boolean floorTime = dimensionColumns.contains(timeColumnName);
+
         List<AggregationRow> rows = new ArrayList<>();
         for (ResultFrame frame : frames) {
             for (Map<String, Object> row : frame.rows()) {
                 Map<String, String> dimensions = new LinkedHashMap<>();
                 for (String dimension : dimensionColumns) {
-                    dimensions.put(dimension, String.valueOf(row.get(dimension)));
+                    if (floorTime && dimension.equals(timeColumnName)) {
+                        long flooredTs = Math.floorDiv(asLong(row.get(dimension)), fixedStepSeconds)
+                                * (long) fixedStepSeconds;
+                        dimensions.put(dimension, String.valueOf(flooredTs));
+                    } else {
+                        dimensions.put(dimension, String.valueOf(row.get(dimension)));
+                    }
                 }
                 Map<String, Double> measures = new LinkedHashMap<>();
                 for (String measure : measureColumns) {
@@ -169,7 +281,7 @@ public final class FrameMergeService {
                 String countColumn = "COUNT(" + column + ")";
                 if (row.containsKey(sumColumn) && row.containsKey(countColumn)) {
                     double sum = asDouble(row.get(sumColumn));
-                    long count = (long) asDouble(row.get(countColumn));
+                    long count = Math.round(asDouble(row.get(countColumn)));
                     rebuilt.put(alias, averageReconstructionService
                             .reconstructAverageFromStoredSumAndCount(sum, count));
                     sumCountColumnsToDrop.add(sumColumn);
@@ -221,8 +333,9 @@ public final class FrameMergeService {
         }
 
         canonicalObject.postProcessing().limit().ifPresent(limit -> {
-            while (rows.size() > limit) {
-                rows.remove(rows.size() - 1);
+            // O(1) truncation instead of removing tail rows one-by-one (O(n*k)); mirrors df.head(limit).
+            if (rows.size() > limit) {
+                rows.subList(limit, rows.size()).clear();
             }
         });
 

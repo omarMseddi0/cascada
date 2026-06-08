@@ -83,11 +83,12 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
              ByteArrayOutputStream out = new ByteArrayOutputStream();
              ArrowStreamWriter writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))) {
 
-            int rowCount = frame.rowCount();
-            root.setRowCount(rowCount);
             for (String column : frame.columnNames()) {
                 writeColumn(root.getVector(column), frame.columnType(column), frame.rows(), column);
             }
+            // Set the row count AFTER populating the vectors (Arrow's contract); setting it first leaves
+            // the writer expecting buffers that the vectors have not filled yet.
+            root.setRowCount(frame.rowCount());
 
             writer.start();
             writer.writeBatch();

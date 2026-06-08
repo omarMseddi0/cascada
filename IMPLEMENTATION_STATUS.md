@@ -29,7 +29,8 @@ Test status: **`mvn -pl lib_cache -am test` → 111 tests, 0 failures.**
 | Cache size + flush admin | `CacheAdministrationService`, `CacheSizeReport`, `CacheScope` | `CacheAdministrationTest` | §8.17 |
 | **Cache value serialization — portable codec + zstd** | `PortableFrameSerializer` | `PortableFrameSerializerTest` | §8.16 |
 | **Cache value serialization — Apache Arrow IPC + zstd** | `ArrowResultFrameSerializer` | `ArrowResultFrameSerializerTest` (4) | §8.16 |
-| **In-process OLAP executor (DuckDB) behind the Spark port** | `DuckDbInProcessQueryExecutor` | `DuckDbInProcessQueryExecutorTest` (3) | §8.16 |
+| **Spark + Delta executor (THE production executor)** | `lib_spark`: `SparkDeltaQueryExecutor`, `SparkSessionConfigBuilder` | `SparkSessionConfigBuilderTest` (6) | §5, §6 |
+| **Engine assembler + runnable entrypoint** | `app`: `CascadaEngine`, `CascadaApplication` | `CascadaEngineTest` (2) | §4.3 |
 | Cache execution engine: gap analysis, EXISTS→MGET, **partial-hit (cache + Spark gap merge)** | `CacheExecutionEngine` | `CacheExecutionEngineTest`, `CacheCorrectnessSimulationTest` | §8.18 |
 | Warming: Layer-1 queue + Layer-2 popularity + Markov speculative, bucket-by-bucket | `WarmingOrchestrator`, `WarmingQueue`, `QueryPopularityTracker` | `WarmingOrchestratorTest`, `WarmingConsistencySimulationTest` | §8.15 |
 | Sketches (HLL distinct, KLL quantile) — in-process merge | `HyperLogLogDistinctCounter`, `KllQuantileEstimator` | `SketchMergeErrorBoundTest` | §8.13 |
@@ -44,12 +45,17 @@ Test status: **`mvn -pl lib_cache -am test` → 111 tests, 0 failures.**
   backend, the Valkey backend, and size accounting behave identically with either one injected. Arrow
   is columnar + cross-language, so a bucket written here is readable by Python (pyarrow), Spark, and
   DuckDB without a bespoke codec.
-- **`DuckDbInProcessQueryExecutor`** — an embedded, vectorised OLAP executor behind the **same
-  `SparkQueryExecutorPort`**. It is the in-process speed swap: roll-ups and small gap-fills run in
-  native vectorised DuckDB (microseconds, no JVM-heap group-by, no cluster round-trip) while production
-  can still inject the real Spark adapter for cluster-scale gaps. Arrow → DuckDB is zero-copy, so it
-  composes with `ArrowResultFrameSerializer`. The read path stays query-only; `executeUpdate` handles
-  local table bootstrap.
+- **`SparkDeltaQueryExecutor` (THE executor)** — the production `SparkQueryExecutorPort`: a real Spark
+  3.5.x SparkSession with Delta extensions, running `spark.sql()` over Delta tables and mapping the
+  `Dataset<Row>` to `ResultFrame`. **Local and cluster are the same code — only the
+  `SparkSessionConfig` (master + spark.json) differs**, exactly like the reference `spark_manager.py`.
+  Spark/Delta are `provided` (the cluster image supplies them); the pure `SparkSessionConfigBuilder`
+  carries the unit-test coverage (Delta always on, env > spark.json > defaults, k8s-vs-local = master).
+  Gluten/Velox acceleration is a Spark **config + image** concern layered into this same session — see
+  the plan's §5; there is no separate Java for it.
+- **`CascadaEngine` + `CascadaApplication`** — the composition root: wires lib_sql (translate +
+  canonicalize) → lib_cache (safety + cache engine) → the injected executor. `main()` wires the **real**
+  Kubernetes Spark+Delta executor + Valkey backend (run inside the Spark image / cluster).
 - **`CubeConsistencyVerifier`** — before any cube roll-up is served, an independent direct-compute
   oracle re-derives the answer from the same candidate frame and compares cell-by-cell; any
   disagreement (tampered cell, fabricated/missing group, missing AVG ingredient, holistic aggregate,
@@ -71,9 +77,11 @@ Test status: **`mvn -pl lib_cache -am test` → 111 tests, 0 failures.**
 
 | Capability | Plan ref | Note |
 |---|---|---|
-| **Delta Lake source adapter** (read Delta/Parquet/Iceberg; CDF incremental cache maintenance) | §8.16 | Next step — wire a real `SparkQueryExecutorPort` over Spark 3.5.6 + Delta, and a Delta cold-tier `CacheBackendPort`. |
-| **Real Spark + Gluten/Velox executor** behind `SparkQueryExecutorPort` | §1, §6 | Today the port is satisfied by DuckDB (in-process) and the test oracle; the cluster adapter is pending. |
+| **Live Spark+Delta integration test** (real cluster read) | §5, §6 | `SparkDeltaQueryExecutor` is implemented and compiles; it is exercised against a real Delta table in the Kubernetes cluster (the build env here has no cluster), not in the unit build. |
+| **Gluten/Velox acceleration** | §5 | A Spark **config + container-image** concern (plan §5), not separate Java; the `SparkSessionConfigBuilder` is where the gluten keys are layered in by the operator. |
+| **CDF incremental cache maintenance + Delta cold tier** | §8.16 | A Delta-backed cold-tier `CacheBackendPort` and Change-Data-Feed invalidation are pending. |
 | **Cube planner wired into the engine** | §8.12 | `CubeSubsumptionPlanner` + `CubeConsistencyVerifier` exist and are tested, but `CacheExecutionEngine` does not yet consult them before the Spark gap path. |
+| **REST + gRPC/Arrow API surface** (JSON small, Arrow/Parquet bulk, gRPC+protobuf streaming for Angular) | §10 | Not built — Angular frontend will call these; 1M-row results must stream as Arrow/gRPC, never plain JSON. |
 | **Multi-tier cost-aware eviction & cold spill** (RAM→NVMe→object store) | §8.16 | Backends exist; the tier router + eviction policy do not. |
 | **Sketch blob persistence on JDK > 21** | §8.18 | Merge works on any JDK; serialization round-trip disabled on JDK 22 (datasketches-memory 3.0.2). |
 | **Fabric-style cluster lifecycle** (create/stop/restart/resize via templates) | §11 | Not started — the admin console + cluster controller. |
@@ -90,6 +98,8 @@ Test status: **`mvn -pl lib_cache -am test` → 111 tests, 0 failures.**
 2. **Time-series step is caller-driven.** Store at one fixed internal step; resample **coarser only**
    on read; the coarser step comes from the query / front-end, never an engine-side assumption. Never
    invent a finer resolution than what is stored (that would be data fabrication).
-3. **Correctness over speed at the boundary, speed behind ports.** When unsure a result is correct
-   (cube roll-up, holistic aggregate), bypass to Spark. Make it *fast* by swapping the executor
-   (DuckDB in-process) and the serializer (Arrow), not by relaxing a correctness check.
+3. **Correctness over speed at the boundary.** When unsure a result is correct (cube roll-up, holistic
+   aggregate), bypass to Spark. Speed comes from the cache (serving buckets instead of recomputing) and
+   from Gluten/Velox accelerating the Spark gap — never from relaxing a correctness check.
+4. **Spark + Delta on Kubernetes is THE engine.** Everything runs through `SparkDeltaQueryExecutor`;
+   local and cluster differ only by `SparkSessionConfig`. There is no second execution engine.

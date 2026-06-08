@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.cascada.cache.domain.safety.SafetyRulesTest
+-------------------------------------------------------------------------------
+Tests run: 0, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.031 s -- in com.cascada.cache.domain.safety.SafetyRulesTest

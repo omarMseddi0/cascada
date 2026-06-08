@@ -1,0 +1,5 @@
+com\cascada\sparkconfig\domain\SparkConfiguration.class
+com\cascada\sparkconfig\domain\SparkConfigurationDeriver.class
+com\cascada\sparkconfig\domain\SparkMemorySplit.class
+com\cascada\sparkconfig\domain\WorkloadType.class
+com\cascada\sparkconfig\domain\ExecutorPlacement.class

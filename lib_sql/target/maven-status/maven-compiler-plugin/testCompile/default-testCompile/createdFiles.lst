@@ -1,0 +1,8 @@
+com\cascada\sql\canonical\CanonicalObjectFactoryTest.class
+com\cascada\sql\translate\LogicalToPhysicalSqlTranslatorTest.class
+com\cascada\sql\simulation\DirectComputeOracle$MeasureSpec.class
+com\cascada\sql\simulation\DirectComputeOracle.class
+com\cascada\sql\simulation\DirectComputeOracle$TrafficEvent.class
+com\cascada\sql\simulation\CacheCorrectnessSimulationTest.class
+com\cascada\sql\translate\MySqlToSparkFunctionTranslatorTest.class
+com\cascada\sql\rewrite\GapQueryBuilderTest.class

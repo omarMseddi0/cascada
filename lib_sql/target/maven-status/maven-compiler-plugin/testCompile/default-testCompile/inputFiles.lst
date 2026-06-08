@@ -1,0 +1,14 @@
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\calcite\CalciteSqlTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\canonical\CalciteCanonicalObjectFactoryDeepTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\canonical\CanonicalObjectFactoryTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\canonical\HugeComplexSqlCanonicalTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\rewrite\GapMergePropertyTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\rewrite\GapQueryBuilderDeepTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\rewrite\GapQueryBuilderTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\simulation\CacheCorrectnessSimulationTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\simulation\DirectComputeOracle.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\simulation\WarmingConsistencySimulationTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\translate\LogicalToPhysicalSqlTranslatorDeepTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\translate\LogicalToPhysicalSqlTranslatorTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\translate\MySqlToSparkFunctionTranslatorDeepTest.java
+C:\Users\omarm\Downloads\dsitrbuted_engine\cascada\lib_sql\src\test\java\com\cascada\sql\translate\MySqlToSparkFunctionTranslatorTest.java

@@ -35,6 +35,7 @@ import java.util.Map;
 public final class SparkDeltaQueryExecutor implements SparkQueryExecutorPort, AutoCloseable {
 
     private final SparkSession sparkSession;
+    private final boolean ownsSession;
 
     /** Build (or get) a SparkSession from the resolved config — the single place a session is created. */
     public SparkDeltaQueryExecutor(SparkSessionConfig config) {
@@ -45,11 +46,16 @@ public final class SparkDeltaQueryExecutor implements SparkQueryExecutorPort, Au
             builder = builder.config(property.getKey(), property.getValue());
         }
         this.sparkSession = builder.getOrCreate();
+        this.ownsSession = true;
     }
 
-    /** For tests / advanced wiring: wrap an already-built session (e.g. a shared local one). */
+    /**
+     * For tests / advanced wiring: wrap an already-built session (e.g. a shared one). {@link #close()}
+     * will NOT stop a session passed in this way — only the caller that created it should stop it.
+     */
     public SparkDeltaQueryExecutor(SparkSession sparkSession) {
         this.sparkSession = sparkSession;
+        this.ownsSession = false;
     }
 
     @Override
@@ -106,6 +112,8 @@ public final class SparkDeltaQueryExecutor implements SparkQueryExecutorPort, Au
 
     @Override
     public void close() {
-        sparkSession.stop();
+        if (ownsSession) {
+            sparkSession.stop();
+        }
     }
 }

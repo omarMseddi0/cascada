@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.cascada</groupId>
+        <artifactId>cascada-platform</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>cascada-lib-cache</artifactId>
+    <name>Cascada Library - Smart Cache (domain)</name>
+    <description>
+        The crown jewel, reimplemented in Java from data_collector/src/core/smart_cache/.
+        Framework-free domain core: canonical query object, time-bucket math, logic hashing,
+        safety-rule guardrails, and the correctness-critical merge math (AVG reconstruction,
+        exact-duplicate dedup, epoch-aligned resampling). Zero framework imports.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.cascada</groupId>
+            <artifactId>cascada-lib-identity</artifactId>
+        </dependency>
+
+        <!-- adapter-only: cache value serialization (Arrow IPC + zstd) and sketches -->
+        <dependency>
+            <groupId>com.github.luben</groupId>
+            <artifactId>zstd-jni</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>arrow-vector</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>arrow-memory-unsafe</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.datasketches</groupId>
+            <artifactId>datasketches-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.datasketches</groupId>
+            <artifactId>datasketches-memory</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>net.jqwik</groupId>
+            <artifactId>jqwik</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!--
+                      Apache DataSketches memory and Arrow off-heap need java.nio opened, and
+                      datasketches-memory 3.0.2 hard-checks the JDK major version (<=21). We build with
+                      JDK 22 targeting release 21, so present a 21 version string to that check.
+                    -->
+                    <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED</argLine>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

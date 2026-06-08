@@ -1,0 +1,148 @@
+package com.cascada.cache.application;
+
+import com.cascada.cache.adapter.backend.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.serialization.PortableFrameSerializer;
+import com.cascada.cache.adapter.tracking.MarkovNextQueryPredictor;
+import com.cascada.cache.adapter.tracking.QueryPopularityTracker;
+import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.HashComponents;
+import com.cascada.cache.domain.PostProcessing;
+import com.cascada.cache.domain.QueryMetadata;
+import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.port.GapQueryRewriterPort;
+import com.cascada.cache.domain.warming.WarmingQueue;
+import com.cascada.identity.domain.QueryHash;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Verifies the warming orchestration ({@code _perform_warming_cycle} / {@code _warm_single_pattern_sequential}):
+ * Layer-1 queue drain, Layer-2 top-N de-duplication, per-bucket EXISTS-skip, force-overwrite, and
+ * speculative Markov enqueue — using a fake Spark that counts executions and the real in-memory backend.
+ */
+class WarmingOrchestratorTest {
+
+    private static final long DAY = 86_400L;
+    private static final QueryHash A = QueryHash.of("0000000000000000000000000000000a");
+    private static final QueryHash B = QueryHash.of("0000000000000000000000000000000b");
+
+    private final AtomicInteger sparkCalls = new AtomicInteger();
+    private final InMemoryBlobCacheBackendAdapter backend =
+            new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+    private final GapQueryRewriterPort passthroughGap = (sql, plan) -> sql;
+
+    private ResultFrame fakeResult() {
+        sparkCalls.incrementAndGet();
+        return ResultFrame.builder().column("appName", ColumnType.STRING).column("SUM(bytes)", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "SUM(bytes)", 1.0)).build();
+    }
+
+    private CanonicalQueryObject canonical(String sql) {
+        return new CanonicalQueryObject(
+                new HashComponents(List.of("appName"), List.of("SUM(bytes)"), List.of(), 0),
+                new TimeRange(0, 3 * DAY - 1), PostProcessing.none(), QueryMetadata.globalAggregate(),
+                sql, List.of("traffic"), List.of());
+    }
+
+    private WarmingOrchestrator orchestrator(WarmingQueue queue, QueryPopularityTracker tracker,
+                                             MarkovNextQueryPredictor predictor) {
+        return new WarmingOrchestrator(backend, sql -> fakeResult(), passthroughGap,
+                queue, tracker, predictor, DAY, 10);
+    }
+
+    @Test
+    void warmsEveryBodyBucketForEachQueuedPattern() {
+        WarmingOrchestrator orchestrator =
+                orchestrator(new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor());
+        orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
+        orchestrator.recordQuery(B, canonical("SELECT appName, SUM(bytes) FROM other WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
+
+        WarmingOrchestrator.WarmingReport report = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+
+        assertThat(report.patternsWarmed()).isEqualTo(2);
+        assertThat(report.bucketsWarmed()).isEqualTo(6); // 3 days x 2 patterns
+        assertThat(sparkCalls.get()).isEqualTo(6);
+        assertThat(backend.storedBucketCount()).isEqualTo(6);
+    }
+
+    @Test
+    void skipsAlreadyWarmedBucketsOnTheSecondCycle() {
+        QueryPopularityTracker tracker = new QueryPopularityTracker();
+        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker, new MarkovNextQueryPredictor());
+        orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
+
+        orchestrator.warmCycle(0, 3 * DAY - 1, false); // Layer 1 warms 3 buckets
+        sparkCalls.set(0);
+
+        // Second cycle: queue is drained, but Layer 2 (top-N) re-selects A; every bucket already exists.
+        WarmingOrchestrator.WarmingReport second = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        assertThat(second.bucketsWarmed()).isZero();
+        assertThat(second.bucketsSkipped()).isEqualTo(3);
+        assertThat(sparkCalls.get()).isZero(); // nothing recomputed
+    }
+
+    @Test
+    void forceOverwriteRewarmsEvenAlreadyWarmedBuckets() {
+        QueryPopularityTracker tracker = new QueryPopularityTracker();
+        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker, new MarkovNextQueryPredictor());
+        orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
+        orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        sparkCalls.set(0);
+
+        WarmingOrchestrator.WarmingReport forced = orchestrator.warmCycle(0, 3 * DAY - 1, true);
+        assertThat(forced.bucketsWarmed()).isEqualTo(3);
+        assertThat(sparkCalls.get()).isEqualTo(3); // all re-computed
+    }
+
+    @Test
+    void layer2DoesNotDoubleWarmAHashLayer1AlreadyCovered() {
+        QueryPopularityTracker tracker = new QueryPopularityTracker();
+        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker, new MarkovNextQueryPredictor());
+        // record twice so the tracker definitely has it in top-N, and the queue has one vote
+        orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
+        orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
+
+        WarmingOrchestrator.WarmingReport report = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        assertThat(report.patternsWarmed()).isEqualTo(1); // not warmed twice
+        assertThat(report.bucketsWarmed()).isEqualTo(3);
+    }
+
+    @Test
+    void perBucketExistsSkipWarmsOnlyTheNewlyRequestedBucket() {
+        WarmingOrchestrator orchestrator =
+                orchestrator(new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor());
+        CanonicalQueryObject canonical = canonical(
+                "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
+
+        orchestrator.warmSinglePattern(A, canonical, 0, DAY - 1, false); // warm only day 0
+        sparkCalls.set(0);
+        WarmingOrchestrator.PatternWarmingResult result =
+                orchestrator.warmSinglePattern(A, canonical, 0, 2 * DAY - 1, false); // days 0 and 1
+
+        assertThat(result.bucketsSkipped()).isEqualTo(1); // day 0 already warm
+        assertThat(result.bucketsWarmed()).isEqualTo(1);  // only day 1 computed
+        assertThat(sparkCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void speculativeWarmingEnqueuesPredictedNextDrillDowns() {
+        WarmingQueue queue = new WarmingQueue();
+        MarkovNextQueryPredictor predictor = new MarkovNextQueryPredictor();
+        WarmingOrchestrator orchestrator = orchestrator(queue, new QueryPopularityTracker(), predictor);
+        orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
+        orchestrator.recordQuery(B, canonical("SELECT appName, SUM(bytes) FROM other WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
+        queue.consumeAll(); // clear the votes from recordQuery
+        predictor.recordTransition(A, B);
+
+        int enqueued = orchestrator.enqueueSpeculativeNext(A, 3);
+        assertThat(enqueued).isEqualTo(1);          // only B is known + predicted
+        assertThat(queue.consumeAll()).containsExactly(B);
+    }
+}

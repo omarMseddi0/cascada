@@ -1,0 +1,3 @@
+com\cascada\sparkconfig\domain\SparkConfigurationDeriverInvariantTest.class
+com\cascada\sparkconfig\domain\GoldenSparkConfigurationTest.class
+com\cascada\sparkconfig\architecture\SparkConfigDomainPurityTest.class

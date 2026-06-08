@@ -1,0 +1,5 @@
+com\cascada\identity\domain\LineageHash.class
+com\cascada\identity\domain\TenantIdentifier.class
+com\cascada\identity\domain\PolicyVersion.class
+com\cascada\identity\domain\SchemaVersion.class
+com\cascada\identity\domain\QueryHash.class

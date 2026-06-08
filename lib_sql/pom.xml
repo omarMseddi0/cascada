@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.cascada</groupId>
+        <artifactId>cascada-platform</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>cascada-lib-sql</artifactId>
+    <name>Cascada Library - SQL Compiler</name>
+    <description>
+        Apache Calcite-based compiler (the Java analogue of sqlglot): canonical-object extraction
+        (ported from cache_component_adapter.py and smart_sql_processor), MySQL to Spark dialect
+        translation (the 100+ function-mapping table from data_explory/all_plans.md), and the gap-query
+        builder (ported from sql_rewriter.py). Calcite is an adapter-level dependency; the produced
+        CanonicalQueryObject is pure domain.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.cascada</groupId>
+            <artifactId>cascada-lib-cache</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.calcite</groupId>
+            <artifactId>calcite-core</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>net.jqwik</groupId>
+            <artifactId>jqwik</artifactId>
+        </dependency>
+    </dependencies>
+</project>

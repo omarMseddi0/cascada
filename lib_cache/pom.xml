@@ -51,6 +51,11 @@
             <groupId>io.lettuce</groupId>
             <artifactId>lettuce-core</artifactId>
         </dependency>
+        <!-- adapter-only: in-process OLAP executor behind SparkQueryExecutorPort (Arrow-native, zero-copy) -->
+        <dependency>
+            <groupId>org.duckdb</groupId>
+            <artifactId>duckdb_jdbc</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>net.jqwik</groupId>

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.cascada</groupId>
+        <artifactId>cascada-platform</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>cascada-lib-spark</artifactId>
+    <name>Cascada Library - Spark + Delta executor</name>
+    <description>
+        The production SparkQueryExecutorPort adapter: builds a Spark 3.5.x SparkSession (local or
+        Kubernetes — identical code, only config differs) with Delta Lake extensions, runs physical
+        SQL over Delta tables, and maps the Spark Row result into the cache's framework-free ResultFrame.
+        Ported from data_collector/src/core/spark/spark_manager.py + cluster-deployment/spark_configs.py.
+
+        Spark 3.5.6 officially supports Java 8/11/17 (not 21); the cluster image (Spark 3.5.6 + Gluten +
+        Velox + Delta) supplies the Spark/Delta runtime, so those dependencies are `provided` here — this
+        module compiles against them and contributes the adapter + the pure, fully-tested config builder.
+    </description>
+
+    <properties>
+        <spark.version>3.5.6</spark.version>
+        <delta.version>3.3.0</delta.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.cascada</groupId>
+            <artifactId>cascada-lib-cache</artifactId>
+        </dependency>
+
+        <!-- Supplied by the Spark cluster image at runtime (see deployment spark.jars); provided here. -->
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-sql_2.12</artifactId>
+            <version>${spark.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.delta</groupId>
+            <artifactId>delta-spark_2.12</artifactId>
+            <version>${delta.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+    </dependencies>
+</project>

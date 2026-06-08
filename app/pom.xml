@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.cascada</groupId>
+        <artifactId>cascada-platform</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>cascada-app</artifactId>
+    <name>Cascada Application - engine assembler + entrypoint</name>
+    <description>
+        The thin "main code that calls the library": wires lib_sql (SQL canonicalisation) + lib_cache
+        (the cache engine, serializers, backends) + lib_spark/DuckDB (executor) into a single
+        CascadaEngine facade, and a runnable main() that runs an end-to-end query through the in-process
+        executor. Local and cluster differ only in which SparkQueryExecutorPort and CacheBackendPort are
+        injected here — the engine code is identical.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.cascada</groupId>
+            <artifactId>cascada-lib-cache</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.cascada</groupId>
+            <artifactId>cascada-lib-sql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.cascada</groupId>
+            <artifactId>cascada-lib-spark</artifactId>
+        </dependency>
+        <!-- Spark/Delta runtime is supplied by the cluster image; provided here so app compiles
+             against SparkDeltaQueryExecutor's transitive Spark types but does not bundle Spark. -->
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-sql_2.12</artifactId>
+            <version>3.5.6</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+</project>

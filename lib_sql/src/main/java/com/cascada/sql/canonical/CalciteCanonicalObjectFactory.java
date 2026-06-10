@@ -224,11 +224,15 @@ public final class CalciteCanonicalObjectFactory {
                 filters.add(CalciteSql.unparse(conjunct));
                 continue;
             }
+            // Intersect, never overwrite: with several bounds on the same side the *tightest* one
+            // is the query's true window (ts >= 100 AND ts >= 150 means ts >= 150). Overwriting
+            // with whichever conjunct came last would widen the window and serve rows the query
+            // excluded.
             if (bound.start() != null) {
-                start = bound.start();
+                start = start == null ? bound.start() : Math.max(start, bound.start());
             }
             if (bound.end() != null) {
-                end = bound.end();
+                end = end == null ? bound.end() : Math.min(end, bound.end());
             }
         }
 
@@ -256,10 +260,10 @@ public final class CalciteCanonicalObjectFactory {
             return null;
         }
         return switch (conjunct.getKind()) {
-            case GREATER_THAN_OR_EQUAL, GREATER_THAN ->
-                    boundIfTimeColumn(call.operand(0), call.operand(1), timeDimensionMap, true);
-            case LESS_THAN_OR_EQUAL, LESS_THAN ->
-                    boundIfTimeColumn(call.operand(0), call.operand(1), timeDimensionMap, false);
+            case GREATER_THAN_OR_EQUAL -> comparisonBound(call, timeDimensionMap, true, false);
+            case GREATER_THAN -> comparisonBound(call, timeDimensionMap, true, true);
+            case LESS_THAN_OR_EQUAL -> comparisonBound(call, timeDimensionMap, false, false);
+            case LESS_THAN -> comparisonBound(call, timeDimensionMap, false, true);
             case BETWEEN -> betweenBound(call, timeDimensionMap);
             default -> null;
         };
@@ -284,16 +288,33 @@ public final class CalciteCanonicalObjectFactory {
         return null;
     }
 
-    private TimeBound boundIfTimeColumn(SqlNode left, SqlNode right, TimeDimensionMap timeDimensionMap,
-                                        boolean isStart) {
-        if (!(left instanceof SqlIdentifier identifier) || !isTimeColumn(identifier, timeDimensionMap)) {
+    /**
+     * Extracts an inclusive epoch-second bound from a comparison, handling both operand orders and
+     * strict vs. non-strict operators. {@code ts > v} tightens to {@code start = v + 1} and
+     * {@code ts < v} to {@code end = v - 1}, so two queries differing only in boundary inclusivity
+     * can never share a canonical time range (that would be a cache collision serving wrong rows).
+     * A literal-first form ({@code 100 < ts}) is the mirrored bound of its column-first equivalent.
+     */
+    private TimeBound comparisonBound(SqlBasicCall call, TimeDimensionMap timeDimensionMap,
+                                      boolean greater, boolean strict) {
+        SqlNode left = call.operand(0);
+        SqlNode right = call.operand(1);
+        boolean isStart;
+        Long value;
+        if (left instanceof SqlIdentifier identifier && isTimeColumn(identifier, timeDimensionMap)) {
+            value = asLong(right);
+            isStart = greater;
+        } else if (right instanceof SqlIdentifier identifier && isTimeColumn(identifier, timeDimensionMap)) {
+            value = asLong(left);
+            isStart = !greater;
+        } else {
             return null;
         }
-        Long value = asLong(right);
         if (value == null) {
             return null;
         }
-        return isStart ? new TimeBound(value, null) : new TimeBound(null, value);
+        long inclusive = strict ? (isStart ? value + 1 : value - 1) : value;
+        return isStart ? new TimeBound(inclusive, null) : new TimeBound(null, inclusive);
     }
 
     private boolean isTimeColumn(SqlIdentifier identifier, TimeDimensionMap timeDimensionMap) {

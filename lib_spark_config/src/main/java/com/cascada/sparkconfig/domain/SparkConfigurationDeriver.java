@@ -42,12 +42,14 @@ public final class SparkConfigurationDeriver {
         // Reserve at least 1 GiB overhead, give the majority of the remainder to Velox off-heap.
         int overhead = Math.max(1, randomAccessMemoryGigabytes / 10);
         int remaining = randomAccessMemoryGigabytes - overhead;
+        if (remaining <= 0) {
+            // Budget too small to carve out off-heap: keep the whole budget as JVM heap so the
+            // split never exceeds the container RAM (the old fallback could request RAM + 1 GiB,
+            // which Kubernetes answers with an OOMKill).
+            return new SparkMemorySplit(randomAccessMemoryGigabytes, 0, 0);
+        }
         int offHeap = (remaining * 6) / 10;
         int heap = remaining - offHeap;
-        if (heap <= 0) {
-            heap = 1;
-            offHeap = Math.max(0, randomAccessMemoryGigabytes - heap - overhead);
-        }
         return new SparkMemorySplit(heap, offHeap, overhead);
     }
 

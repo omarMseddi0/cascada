@@ -33,8 +33,11 @@ public final class TimeBucketCalculator {
 
     /** Ported from {@code _get_daily_buckets(start_ts, end_ts)}. */
     public DailyBuckets getDailyBuckets(long startTimestampSeconds, long endTimestampSeconds) {
-        long firstDayStart = (startTimestampSeconds / secondsPerBucket) * secondsPerBucket;
-        long lastDayStart = (endTimestampSeconds / secondsPerBucket) * secondsPerBucket;
+        // floorDiv, not '/': plain division rounds toward zero, so a pre-epoch (negative)
+        // timestamp would land in the bucket *after* its own — floorDiv keeps bucket starts
+        // aligned for the full timestamp domain.
+        long firstDayStart = Math.floorDiv(startTimestampSeconds, secondsPerBucket) * secondsPerBucket;
+        long lastDayStart = Math.floorDiv(endTimestampSeconds, secondsPerBucket) * secondsPerBucket;
 
         Optional<TimeRange> head = Optional.empty();
         Optional<TimeRange> tail = Optional.empty();

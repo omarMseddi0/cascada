@@ -102,9 +102,37 @@ class CalciteCanonicalObjectFactoryDeepTest {
 
     @Test
     void extractsTimeRangeFromStrictInequalities() {
+        // ts > 100 excludes second 100 and ts < 500 excludes second 500: the inclusive canonical
+        // window is [101, 499]. Mapping strict bounds to the same range as >=/<= would make the
+        // two queries share a cache entry and serve each other's boundary rows.
         CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
                 "SELECT SUM(b) AS s FROM traffic WHERE ts > 100 AND ts < 500");
+        assertThat(canonical.timeRange().startTimestampSeconds()).isEqualTo(101);
+        assertThat(canonical.timeRange().endTimestampSeconds()).isEqualTo(499);
+    }
+
+    @Test
+    void strictAndInclusiveBoundsNeverCollideOnTheSameCanonicalRange() {
+        CanonicalQueryObject strict = factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) AS s FROM traffic WHERE ts > 100 AND ts <= 500");
+        CanonicalQueryObject inclusive = factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) AS s FROM traffic WHERE ts >= 100 AND ts <= 500");
+        assertThat(strict.timeRange()).isNotEqualTo(inclusive.timeRange());
+    }
+
+    @Test
+    void extractsTimeRangeWhenTheLiteralIsOnTheLeftOfTheComparison() {
+        CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) AS s FROM traffic WHERE 100 <= ts AND 500 >= ts");
         assertThat(canonical.timeRange().startTimestampSeconds()).isEqualTo(100);
+        assertThat(canonical.timeRange().endTimestampSeconds()).isEqualTo(500);
+    }
+
+    @Test
+    void tightestBoundWinsWhenSeveralPredicatesConstrainTheSameSide() {
+        CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) AS s FROM traffic WHERE ts >= 150 AND ts >= 100 AND ts <= 500 AND ts <= 600");
+        assertThat(canonical.timeRange().startTimestampSeconds()).isEqualTo(150);
         assertThat(canonical.timeRange().endTimestampSeconds()).isEqualTo(500);
     }
 

@@ -34,11 +34,27 @@ import java.util.Map;
  */
 public final class SparkDeltaQueryExecutor implements SparkQueryExecutorPort, AutoCloseable {
 
+    /**
+     * Hard ceiling on rows materialised into the engine's JVM per query. The cache path only ever
+     * pulls pre-aggregated frames (group-by cardinality × buckets — thousands of rows), so a result
+     * beyond this is a runaway raw scan that would otherwise OOM the driver via collect.
+     */
+    private static final int DEFAULT_MAX_RESULT_ROWS = 1_000_000;
+
     private final SparkSession sparkSession;
     private final boolean ownsSession;
+    private final int maxResultRows;
 
     /** Build (or get) a SparkSession from the resolved config — the single place a session is created. */
     public SparkDeltaQueryExecutor(SparkSessionConfig config) {
+        this(config, DEFAULT_MAX_RESULT_ROWS);
+    }
+
+    /** As above, with an explicit driver-side row ceiling. */
+    public SparkDeltaQueryExecutor(SparkSessionConfig config, int maxResultRows) {
+        if (maxResultRows <= 0) {
+            throw new IllegalArgumentException("maxResultRows must be > 0, but was: " + maxResultRows);
+        }
         SparkSession.Builder builder = SparkSession.builder()
                 .appName(config.appName())
                 .master(config.master());
@@ -47,6 +63,7 @@ public final class SparkDeltaQueryExecutor implements SparkQueryExecutorPort, Au
         }
         this.sparkSession = builder.getOrCreate();
         this.ownsSession = true;
+        this.maxResultRows = maxResultRows;
     }
 
     /**
@@ -56,6 +73,7 @@ public final class SparkDeltaQueryExecutor implements SparkQueryExecutorPort, Au
     public SparkDeltaQueryExecutor(SparkSession sparkSession) {
         this.sparkSession = sparkSession;
         this.ownsSession = false;
+        this.maxResultRows = DEFAULT_MAX_RESULT_ROWS;
     }
 
     @Override
@@ -77,12 +95,23 @@ public final class SparkDeltaQueryExecutor implements SparkQueryExecutorPort, Au
             builder.column(fields[index].name(), type);
         }
 
-        for (Row row : dataset.collectAsList()) {
+        // toLocalIterator streams partitions one at a time instead of materialising the whole
+        // result in the driver at once (collectAsList), and the row ceiling turns a runaway raw
+        // scan into a clear error instead of an OOM-killed engine.
+        java.util.Iterator<Row> rows = dataset.toLocalIterator();
+        int rowCount = 0;
+        while (rows.hasNext()) {
+            if (rowCount >= maxResultRows) {
+                throw new IllegalStateException("query result exceeds the " + maxResultRows
+                        + "-row driver ceiling; add a LIMIT or aggregate further");
+            }
+            Row row = rows.next();
             Map<String, Object> values = new LinkedHashMap<>();
             for (int index = 0; index < fields.length; index++) {
                 values.put(fields[index].name(), readCell(row, index, columnTypes[index]));
             }
             builder.row(values);
+            rowCount++;
         }
         return builder.build();
     }

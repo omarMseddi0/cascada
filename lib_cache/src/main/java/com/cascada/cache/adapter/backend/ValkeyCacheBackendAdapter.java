@@ -59,7 +59,8 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         List<Boolean> presence = new ArrayList<>(keys.size());
         try {
             for (RedisFuture<Long> future : existsFutures) {
-                presence.add(future.get() != null && future.get() > 0);
+                Long exists = future.get();
+                presence.add(exists != null && exists > 0);
             }
         } catch (Exception failure) {
             throw new IllegalStateException("pipelined EXISTS against Valkey failed", failure);

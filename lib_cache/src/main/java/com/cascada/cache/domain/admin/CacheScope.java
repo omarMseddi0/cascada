@@ -32,7 +32,9 @@ public final class CacheScope {
 
     public static CacheScope forTenant(TenantIdentifier tenant) {
         Objects.requireNonNull(tenant, "tenant");
-        return new CacheScope(tenant.asKeyPrefixSegment(), "tenant " + tenant.asKeyPrefixSegment());
+        // The trailing ':' pins the match to the full tenant segment — without it, flushing
+        // tenant "abc" would also sweep "abcd"'s buckets ("abcd:QC:..." startsWith "abc").
+        return new CacheScope(tenant.asKeyPrefixSegment() + ":", "tenant " + tenant.asKeyPrefixSegment());
     }
 
     public static CacheScope forKeyPrefix(String keyPrefix) {

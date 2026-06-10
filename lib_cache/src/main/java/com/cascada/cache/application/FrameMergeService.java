@@ -400,7 +400,13 @@ public final class FrameMergeService {
     }
 
     private long asLong(Object value) {
-        return ((Number) value).longValue();
+        if (!(value instanceof Number number)) {
+            throw new IllegalStateException(
+                    "expected a numeric time-bucket value but got "
+                            + (value == null ? "null" : value.getClass().getSimpleName())
+                            + " — a frame is missing or corrupting its time column");
+        }
+        return number.longValue();
     }
 
     private double asDouble(Object value) {

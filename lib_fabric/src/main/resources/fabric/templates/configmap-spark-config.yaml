@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${sparkConfigMapName}
+  namespace: ${namespace}
+data:
+  spark.json: |
+${sparkJson}

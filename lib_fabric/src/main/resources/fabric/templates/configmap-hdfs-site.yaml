@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${hdfsSiteConfigMapName}
+  namespace: ${namespace}
+data:
+  hdfs-site.xml: |
+${hdfsSiteXml}

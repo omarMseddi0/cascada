@@ -1,0 +1,34 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: ${namespace}
+  name: ${roleName}
+rules:
+# Core objects the Spark-on-Kubernetes driver creates and watches for its executors.
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "pods/exec", "pods/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+- apiGroups: [""]
+  resources: ["services", "endpoints"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Secrets: image-pull + HDFS/Delta credentials the executors mount (read-only is enough).
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list", "watch", "create", "patch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+# Driver Deployment / lifecycle (stop = scale to 0, restart = rollout).
+- apiGroups: ["apps"]
+  resources: ["deployments", "deployments/scale", "replicasets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Spark operator CRD, when the cluster is driven through kubeflow/spark-operator (plan §6.1).
+- apiGroups: ["sparkoperator.k8s.io"]
+  resources: ["sparkapplications", "scheduledsparkapplications"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

@@ -9,7 +9,7 @@ It is the honest "done / not done" map — read it before assuming a capability 
 > hashing, warming, gap analysis) but **never** ports project-specific customizations. See
 > "General-engine principle" below.
 
-Test status: **`mvn -pl lib_cache -am test` → 111 tests, 0 failures.**
+Test status: **`mvn test` (full reactor, all 7 modules) → BUILD SUCCESS, 0 failures (2026-06-10).**
 
 ---
 
@@ -24,7 +24,8 @@ Test status: **`mvn -pl lib_cache -am test` → 111 tests, 0 failures.**
 | Time-series resampling (coarser-only, caller-driven step) | `TimeSeriesBucketResampler` | `MergeMathTest`, `TimeBucketPyramidTest` | §8.14 |
 | Safety-rule bypass guardrails | `*Rule` + registry | `SafetyRulesTest` | §8.18 |
 | **Cube subsumption (roll-up / filter-down / best-subsumer)** | `CubeSubsumptionPlanner`, `QueryShape`, `CachedShapeEntry` | `CubeSubsumptionPlanner*Test` | §8.12, App. I |
-| **Cube data-inconsistency guard** | `CubeConsistencyVerifier` | `CubeConsistencyVerifierTest` (10) | §8.12 |
+| **Cube data-inconsistency guard** | `CubeConsistencyVerifier` | `CubeConsistencyVerifierTest` (12) | §8.12 |
+| **Cube catalog wired into the engine** (register full-window answers, serve verified roll-ups, exact-window only) | `CubeShapeCatalog`, `CacheExecutionEngine` (6-arg ctor), `CascadaEngine.Builder.cubeCatalog` | `CacheExecutionEngineCubeTest` (3) | §8.12 |
 | Cache backends (in-memory + Valkey/Redis via Lettuce) | `InMemoryBlobCacheBackendAdapter`, `ValkeyCacheBackendAdapter` | `CacheAdministrationTest` | §8.16, §8.17 |
 | Cache size + flush admin | `CacheAdministrationService`, `CacheSizeReport`, `CacheScope` | `CacheAdministrationTest` | §8.17 |
 | **Cache value serialization — portable codec + zstd** | `PortableFrameSerializer` | `PortableFrameSerializerTest` | §8.16 |
@@ -36,8 +37,25 @@ Test status: **`mvn -pl lib_cache -am test` → 111 tests, 0 failures.**
 | Sketches (HLL distinct, KLL quantile) — in-process merge | `HyperLogLogDistinctCounter`, `KllQuantileEstimator` | `SketchMergeErrorBoundTest` | §8.13 |
 | SQL canonicalization + gap rewriting (Calcite) | `lib_sql` | `lib_sql` suite | §8.18 |
 | Spark config derivation | `lib_spark_config` | `lib_spark_config` suite | §6 |
+| **Fabric-style cluster deployment** (env-driven YAML templates → `kubectl apply -f` via Fabric8: ServiceAccount + expanded RBAC, HDFS ConfigMaps, executor pod template, `spark.json`/log4j ConfigMaps, driver Deployment + headless Service; apply/stop/restart/delete lifecycle) | `lib_fabric`: `resources/fabric/*` templates, `ClusterValues`, `ClusterManifestRenderer`, `adapter.FabricClusterDeployer` | `lib_fabric` suite (14, incl. Fabric8 mock-server apply/stop/delete) | §6.7 |
 
-### How the new pieces fit (this session's additions)
+### Cube wiring + correctness fixes (2026-06-10 session)
+
+- **`CubeShapeCatalog` wired into `CacheExecutionEngine`** — full-window global-aggregate answers
+  (no deferred ORDER BY/LIMIT, non-time-series) are registered by shape; a later finer query over the
+  **exact same time window** is answered by roll-up, gated by `CubeConsistencyVerifier`, before any
+  bucket/Spark work. Catalog is advisory: `null` or no verified subsumer → reference behaviour.
+- **Bug fix (planner + verifier):** a numeric rolled-away dimension (e.g. a LONG hour bucket grouped
+  by the candidate but not the query) was classified as a measure and *summed* into a fabricated
+  column; both sides shared the flaw so the oracle could not catch it. Now any column in the
+  candidate's group-by is never a measure.
+- **Bug fix (planner + verifier):** IN-list parsing used a naive `split(",")`, so
+  `IN ('a,b', 'c')` produced wrong members and filtered-down wrong rows. Now quote-aware
+  (incl. the SQL `''` escape).
+- **Bug fix (planner + verifier):** filter literals were compared to frame cells stringly, so
+  `device_id = 5` missed a cell stored as `5.0`. Now numeric cells compare numerically.
+
+### How the new pieces fit (earlier session's additions)
 
 - **`ArrowResultFrameSerializer`** — the language-neutral production serializer the port contract
   always named. Same blob envelope (`[4-byte len][zstd lvl-9]`) and same `ColumnType` domain as
@@ -80,13 +98,13 @@ Test status: **`mvn -pl lib_cache -am test` → 111 tests, 0 failures.**
 | **Live Spark+Delta integration test** (real cluster read) | §5, §6 | `SparkDeltaQueryExecutor` is implemented and compiles; it is exercised against a real Delta table in the Kubernetes cluster (the build env here has no cluster), not in the unit build. |
 | **Gluten/Velox acceleration** | §5 | A Spark **config + container-image** concern (plan §5), not separate Java; the `SparkSessionConfigBuilder` is where the gluten keys are layered in by the operator. |
 | **CDF incremental cache maintenance + Delta cold tier** | §8.16 | A Delta-backed cold-tier `CacheBackendPort` and Change-Data-Feed invalidation are pending. |
-| **Cube planner wired into the engine** | §8.12 | `CubeSubsumptionPlanner` + `CubeConsistencyVerifier` exist and are tested, but `CacheExecutionEngine` does not yet consult them before the Spark gap path. |
+| **Cube catalog persistence + cross-window subsumption** | §8.12 | `CubeShapeCatalog` is wired in (exact-time-window, in-memory, verified roll-ups) but is process-local and unbounded; persistence, eviction, and answering a sub-window from a catalogued super-window are pending. |
 | **REST + gRPC/Arrow API surface** (JSON small, Arrow/Parquet bulk, gRPC+protobuf streaming for Angular) | §10 | Not built — Angular frontend will call these; 1M-row results must stream as Arrow/gRPC, never plain JSON. |
 | **Multi-tier cost-aware eviction & cold spill** (RAM→NVMe→object store) | §8.16 | Backends exist; the tier router + eviction policy do not. |
 | **Sketch blob persistence on JDK > 21** | §8.18 | Merge works on any JDK; serialization round-trip disabled on JDK 22 (datasketches-memory 3.0.2). |
-| **Fabric-style cluster lifecycle** (create/stop/restart/resize via templates) | §11 | Not started — the admin console + cluster controller. |
+| **Fabric live integration test** (real cluster apply) | §6.7 | The renderer + Fabric8 deployer (`lib_fabric`) are **done and unit-tested against the Fabric8 mock API server**; exercising them against a real Kubernetes cluster (and placement-affinity intelligence beyond the node-selector) is done in K8s directly, not in the unit build. |
 | **Cluster dashboard / Spark metrics → frontend** | §11.10 | Not started. |
-| **Materialization Studio, NL→SQL, semantic catalog** | §11.8, §9 | Not started. |
+| **Materialization Studio, semantic catalog** | §11.8, §9 | Not started. **No NL→SQL / no AI model** — explicitly out of scope (the engine uses deterministic statistics only). |
 | **REST API surface** | §10 | Not started in `cascada/` (the Python `data_collector` has its own FastAPI). |
 
 ---

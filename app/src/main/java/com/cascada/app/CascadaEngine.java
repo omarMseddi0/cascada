@@ -4,6 +4,7 @@ import com.cascada.cache.application.CacheExecutionConfiguration;
 import com.cascada.cache.application.CacheExecutionEngine;
 import com.cascada.cache.application.ExecuteCachedQueryUseCase;
 import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.port.CacheBackendPort;
 import com.cascada.cache.domain.port.GapQueryRewriterPort;
@@ -70,6 +71,7 @@ public final class CascadaEngine {
         private CacheExecutionConfiguration executionConfiguration = CacheExecutionConfiguration.defaults();
         private CacheConfiguration cacheConfiguration = CacheConfiguration.defaults();
         private SafetyRuleRegistry safetyRuleRegistry = SafetyRuleRegistry.defaultRegistry();
+        private CubeShapeCatalog cubeCatalog = new CubeShapeCatalog();
 
         /** The execution tier: a local/cluster Spark adapter, or the in-process DuckDB executor. */
         public Builder executor(SparkQueryExecutorPort executor) {
@@ -104,14 +106,20 @@ public final class CascadaEngine {
             return this;
         }
 
+        /** The cube subsumption catalog (plan §8.12); pass {@code null} to disable the cube path. */
+        public Builder cubeCatalog(CubeShapeCatalog cubeCatalog) {
+            this.cubeCatalog = cubeCatalog;
+            return this;
+        }
+
         public CascadaEngine build() {
             if (executor == null || cacheBackend == null || tableCatalog == null) {
                 throw new IllegalStateException("executor, cacheBackend and tableCatalog are required");
             }
             GapQueryRewriterPort gapRewriter = new GapQueryRewriterAdapter(
                     executionConfiguration.timeColumnName(), executionConfiguration.bucketSeconds());
-            CacheExecutionEngine cacheExecutionEngine =
-                    new CacheExecutionEngine(cacheBackend, executor, gapRewriter, executionConfiguration);
+            CacheExecutionEngine cacheExecutionEngine = new CacheExecutionEngine(
+                    cacheBackend, executor, gapRewriter, executionConfiguration, null, cubeCatalog);
             QueryHashGenerator queryHashGenerator = new QueryHashGenerator();
             ExecuteCachedQueryUseCase useCase = new ExecuteCachedQueryUseCase(
                     safetyRuleRegistry, cacheConfiguration, queryHashGenerator, cacheExecutionEngine, executor);

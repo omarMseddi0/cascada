@@ -8,6 +8,7 @@ import com.cascada.cache.domain.GapPlan;
 import com.cascada.cache.domain.TimeRange;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.port.CacheBackendPort;
+import com.cascada.cache.domain.port.CoverageIndexPort;
 import com.cascada.cache.domain.port.GapQueryRewriterPort;
 import com.cascada.cache.domain.port.SparkQueryExecutorPort;
 import com.cascada.cache.domain.warming.WarmingQueue;
@@ -51,6 +52,7 @@ public final class WarmingOrchestrator {
     private final WarmingQueue warmingQueue;
     private final QueryPopularityTracker popularityTracker;
     private final MarkovNextQueryPredictor nextQueryPredictor;
+    private final CoverageIndexPort coverageIndex;
     private final long bucketSeconds;
     private final int topNQueries;
 
@@ -61,12 +63,24 @@ public final class WarmingOrchestrator {
                                QueryPopularityTracker popularityTracker,
                                MarkovNextQueryPredictor nextQueryPredictor,
                                long bucketSeconds, int topNQueries) {
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, warmingQueue, popularityTracker,
+                nextQueryPredictor, null, bucketSeconds, topNQueries);
+    }
+
+    /** With a coverage-bitmap index (Appendix J.1): every warmed bucket also sets its coverage bit. */
+    public WarmingOrchestrator(CacheBackendPort cacheBackend, SparkQueryExecutorPort sparkExecutor,
+                               GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
+                               QueryPopularityTracker popularityTracker,
+                               MarkovNextQueryPredictor nextQueryPredictor,
+                               CoverageIndexPort coverageIndex,
+                               long bucketSeconds, int topNQueries) {
         this.cacheBackend = cacheBackend;
         this.sparkExecutor = sparkExecutor;
         this.gapQueryRewriter = gapQueryRewriter;
         this.warmingQueue = warmingQueue;
         this.popularityTracker = popularityTracker;
         this.nextQueryPredictor = nextQueryPredictor;
+        this.coverageIndex = coverageIndex;
         this.bucketSeconds = bucketSeconds > 0 ? bucketSeconds : 86_400L;
         this.topNQueries = Math.max(0, topNQueries);
     }
@@ -158,6 +172,9 @@ public final class WarmingOrchestrator {
             // Cache empty results too (Python caches an empty frame to avoid re-querying).
             ResultFrame frame = sparkExecutor.execute(bucketSql);
             cacheBackend.store(key, frame);
+            if (coverageIndex != null) {
+                coverageIndex.markCached(queryHash, bucketSeconds, currentBucketStart);
+            }
             bucketsWarmed++;
 
             currentBucketStart += bucketSeconds;

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${driverServiceName}
+  namespace: ${namespace}
+spec:
+  clusterIP: None
+  selector:
+    app: ${driverWorkloadName}
+  ports:
+  - name: spark-driver
+    protocol: TCP
+    port: ${driverPort}
+    targetPort: ${driverPort}
+  - name: spark-blockmgr
+    protocol: TCP
+    port: ${blockManagerPort}
+    targetPort: ${blockManagerPort}

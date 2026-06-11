@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Pod
+spec:
+  serviceAccountName: ${serviceAccountName}
+  imagePullSecrets:
+  - name: ${imagePullSecret}
+  nodeSelector:
+    ${placementLabel}: ${placementValue}
+  containers:
+  - name: spark-kubernetes-executor
+    env:
+    - name: HADOOP_USER_NAME
+      value: hadoop
+    volumeMounts:
+    - name: hadoop-config-core
+      mountPath: ${coreSiteMount}
+      subPath: core-site.xml
+      readOnly: true
+    - name: hadoop-config-hdfs
+      mountPath: ${hdfsSiteMount}
+      subPath: hdfs-site.xml
+      readOnly: true
+    - name: hdfs-domain-socket
+      mountPath: ${dnSocketPath}
+      readOnly: false
+    - name: data-volume
+      mountPath: ${dataMountPath}
+      readOnly: false
+  volumes:
+  - name: hadoop-config-core
+    configMap:
+      name: ${coreSiteConfigMapName}
+  - name: hadoop-config-hdfs
+    configMap:
+      name: ${hdfsSiteConfigMapName}
+  - name: hdfs-domain-socket
+    hostPath:
+      path: ${dnSocketPath}
+      type: DirectoryOrCreate
+  - name: data-volume
+    hostPath:
+      path: ${dataHostPath}
+      type: DirectoryOrCreate

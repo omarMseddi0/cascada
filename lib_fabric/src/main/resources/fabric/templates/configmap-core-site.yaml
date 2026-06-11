@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${coreSiteConfigMapName}
+  namespace: ${namespace}
+data:
+  core-site.xml: |
+${coreSiteXml}

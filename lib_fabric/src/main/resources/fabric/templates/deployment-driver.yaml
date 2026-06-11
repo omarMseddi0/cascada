@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${driverWorkloadName}
+  namespace: ${namespace}
+spec:
+  replicas: ${replicas}
+  selector:
+    matchLabels:
+      app: ${driverWorkloadName}
+  template:
+    metadata:
+      labels:
+        app: ${driverWorkloadName}
+    spec:
+      serviceAccountName: ${serviceAccountName}
+      terminationGracePeriodSeconds: 30
+      imagePullSecrets:
+      - name: ${imagePullSecret}
+      nodeSelector:
+        ${placementLabel}: ${placementValue}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: ${driverWorkloadName}
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: spark-driver
+        image: ${containerImage}
+        imagePullPolicy: Always
+        ports:
+        - name: spark-driver
+          containerPort: ${driverPort}
+        - name: spark-blockmgr
+          containerPort: ${blockManagerPort}
+        - name: spark-ui
+          containerPort: 4040
+        env:
+        - name: SPARK_CONFIG_PATH
+          value: ${sparkJsonMount}
+        - name: SPARK_DRIVER_HOST
+          value: ${driverHost}
+        - name: HADOOP_USER_NAME
+          value: hadoop
+        volumeMounts:
+        - name: spark-config-volume
+          mountPath: ${sparkJsonMount}
+          subPath: spark.json
+          readOnly: true
+        - name: spark-log4j-volume
+          mountPath: ${log4jMount}
+          subPath: log4j2.properties
+          readOnly: true
+        - name: spark-executor-pod-template
+          mountPath: ${podTemplateMount}
+          subPath: executor-pod-template.yaml
+          readOnly: true
+        - name: hadoop-config-core
+          mountPath: ${coreSiteMount}
+          subPath: core-site.xml
+          readOnly: true
+        - name: hadoop-config-hdfs
+          mountPath: ${hdfsSiteMount}
+          subPath: hdfs-site.xml
+          readOnly: true
+        - name: hdfs-domain-socket
+          mountPath: ${dnSocketPath}
+          readOnly: false
+        - name: data-volume
+          mountPath: ${dataMountPath}
+          readOnly: false
+      volumes:
+      - name: spark-config-volume
+        configMap:
+          name: ${sparkConfigMapName}
+      - name: spark-log4j-volume
+        configMap:
+          name: ${log4jConfigMapName}
+      - name: spark-executor-pod-template
+        configMap:
+          name: ${podTemplateConfigMapName}
+      - name: hadoop-config-core
+        configMap:
+          name: ${coreSiteConfigMapName}
+      - name: hadoop-config-hdfs
+        configMap:
+          name: ${hdfsSiteConfigMapName}
+      - name: hdfs-domain-socket
+        hostPath:
+          path: ${dnSocketPath}
+          type: DirectoryOrCreate
+      - name: data-volume
+        hostPath:
+          path: ${dataHostPath}
+          type: DirectoryOrCreate

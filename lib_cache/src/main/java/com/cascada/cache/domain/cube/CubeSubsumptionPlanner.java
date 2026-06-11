@@ -176,9 +176,12 @@ public final class CubeSubsumptionPlanner {
         List<String> dimensionColumns = candidate.frame().columnNames().stream()
                 .filter(column -> query.groupBy().contains(column))
                 .toList();
+        // A rolled-away dimension (grouped by the candidate but not the query) is NOT a measure,
+        // even when it is numeric — summing a device id or an hour bucket would fabricate a column.
         List<String> measureColumns = candidate.frame().columnNames().stream()
                 .filter(column -> candidate.frame().columnType(column) != ColumnType.STRING)
                 .filter(column -> !query.groupBy().contains(column))
+                .filter(column -> !candidate.shape().groupBy().contains(column))
                 .toList();
 
         List<AggregationRow> rows = new ArrayList<>();
@@ -204,8 +207,10 @@ public final class CubeSubsumptionPlanner {
             Map<String, Object> values = new LinkedHashMap<>(row.dimensions());
             values.putAll(row.measures());
             for (AverageColumn average : averages) {
+                // Math.round, not a bare cast: counts ride in double measures, and a sum of
+                // doubles can land at 41.999999999999996 — truncation would divide by 41.
                 double reconstructed = averageReconstructionService.reconstructAverageFromStoredSumAndCount(
-                        row.measure(average.sumColumn()), (long) row.measure(average.countColumn()));
+                        row.measure(average.sumColumn()), Math.round(row.measure(average.countColumn())));
                 values.put(average.alias(), reconstructed);
             }
             builder.row(values);
@@ -264,7 +269,8 @@ public final class CubeSubsumptionPlanner {
         if (inMatcher.matches()) {
             String column = inMatcher.group(1);
             Set<String> allowed = parseInList(inMatcher.group(2));
-            return row.containsKey(column) && allowed.contains(String.valueOf(row.get(column)));
+            return row.containsKey(column)
+                    && allowed.stream().anyMatch(literal -> valueEqualsLiteral(row.get(column), literal));
         }
         Matcher equalityMatcher = EQUALITY_FILTER.matcher(filter);
         if (!equalityMatcher.matches()) {
@@ -272,15 +278,69 @@ public final class CubeSubsumptionPlanner {
         }
         String column = equalityMatcher.group(1);
         String expected = equalityMatcher.group(2);
-        return row.containsKey(column) && String.valueOf(row.get(column)).equals(expected);
+        return row.containsKey(column) && valueEqualsLiteral(row.get(column), expected);
     }
 
+    /**
+     * SQL-faithful IN-list split: commas inside single-quoted strings separate nothing, and a doubled
+     * {@code ''} inside quotes is the SQL escape for one literal quote. A naive {@code split(",")}
+     * would turn {@code IN ('a,b', 'c')} into the wrong member set and filter-down wrong rows.
+     */
     private Set<String> parseInList(String rawList) {
         Set<String> values = new java.util.HashSet<>();
-        for (String token : rawList.split(",")) {
-            values.add(token.trim().replaceAll("^'|'$", "").trim());
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        boolean wasQuoted = false;
+        for (int index = 0; index < rawList.length(); index++) {
+            char character = rawList.charAt(index);
+            if (character == '\'') {
+                if (inQuotes && index + 1 < rawList.length() && rawList.charAt(index + 1) == '\'') {
+                    current.append('\'');
+                    index++;
+                    continue;
+                }
+                inQuotes = !inQuotes;
+                wasQuoted = true;
+                continue;
+            }
+            if (!inQuotes && character == ',') {
+                addInListMember(values, current, wasQuoted);
+                current.setLength(0);
+                wasQuoted = false;
+                continue;
+            }
+            if (!inQuotes && Character.isWhitespace(character)) {
+                continue; // padding around members; quoted members keep their internal spaces
+            }
+            current.append(character);
         }
+        addInListMember(values, current, wasQuoted);
         return values;
+    }
+
+    private void addInListMember(Set<String> values, StringBuilder token, boolean wasQuoted) {
+        String member = token.toString();
+        if (wasQuoted || !member.isEmpty()) {
+            values.add(member);
+        }
+    }
+
+    /**
+     * A frame cell vs a filter literal: exact string match, or — when the cell is numeric — numeric
+     * equality, so {@code device_id = 5} still matches a cell stored as {@code 5.0}.
+     */
+    private boolean valueEqualsLiteral(Object cellValue, String literal) {
+        if (String.valueOf(cellValue).equals(literal)) {
+            return true;
+        }
+        if (cellValue instanceof Number number) {
+            try {
+                return number.doubleValue() == Double.parseDouble(literal.trim());
+            } catch (NumberFormatException notANumber) {
+                return false;
+            }
+        }
+        return false;
     }
 
     private Optional<String> filterColumn(String filter) {

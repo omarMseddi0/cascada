@@ -137,9 +137,12 @@ public final class CubeConsistencyVerifier {
                         + "' is absent from the cached frame");
             }
         }
+        // A rolled-away dimension (grouped by the candidate but not the query) is NOT a measure,
+        // even when it is numeric — summing a device id or an hour bucket would fabricate a column.
         List<String> measureColumns = frame.columnNames().stream()
                 .filter(column -> frame.columnType(column) != ColumnType.STRING)
                 .filter(column -> !query.groupBy().contains(column))
+                .filter(column -> !candidate.shape().groupBy().contains(column))
                 .toList();
         List<AverageColumn> averages = requestedAverages(query, measureColumns);
 
@@ -227,7 +230,7 @@ public final class CubeConsistencyVerifier {
             if (!row.containsKey(column)) {
                 throw new UnverifiableRollUp("IN filter on absent column '" + column + "'");
             }
-            return allowed.contains(String.valueOf(row.get(column)));
+            return allowed.stream().anyMatch(literal -> valueEqualsLiteral(row.get(column), literal));
         }
         Matcher equalityMatcher = EQUALITY_FILTER.matcher(filter);
         if (!equalityMatcher.matches()) {
@@ -237,15 +240,69 @@ public final class CubeConsistencyVerifier {
         if (!row.containsKey(column)) {
             throw new UnverifiableRollUp("equality filter on absent column '" + column + "'");
         }
-        return String.valueOf(row.get(column)).equals(equalityMatcher.group(2));
+        return valueEqualsLiteral(row.get(column), equalityMatcher.group(2));
     }
 
+    /**
+     * SQL-faithful IN-list split: commas inside single-quoted strings separate nothing, and a doubled
+     * {@code ''} inside quotes is the SQL escape for one literal quote. A naive {@code split(",")}
+     * would turn {@code IN ('a,b', 'c')} into the wrong member set and filter-down wrong rows.
+     */
     private Set<String> parseInList(String rawList) {
         Set<String> values = new java.util.HashSet<>();
-        for (String token : rawList.split(",")) {
-            values.add(token.trim().replaceAll("^'|'$", "").trim());
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        boolean wasQuoted = false;
+        for (int index = 0; index < rawList.length(); index++) {
+            char character = rawList.charAt(index);
+            if (character == '\'') {
+                if (inQuotes && index + 1 < rawList.length() && rawList.charAt(index + 1) == '\'') {
+                    current.append('\'');
+                    index++;
+                    continue;
+                }
+                inQuotes = !inQuotes;
+                wasQuoted = true;
+                continue;
+            }
+            if (!inQuotes && character == ',') {
+                addInListMember(values, current, wasQuoted);
+                current.setLength(0);
+                wasQuoted = false;
+                continue;
+            }
+            if (!inQuotes && Character.isWhitespace(character)) {
+                continue; // padding around members; quoted members keep their internal spaces
+            }
+            current.append(character);
         }
+        addInListMember(values, current, wasQuoted);
         return values;
+    }
+
+    private void addInListMember(Set<String> values, StringBuilder token, boolean wasQuoted) {
+        String member = token.toString();
+        if (wasQuoted || !member.isEmpty()) {
+            values.add(member);
+        }
+    }
+
+    /**
+     * A frame cell vs a filter literal: exact string match, or — when the cell is numeric — numeric
+     * equality, so {@code device_id = 5} still matches a cell stored as {@code 5.0}.
+     */
+    private boolean valueEqualsLiteral(Object cellValue, String literal) {
+        if (String.valueOf(cellValue).equals(literal)) {
+            return true;
+        }
+        if (cellValue instanceof Number number) {
+            try {
+                return number.doubleValue() == Double.parseDouble(literal.trim());
+            } catch (NumberFormatException notANumber) {
+                return false;
+            }
+        }
+        return false;
     }
 
     private double readNumber(Object value, String what) {

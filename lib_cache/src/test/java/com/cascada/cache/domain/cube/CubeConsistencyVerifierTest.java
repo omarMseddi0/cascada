@@ -67,6 +67,39 @@ class CubeConsistencyVerifierTest {
     }
 
     @Test
+    void confirmsARollUpThatDropsANumericDimensionInsteadOfSummingIt() {
+        // A numeric rolled-away dimension (here a LONG hour bucket) must be dropped by BOTH the
+        // planner and the oracle — neither side may treat it as a summable measure.
+        ResultFrame frame = ResultFrame.builder()
+                .column("appName", ColumnType.STRING)
+                .column("hourBucket", ColumnType.LONG)
+                .column("SUM(latency)", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "hourBucket", 3_600L, "SUM(latency)", 100.0))
+                .row(Map.of("appName", "netflix", "hourBucket", 7_200L, "SUM(latency)", 50.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("appName", "hourBucket"), Set.of(), Set.of("SUM(latency)")), frame);
+        QueryShape query = new QueryShape(Set.of("appName"), Set.of(), Set.of("SUM(latency)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(answer.columnNames()).doesNotContain("hourBucket");
+        assertThat(verifier.verifyRollUp(candidate, query, answer).isConsistent()).isTrue();
+    }
+
+    @Test
+    void confirmsAFilterDownWhoseInListContainsAQuotedComma() {
+        QueryShape query = new QueryShape(Set.of("appName"),
+                Set.of("deviceType IN ('mob,ile', 'tablet')"), Set.of("SUM(latency)"));
+        ResultFrame answer = planner.rollUpAndFilterDown(finest(), query);
+
+        // only the 'tablet' rows qualify; a naive split(",") would also admit plain 'mobile' rows
+        assertThat(verifier.verifyRollUp(finest(), query, answer).isConsistent()).isTrue();
+        assertThat(answer.rowCount()).isEqualTo(1);
+        assertThat(((Number) answer.rows().get(0).get("SUM(latency)")).doubleValue()).isEqualTo(50.0);
+    }
+
+    @Test
     void confirmsAFaithfulAverageReconstruction() {
         QueryShape query = new QueryShape(Set.of("appName"), Set.of(),
                 Set.of("SUM(latency)", "COUNT(latency)", "AVG(latency)"));

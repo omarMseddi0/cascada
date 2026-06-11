@@ -94,6 +94,103 @@ class CubeSubsumptionPlannerTest {
         assertThat(planner.subsumes(query, query)).isTrue();
     }
 
+    @Test
+    void rolledAwayNumericDimensionIsDroppedNotSummedAsAMeasure() {
+        // Candidate grouped by (appName, hourBucket); hourBucket is numeric. Rolling up to appName
+        // must DROP hourBucket — summing it would fabricate a column of added epoch hours.
+        ResultFrame frame = ResultFrame.builder()
+                .column("appName", ColumnType.STRING)
+                .column("hourBucket", ColumnType.LONG)
+                .column("SUM(bytes)", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "hourBucket", 3_600L, "SUM(bytes)", 10.0))
+                .row(Map.of("appName", "netflix", "hourBucket", 7_200L, "SUM(bytes)", 5.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("appName", "hourBucket"), Set.of(), Set.of("SUM(bytes)")), frame);
+        QueryShape query = new QueryShape(Set.of("appName"), Set.of(), Set.of("SUM(bytes)"));
+
+        ResultFrame rolledUp = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(rolledUp.columnNames()).containsExactly("appName", "SUM(bytes)");
+        assertThat(byApp(rolledUp).get("netflix")).isEqualTo(15.0);
+    }
+
+    @Test
+    void inListMembersWithQuotedCommasAreParsedAsSingleMembers() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("appName", ColumnType.STRING)
+                .column("SUM(bytes)", ColumnType.DOUBLE)
+                .row(Map.of("appName", "net,flix", "SUM(bytes)", 10.0))
+                .row(Map.of("appName", "flix", "SUM(bytes)", 99.0))
+                .row(Map.of("appName", "youtube", "SUM(bytes)", 7.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("appName"), Set.of(), Set.of("SUM(bytes)")), frame);
+        QueryShape query = new QueryShape(Set.of("appName"),
+                Set.of("appName IN ('net,flix', 'youtube')"), Set.of("SUM(bytes)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        // a naive split(",") would admit 'flix' (99.0) and drop 'net,flix'
+        Map<String, Double> byApp = byApp(answer);
+        assertThat(byApp).containsOnlyKeys("net,flix", "youtube");
+        assertThat(byApp.get("net,flix")).isEqualTo(10.0);
+    }
+
+    @Test
+    void numericEqualityFilterMatchesACellStoredAsADouble() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("deviceId", ColumnType.DOUBLE)
+                .column("appName", ColumnType.STRING)
+                .column("SUM(bytes)", ColumnType.DOUBLE)
+                .row(Map.of("deviceId", 5.0, "appName", "netflix", "SUM(bytes)", 10.0))
+                .row(Map.of("deviceId", 6.0, "appName", "netflix", "SUM(bytes)", 4.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("appName", "deviceId"), Set.of(), Set.of("SUM(bytes)")), frame);
+        QueryShape query = new QueryShape(Set.of("appName"), Set.of("deviceId = 5"), Set.of("SUM(bytes)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        // the 5.0 cell must match the literal 5; a string-only comparison ("5.0" vs "5") drops the row
+        assertThat(byApp(answer).get("netflix")).isEqualTo(10.0);
+    }
+
+    @Test
+    void inListMembersWithEscapedQuotesMatchTheLiteralQuoteCharacter() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("appName", ColumnType.STRING)
+                .column("SUM(bytes)", ColumnType.DOUBLE)
+                .row(Map.of("appName", "o'brien", "SUM(bytes)", 10.0))
+                .row(Map.of("appName", "obrien", "SUM(bytes)", 99.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("appName"), Set.of(), Set.of("SUM(bytes)")), frame);
+        QueryShape query = new QueryShape(Set.of("appName"),
+                Set.of("appName IN ('o''brien')"), Set.of("SUM(bytes)"));
+
+        Map<String, Double> byApp = byApp(planner.rollUpAndFilterDown(candidate, query));
+
+        assertThat(byApp).containsOnlyKeys("o'brien");
+        assertThat(byApp.get("o'brien")).isEqualTo(10.0);
+    }
+
+    @Test
+    void rejectsAnExtraFilterOnAColumnTheCandidateDidNotGroupBy() {
+        // region is not in the candidate's group-by, so the predicate cannot be applied in memory
+        QueryShape query = new QueryShape(Set.of("appName"),
+                Set.of("region = 'eu'"), Set.of("SUM(bytes)"));
+        assertThat(planner.findSubsumingCacheEntryForQuery(query, List.of(candidateEntry()))).isEmpty();
+    }
+
+    @Test
+    void rejectsAnExtraFilterItCannotParse() {
+        // a range predicate cannot be evaluated against the cached frame in memory
+        QueryShape query = new QueryShape(Set.of("appName"),
+                Set.of("appName LIKE 'net%'"), Set.of("SUM(bytes)"));
+        assertThat(planner.findSubsumingCacheEntryForQuery(query, List.of(candidateEntry()))).isEmpty();
+    }
+
     private Map<String, Double> byApp(ResultFrame frame) {
         Map<String, Double> result = new java.util.HashMap<>();
         for (Map<String, Object> row : frame.rows()) {

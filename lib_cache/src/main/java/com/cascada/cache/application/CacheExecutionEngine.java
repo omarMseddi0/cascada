@@ -4,8 +4,12 @@ import com.cascada.cache.domain.CacheKeyFactory;
 import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.GapPlan;
 import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
+import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.port.CacheBackendPort;
+import com.cascada.cache.domain.port.CoverageIndexPort;
 import com.cascada.cache.domain.port.GapQueryRewriterPort;
 import com.cascada.cache.domain.port.SparkQueryExecutorPort;
 import com.cascada.cache.domain.time.DailyBuckets;
@@ -38,15 +42,43 @@ public final class CacheExecutionEngine {
     private final CacheBackendPort cacheBackend;
     private final SparkQueryExecutorPort sparkExecutor;
     private final GapQueryRewriterPort gapQueryRewriter;
+    private final CoverageIndexPort coverageIndex;
+    private final CubeShapeCatalog cubeCatalog;
     private final FrameMergeService frameMergeService;
     private final TimeBucketCalculator timeBucketCalculator;
     private final CacheExecutionConfiguration configuration;
 
     public CacheExecutionEngine(CacheBackendPort cacheBackend, SparkQueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration) {
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, null);
+    }
+
+    /**
+     * With a coverage-bitmap index (plan Appendix J.1): presence is answered from one bitmap fetch
+     * instead of N pipelined EXISTS commands. The index is advisory — when it has no bitmap for the
+     * family the engine falls back to EXISTS, and a stale present-bit is corrected by the
+     * vanished-bucket guard below, so the index can cost latency but never data.
+     */
+    public CacheExecutionEngine(CacheBackendPort cacheBackend, SparkQueryExecutorPort sparkExecutor,
+                                GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
+                                CoverageIndexPort coverageIndex) {
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, coverageIndex, null);
+    }
+
+    /**
+     * With a cube catalog (plan §8.12): full-window answers are registered by shape, and a later finer
+     * query over the same window is served by verified roll-up before any bucket or Spark work. The
+     * catalog is advisory — when {@code null} or when it has no verified subsumer, behaviour is
+     * byte-identical to the reference engine.
+     */
+    public CacheExecutionEngine(CacheBackendPort cacheBackend, SparkQueryExecutorPort sparkExecutor,
+                                GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
+                                CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog) {
         this.cacheBackend = cacheBackend;
         this.sparkExecutor = sparkExecutor;
         this.gapQueryRewriter = gapQueryRewriter;
+        this.coverageIndex = coverageIndex;
+        this.cubeCatalog = cubeCatalog;
         this.configuration = configuration;
         this.timeBucketCalculator = new TimeBucketCalculator(configuration.bucketSeconds());
         this.frameMergeService =
@@ -54,6 +86,23 @@ public final class CacheExecutionEngine {
     }
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
+        // Cube path (plan §8.12): only global aggregates with no deferred ORDER BY/LIMIT — a LIMIT
+        // would register a truncated frame and a roll-up would not reapply the ordering. The lookup
+        // is exact-time-window only, and every roll-up is verified before it is served.
+        boolean cubeEligible = cubeCatalog != null
+                && !canonicalObject.metadata().isTimeSeries()
+                && !canonicalObject.postProcessing().hasLimit()
+                && !canonicalObject.postProcessing().hasOrderBy();
+        QueryShape queryShape = cubeEligible
+                ? CubeShapeCatalog.shapeOf(canonicalObject.hashComponents())
+                : null;
+        if (cubeEligible) {
+            Optional<ResultFrame> cubeAnswer = cubeCatalog.tryAnswer(canonicalObject.timeRange(), queryShape);
+            if (cubeAnswer.isPresent()) {
+                return cubeAnswer.get();
+            }
+        }
+
         long startTimestamp = canonicalObject.timeRange().startTimestampSeconds();
         long endTimestamp = canonicalObject.timeRange().endTimestampSeconds();
 
@@ -67,15 +116,18 @@ public final class CacheExecutionEngine {
 
         // Fast path 1: nothing cacheable -> run the physical SQL directly.
         if (requiredKeys.isEmpty()) {
-            return sparkExecutor.execute(canonicalObject.physicalSql());
+            return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
+                    sparkExecutor.execute(canonicalObject.physicalSql()));
         }
 
-        List<Boolean> presenceMask = cacheBackend.existsForKeys(requiredKeys);
+        List<Boolean> presenceMask = resolvePresence(queryHash, bodyDays, requiredKeys);
         List<String> cachedKeys = new ArrayList<>();
+        List<Long> cachedDays = new ArrayList<>();
         List<Long> missingDays = new ArrayList<>();
         for (int index = 0; index < requiredKeys.size(); index++) {
             if (Boolean.TRUE.equals(presenceMask.get(index))) {
                 cachedKeys.add(requiredKeys.get(index));
+                cachedDays.add(bodyDays.get(index));
             } else {
                 missingDays.add(bodyDays.get(index));
             }
@@ -83,7 +135,8 @@ public final class CacheExecutionEngine {
 
         // Fast path 2: zero cache hits -> bypass all cache machinery.
         if (cachedKeys.isEmpty()) {
-            return sparkExecutor.execute(canonicalObject.physicalSql());
+            return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
+                    sparkExecutor.execute(canonicalObject.physicalSql()));
         }
 
         GapPlan gapPlan = computeGapPlan(startTimestamp, endTimestamp, bodyDays, missingDays);
@@ -98,15 +151,66 @@ public final class CacheExecutionEngine {
                                     canonicalObject.physicalSql(), gapPlan)), executor)
                     : CompletableFuture.completedFuture(ResultFrame.empty());
 
+            List<Optional<ResultFrame>> cachedFrames = cacheFuture.join();
+
+            // EXISTS->MGET race guard: a bucket present at the EXISTS check can be evicted/expired
+            // before the MGET lands, and its day is NOT in the gap plan — silently skipping it
+            // would merge an answer missing that day's data. Buckets are independent mergeable
+            // ingredients, so the recovery is surgical: re-fetch ONLY the vanished days with one
+            // supplemental gap query, never recompute the whole window.
             List<ResultFrame> allFrames = new ArrayList<>();
-            cacheFuture.join().forEach(maybeFrame -> maybeFrame.ifPresent(allFrames::add));
+            List<Long> vanishedDays = new ArrayList<>();
+            for (int index = 0; index < cachedFrames.size(); index++) {
+                Optional<ResultFrame> maybeFrame = cachedFrames.get(index);
+                if (maybeFrame.isPresent()) {
+                    allFrames.add(maybeFrame.get());
+                } else {
+                    vanishedDays.add(cachedDays.get(index));
+                }
+            }
+
             ResultFrame sparkFrame = sparkFuture.join();
             if (!sparkFrame.isEmpty()) {
                 allFrames.add(sparkFrame);
             }
 
-            return frameMergeService.mergeAndReconstruct(allFrames, canonicalObject);
+            if (!vanishedDays.isEmpty()) {
+                GapPlan vanishedPlan = new GapPlan(Optional.empty(), vanishedDays, Optional.empty());
+                ResultFrame vanishedFrame = sparkExecutor.execute(
+                        gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(), vanishedPlan));
+                if (!vanishedFrame.isEmpty()) {
+                    allFrames.add(vanishedFrame);
+                }
+            }
+
+            return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
+                    frameMergeService.mergeAndReconstruct(allFrames, canonicalObject));
         }
+    }
+
+    /** A complete full-window answer becomes a cube candidate for finer queries over the same window. */
+    private ResultFrame catalogFullWindowAnswer(boolean cubeEligible, CanonicalQueryObject canonicalObject,
+                                                QueryShape queryShape, ResultFrame answer) {
+        if (cubeEligible) {
+            cubeCatalog.register(canonicalObject.timeRange(), queryShape, answer);
+        }
+        return answer;
+    }
+
+    /**
+     * Phase-1 presence: one coverage-bitmap fetch when the index knows this family (Appendix J.1),
+     * otherwise the reference pipelined-EXISTS path. The bitmap is advisory; the vanished-bucket
+     * guard in {@link #execute} corrects any stale present-bit, so this can never lose data.
+     */
+    private List<Boolean> resolvePresence(QueryHash queryHash, List<Long> bodyDays, List<String> requiredKeys) {
+        if (coverageIndex != null) {
+            java.util.Optional<BucketCoverageBitmap> bitmap =
+                    coverageIndex.load(queryHash, configuration.bucketSeconds());
+            if (bitmap.isPresent()) {
+                return bitmap.get().presenceMask(bodyDays);
+            }
+        }
+        return cacheBackend.existsForKeys(requiredKeys);
     }
 
     /**

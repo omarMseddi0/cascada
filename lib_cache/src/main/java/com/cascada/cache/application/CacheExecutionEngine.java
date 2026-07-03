@@ -169,18 +169,24 @@ public final class CacheExecutionEngine {
                 }
             }
 
+            // Submit the vanished-day recovery BEFORE joining the main gap query: it depends only on
+            // the cache fetch, so running it after sparkFuture.join() would serialize two Spark
+            // round-trips where one wall-clock wait suffices.
+            CompletableFuture<ResultFrame> vanishedFuture = vanishedDays.isEmpty()
+                    ? CompletableFuture.completedFuture(ResultFrame.empty())
+                    : CompletableFuture.supplyAsync(
+                            () -> sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
+                                    canonicalObject.physicalSql(),
+                                    new GapPlan(Optional.empty(), vanishedDays, Optional.empty()))), executor);
+
             ResultFrame sparkFrame = sparkFuture.join();
             if (!sparkFrame.isEmpty()) {
                 allFrames.add(sparkFrame);
             }
 
-            if (!vanishedDays.isEmpty()) {
-                GapPlan vanishedPlan = new GapPlan(Optional.empty(), vanishedDays, Optional.empty());
-                ResultFrame vanishedFrame = sparkExecutor.execute(
-                        gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(), vanishedPlan));
-                if (!vanishedFrame.isEmpty()) {
-                    allFrames.add(vanishedFrame);
-                }
+            ResultFrame vanishedFrame = vanishedFuture.join();
+            if (!vanishedFrame.isEmpty()) {
+                allFrames.add(vanishedFrame);
             }
 
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,

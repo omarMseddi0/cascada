@@ -78,9 +78,12 @@ public final class TimeBucketCalculator {
      */
     public GapPlan calculateGaps(long startTimestampSeconds, long endTimestampSeconds, List<Long> cachedDays) {
         DailyBuckets buckets = getDailyBuckets(startTimestampSeconds, endTimestampSeconds);
+        // O(1) membership: cachedDays arrives as a List, and List.contains inside the body loop made
+        // gap analysis O(body x cached) — noticeable on year-long windows.
+        java.util.Set<Long> cachedDaySet = new java.util.HashSet<>(cachedDays);
         List<Long> missingBody = new ArrayList<>();
         for (long day : buckets.body()) {
-            if (!cachedDays.contains(day)) {
+            if (!cachedDaySet.contains(day)) {
                 missingBody.add(day);
             }
         }

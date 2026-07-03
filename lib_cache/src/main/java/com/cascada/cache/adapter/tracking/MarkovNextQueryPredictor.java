@@ -2,7 +2,6 @@ package com.cascada.cache.adapter.tracking;
 
 import com.cascada.identity.domain.QueryHash;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -95,7 +94,7 @@ public final class MarkovNextQueryPredictor {
     private void evictWeakestFollower(Map<QueryHash, Long> followers) {
         QueryHash weakest = null;
         long weakestCount = Long.MAX_VALUE;
-        for (Map.Entry<QueryHash, Long> entry : new ArrayList<>(followers.entrySet())) {
+        for (Map.Entry<QueryHash, Long> entry : followers.entrySet()) {
             if (entry.getValue() < weakestCount) {
                 weakestCount = entry.getValue();
                 weakest = entry.getKey();

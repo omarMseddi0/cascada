@@ -20,7 +20,16 @@ public final class InMemoryCoverageIndexAdapter implements CoverageIndexPort {
 
     @Override
     public Optional<BucketCoverageBitmap> load(QueryHash queryHash, long bucketSeconds) {
-        return Optional.ofNullable(bitmapsByFamily.get(familyKey(queryHash, bucketSeconds)));
+        BucketCoverageBitmap bitmap = bitmapsByFamily.get(familyKey(queryHash, bucketSeconds));
+        if (bitmap == null) {
+            return Optional.empty();
+        }
+        // Snapshot under the same lock the writers hold: handing out the live bitmap would let the
+        // engine read a BitSet mid-mutation (readers never take the write lock). A Valkey adapter
+        // returns a point-in-time copy for free; this keeps the fake's semantics identical.
+        synchronized (bitmap) {
+            return Optional.of(BucketCoverageBitmap.fromBytes(bucketSeconds, bitmap.toBytes()));
+        }
     }
 
     @Override

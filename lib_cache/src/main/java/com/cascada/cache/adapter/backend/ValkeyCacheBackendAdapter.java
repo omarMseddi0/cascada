@@ -48,13 +48,16 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
 
     @Override
     public List<Boolean> existsForKeys(List<String> keys) {
+        // Async commands are pipelined by Lettuce without waiting for replies, so N EXISTS still
+        // cost ~one round trip. Crucially this never calls setAutoFlushCommands(false): that flag
+        // is CONNECTION-wide shared state, and the engine issues MGET/SET from parallel virtual
+        // threads over this same connection — a concurrent writer would have had its commands
+        // silently buffered (stalled) until this reader flushed, or flushed mid-batch.
         RedisAsyncCommands<byte[], byte[]> async = connection.async();
-        async.setAutoFlushCommands(false);
         List<RedisFuture<Long>> existsFutures = new ArrayList<>(keys.size());
         for (String key : keys) {
             existsFutures.add(async.exists(toBytes(key)));
         }
-        async.flushCommands();
 
         List<Boolean> presence = new ArrayList<>(keys.size());
         try {
@@ -62,10 +65,12 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
                 Long exists = future.get();
                 presence.add(exists != null && exists > 0);
             }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while awaiting pipelined EXISTS against Valkey",
+                    interrupted);
         } catch (Exception failure) {
             throw new IllegalStateException("pipelined EXISTS against Valkey failed", failure);
-        } finally {
-            async.setAutoFlushCommands(true);
         }
         return presence;
     }
@@ -124,8 +129,10 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         if (memoryUsage != null) {
             return memoryUsage;
         }
-        byte[] value = sync.get(keyBytes);
-        return value == null ? 0L : value.length;
+        // STRLEN, not GET: the fallback only needs the value's size, and GET would drag the whole
+        // blob over the network once per key during a keyspace walk.
+        Long length = sync.strlen(keyBytes);
+        return length == null ? 0L : length;
     }
 
     /**

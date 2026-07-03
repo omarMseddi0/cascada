@@ -11,6 +11,7 @@ package com.cascada.cache.domain;
 public enum BypassReason {
 
     NO_AGGREGATION,
+    NON_MERGEABLE_SQL_FEATURE,
     IMPOSSIBLE_MATH,
     HIGH_CARDINALITY_GROUP_BY,
     LIQUID_CLUSTERED_FILTER,

@@ -25,6 +25,7 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
 
     private final Map<String, byte[]> blobsByKey = new ConcurrentHashMap<>();
     private final CacheValueSerializerPort serializer;
+    private final java.util.concurrent.atomic.AtomicLong existsCalls = new java.util.concurrent.atomic.AtomicLong();
 
     public InMemoryBlobCacheBackendAdapter(CacheValueSerializerPort serializer) {
         this.serializer = serializer;
@@ -32,6 +33,7 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
 
     @Override
     public List<Boolean> existsForKeys(List<String> keys) {
+        existsCalls.incrementAndGet();
         List<Boolean> presence = new ArrayList<>(keys.size());
         for (String key : keys) {
             presence.add(blobsByKey.containsKey(key));
@@ -89,5 +91,10 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
     /** Test/diagnostic helper: how many buckets are currently stored. */
     public int storedBucketCount() {
         return blobsByKey.size();
+    }
+
+    /** Test/diagnostic helper: how many EXISTS round-trips this backend has served. */
+    public long existsCallCount() {
+        return existsCalls.get();
     }
 }

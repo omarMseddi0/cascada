@@ -7,6 +7,7 @@ import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.GapPlan;
 import com.cascada.cache.domain.TimeRange;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.port.CacheBackendPort;
 import com.cascada.cache.domain.port.CoverageIndexPort;
 import com.cascada.cache.domain.port.GapQueryRewriterPort;
@@ -155,6 +156,16 @@ public final class WarmingOrchestrator {
         int bucketsWarmed = 0;
         int bucketsSkipped = 0;
 
+        // Never re-warm what is already cached: one coverage-bitmap load answers presence for the
+        // whole lookback window (plan J.1) instead of one EXISTS round-trip per bucket — a 55-day
+        // window steady-state costs one fetch and warms only the missing buckets. No bitmap (or
+        // forceOverwrite) falls back to the per-bucket EXISTS check. A stale present-bit can only
+        // skip a warm, never corrupt data: the read path's vanished-bucket guard recomputes that
+        // bucket live as a gap.
+        Optional<BucketCoverageBitmap> coverage = (coverageIndex != null && !forceOverwrite)
+                ? coverageIndex.load(queryHash, bucketSeconds)
+                : Optional.empty();
+
         // README caveat 1: warm only COMPLETE buckets. The bucket key claims the FULL window
         // [bucketStart, bucketStart + bucketSeconds - 1]; storing a frame truncated at warmEnd under
         // that key would permanently undercount — the EXISTS-skip then sees the bucket as present and
@@ -165,7 +176,15 @@ public final class WarmingOrchestrator {
             long bucketEnd = currentBucketStart + bucketSeconds - 1;
             String key = CacheKeyFactory.buildBucketKey(queryHash, currentBucketStart, bucketSeconds);
 
-            if (!forceOverwrite && isAlreadyWarmed(key)) {
+            boolean alreadyWarmed;
+            if (forceOverwrite) {
+                alreadyWarmed = false;
+            } else if (coverage.isPresent()) {
+                alreadyWarmed = coverage.get().isCovered(currentBucketStart);
+            } else {
+                alreadyWarmed = isAlreadyWarmed(key);
+            }
+            if (alreadyWarmed) {
                 bucketsSkipped++;
                 currentBucketStart += bucketSeconds;
                 continue;

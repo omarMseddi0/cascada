@@ -60,6 +60,53 @@ class SafetyRulesTest {
     }
 
     @Nested
+    class NonMergeableSqlFeature {
+
+        private CanonicalQueryObject withSignature(List<String> logicSignature) {
+            return new CanonicalQueryObject(
+                    HashComponents.of(List.of("appName"), List.of("SUM(bytes)"), List.of()),
+                    new TimeRange(0, 2 * DAY - 1), PostProcessing.none(), QueryMetadata.globalAggregate(),
+                    "", List.of(), List.of(), logicSignature);
+        }
+
+        @Test
+        void bypassesDistinct() {
+            // DISTINCT over two buckets is not the union of each bucket's DISTINCT — not mergeable.
+            assertThat(new NonMergeableSqlFeatureRule().evaluate(withSignature(List.of("DISTINCT")),
+                    CacheConfiguration.defaults())).contains(BypassReason.NON_MERGEABLE_SQL_FEATURE);
+        }
+
+        @Test
+        void bypassesHaving() {
+            // HAVING filters the FINAL aggregate; applying it to per-bucket partials filters wrong rows.
+            assertThat(new NonMergeableSqlFeatureRule().evaluate(
+                    withSignature(List.of("HAVING SUM(bytes) > 100")),
+                    CacheConfiguration.defaults())).contains(BypassReason.NON_MERGEABLE_SQL_FEATURE);
+        }
+
+        @Test
+        void bypassesJoinOn() {
+            // A per-bucket join misses pairs whose rows fall in different buckets.
+            assertThat(new NonMergeableSqlFeatureRule().evaluate(
+                    withSignature(List.of("JOIN ON t.userId = d.userId")),
+                    CacheConfiguration.defaults())).contains(BypassReason.NON_MERGEABLE_SQL_FEATURE);
+        }
+
+        @Test
+        void allowsAQueryWithNoLogicSignature() {
+            assertThat(new NonMergeableSqlFeatureRule().evaluate(withSignature(List.of()),
+                    CacheConfiguration.defaults())).isEmpty();
+        }
+
+        @Test
+        void defaultRegistryBypassesTheseBeforeAnyOtherOpinion() {
+            assertThat(SafetyRuleRegistry.defaultRegistry().findFirstBypassReason(
+                    withSignature(List.of("DISTINCT")), CacheConfiguration.defaults()))
+                    .contains(BypassReason.NON_MERGEABLE_SQL_FEATURE);
+        }
+    }
+
+    @Nested
     class ImpossibleMath {
 
         @Test

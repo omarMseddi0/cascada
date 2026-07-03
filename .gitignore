@@ -1,3 +1,9 @@
 target/
 *.class
 .jqwik-database
+
+# private planning docs - never publish
+FULL_PROJECT_PLAN.md
+ARCHITECTURE.md
+IMPLEMENTATION_PLAN.md
+*.private.md

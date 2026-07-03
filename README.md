@@ -28,7 +28,7 @@ imports (no Spring/Spark/Lettuce/Calcite/Jackson), enforced at build time by Arc
 | Module | Contents |
 |---|---|
 | `lib_identity` | Framework-free value objects: `TenantIdentifier`, `SchemaVersion`, `LineageHash`, `QueryHash`, `PolicyVersion` |
-| `lib_cache` | The cache domain + runnable engine: canonical query object, bucket math + pyramid, logic hashing, safety rules, columnar merge (`domain/merge/columnar`), AVG reconstruction, cube subsumption + consistency verifier, DataSketches HLL/KLL buckets, warming queue + popularity tracker + Markov predictor, coverage bitmaps, `ResultFrame` + Arrow/zstd serialization, in-memory + Lettuce/Valkey backends, `CacheExecutionEngine` |
+| `lib_cache` | The cache domain + runnable engine: canonical query object, bucket math + pyramid, logic hashing, safety rules, columnar merge (`domain/merge/columnar`), AVG reconstruction, cube subsumption + consistency verifier, DataSketches HLL/KLL buckets, warming queue + popularity tracker, coverage bitmaps, `ResultFrame` + Arrow/zstd serialization, in-memory + Lettuce/Valkey backends, `CacheExecutionEngine` |
 | `lib_sql` | Calcite SQL compiler: canonical extraction (AVG→SUM/COUNT, group-by/filter/time detection, HAVING/JOIN/DISTINCT logic signature, per-alias aggregate map), MySQL→Spark dialect translation, gap-query builder, cache-correctness simulation gate |
 | `lib_spark_config` | Pure three-knob (RAM/CPU/placement) Spark config derivation, golden-tested key-by-key |
 | `lib_spark` | SparkSession assembly and the Spark/Delta execution adapter |
@@ -109,9 +109,8 @@ The bucket width is configurable (`cache_bucket_hours`); "bucket" below means on
 
 ## No ML in the engine
 
-Warming and prefetch are deterministic statistics: a popularity tracker and a Markov next-query
-predictor, both built and tested. "Gets faster the more you use it" is measured frequency, not a
-learned policy.
+Warming and prefetch are deterministic statistics: a popularity tracker, built and tested. "Gets
+faster the more you use it" is measured frequency, not a learned policy.
 
 ## Next
 

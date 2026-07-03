@@ -1,6 +1,5 @@
 package com.cascada.cache.application;
 
-import com.cascada.cache.adapter.tracking.MarkovNextQueryPredictor;
 import com.cascada.cache.adapter.tracking.QueryPopularityTracker;
 import com.cascada.cache.domain.CacheKeyFactory;
 import com.cascada.cache.domain.CanonicalQueryObject;
@@ -25,8 +24,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * The Java heir to {@code auto_warmer.py}: the application service that pre-computes likely-to-be-hit
  * buckets so the read path finds them already in cache. It ties together the existing warming
- * machinery — the Layer-1 {@link WarmingQueue} (recent misses), the Layer-2 {@link QueryPopularityTracker}
- * (persistent top-N), the {@link MarkovNextQueryPredictor} (speculative drill-downs, plan §8.15) — and
+ * machinery — the Layer-1 {@link WarmingQueue} (recent misses) and the Layer-2
+ * {@link QueryPopularityTracker} (persistent top-N) — and
  * warms each pattern <em>bucket by bucket</em> over the lookback window via the same gap-rewriter and
  * Spark executor the engine uses, so a warmed bucket is byte-identical to one the engine would have
  * computed on a miss (the 100%-data-consistency invariant).
@@ -52,7 +51,6 @@ public final class WarmingOrchestrator {
     private final GapQueryRewriterPort gapQueryRewriter;
     private final WarmingQueue warmingQueue;
     private final QueryPopularityTracker popularityTracker;
-    private final MarkovNextQueryPredictor nextQueryPredictor;
     private final CoverageIndexPort coverageIndex;
     private final long bucketSeconds;
     private final int topNQueries;
@@ -62,17 +60,15 @@ public final class WarmingOrchestrator {
     public WarmingOrchestrator(CacheBackendPort cacheBackend, SparkQueryExecutorPort sparkExecutor,
                                GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
                                QueryPopularityTracker popularityTracker,
-                               MarkovNextQueryPredictor nextQueryPredictor,
                                long bucketSeconds, int topNQueries) {
         this(cacheBackend, sparkExecutor, gapQueryRewriter, warmingQueue, popularityTracker,
-                nextQueryPredictor, null, bucketSeconds, topNQueries);
+                null, bucketSeconds, topNQueries);
     }
 
     /** With a coverage-bitmap index (Appendix J.1): every warmed bucket also sets its coverage bit. */
     public WarmingOrchestrator(CacheBackendPort cacheBackend, SparkQueryExecutorPort sparkExecutor,
                                GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
                                QueryPopularityTracker popularityTracker,
-                               MarkovNextQueryPredictor nextQueryPredictor,
                                CoverageIndexPort coverageIndex,
                                long bucketSeconds, int topNQueries) {
         this.cacheBackend = cacheBackend;
@@ -80,7 +76,6 @@ public final class WarmingOrchestrator {
         this.gapQueryRewriter = gapQueryRewriter;
         this.warmingQueue = warmingQueue;
         this.popularityTracker = popularityTracker;
-        this.nextQueryPredictor = nextQueryPredictor;
         this.coverageIndex = coverageIndex;
         this.bucketSeconds = bucketSeconds > 0 ? bucketSeconds : 86_400L;
         this.topNQueries = Math.max(0, topNQueries);
@@ -95,21 +90,6 @@ public final class WarmingOrchestrator {
         canonicalRegistry.put(queryHash, canonicalObject);
         warmingQueue.vote(queryHash);
         popularityTracker.recordObservation(queryHash);
-    }
-
-    /**
-     * Speculative warming (plan §8.15): after a parent query, enqueue the likely next drill-downs so
-     * they are warm before the user clicks. Only hashes whose canonical we know can be warmed.
-     */
-    public int enqueueSpeculativeNext(QueryHash currentQuery, int howMany) {
-        int enqueued = 0;
-        for (QueryHash predicted : nextQueryPredictor.predictNext(currentQuery, howMany)) {
-            if (canonicalRegistry.containsKey(predicted)) {
-                warmingQueue.vote(predicted);
-                enqueued++;
-            }
-        }
-        return enqueued;
     }
 
     /** One warming cycle over {@code [warmStartTs, warmEndTs]} — Layer 1 then Layer 2, de-duplicated. */

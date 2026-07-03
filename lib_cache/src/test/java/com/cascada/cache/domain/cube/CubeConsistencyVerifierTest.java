@@ -57,6 +57,56 @@ class CubeConsistencyVerifierTest {
     }
 
     @Test
+    void rollsUpAnAliasedMaxByMaximumNotSum() {
+        // README caveat 4: the alias peak_latency hides the max signal from any name heuristic, and
+        // the verifier used the SAME heuristic — so it would confirm a SUMmed roll-up instead of
+        // catching it. Both planner and oracle must take the combine op from the declared spec.
+        ResultFrame frame = ResultFrame.builder()
+                .column("appName", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("peak_latency", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "region", "eu", "peak_latency", 9.0))
+                .row(Map.of("appName", "netflix", "region", "us", "peak_latency", 5.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("appName", "region"), Set.of(),
+                        Set.of("MAX(latency) AS peak_latency")), frame);
+        QueryShape query = new QueryShape(Set.of("appName"), Set.of(),
+                Set.of("MAX(latency) AS peak_latency"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(((Number) answer.rows().get(0).get("peak_latency")).doubleValue())
+                .isEqualTo(9.0); // MAX across regions, not 14.0
+        assertThat(verifier.verifyRollUp(candidate, query, answer).isConsistent()).isTrue();
+    }
+
+    @Test
+    void rejectsASummedRollUpOfAnAliasedMax() {
+        // The oracle must now DISAGREE with the historical wrong answer (the SUM).
+        ResultFrame frame = ResultFrame.builder()
+                .column("appName", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("peak_latency", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "region", "eu", "peak_latency", 9.0))
+                .row(Map.of("appName", "netflix", "region", "us", "peak_latency", 5.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("appName", "region"), Set.of(),
+                        Set.of("MAX(latency) AS peak_latency")), frame);
+        QueryShape query = new QueryShape(Set.of("appName"), Set.of(),
+                Set.of("MAX(latency) AS peak_latency"));
+
+        ResultFrame summedWrongAnswer = ResultFrame.builder()
+                .column("appName", ColumnType.STRING)
+                .column("peak_latency", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "peak_latency", 14.0))
+                .build();
+
+        assertThat(verifier.verifyRollUp(candidate, query, summedWrongAnswer).isConsistent()).isFalse();
+    }
+
+    @Test
     void confirmsAFaithfulSumRollUp() {
         QueryShape query = new QueryShape(Set.of("appName"), Set.of(), Set.of("SUM(latency)"));
         ResultFrame answer = planner.rollUpAndFilterDown(finest(), query);

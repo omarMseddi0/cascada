@@ -3,6 +3,7 @@ package com.cascada.cache.domain.cube;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.merge.AggregateFunctionResolver;
 import com.cascada.cache.domain.merge.AggregationRow;
 import com.cascada.cache.domain.merge.AverageReconstructionService;
 import com.cascada.cache.domain.merge.GlobalAggregateMerger;
@@ -193,8 +194,15 @@ public final class CubeSubsumptionPlanner {
             rows.add(new AggregationRow(dimensions, measures));
         }
 
+        // README caveat 4: combine ops come from the DECLARED aggregate specs (candidate shape first,
+        // then the query's), never from the column name alone — an aliased MAX(latency) AS peak_latency
+        // would otherwise be SUMmed across the rolled-up rows.
+        Map<String, AggregateFunction> declaredAggregates =
+                new LinkedHashMap<>(AggregateFunctionResolver.fromAggregateSpecs(query.aggregates()));
+        declaredAggregates.putAll(AggregateFunctionResolver.fromAggregateSpecs(candidate.shape().aggregates()));
         Map<String, AggregateFunction> aggregations = new LinkedHashMap<>();
-        measureColumns.forEach(measure -> aggregations.put(measure, resolveAggregate(measure)));
+        measureColumns.forEach(measure ->
+                aggregations.put(measure, AggregateFunctionResolver.resolve(measure, declaredAggregates)));
         List<AggregationRow> rolledUp = globalAggregateMerger.merge(rows, aggregations, false);
 
         List<AverageColumn> averages = requestedAverages(query, measureColumns);
@@ -350,17 +358,6 @@ public final class CubeSubsumptionPlanner {
         }
         Matcher equalityMatcher = EQUALITY_FILTER.matcher(filter);
         return equalityMatcher.matches() ? Optional.of(equalityMatcher.group(1)) : Optional.empty();
-    }
-
-    private AggregateFunction resolveAggregate(String column) {
-        String lower = column.toLowerCase(Locale.ROOT);
-        if (lower.startsWith("min(") || lower.startsWith("min_")) {
-            return AggregateFunction.MINIMUM;
-        }
-        if (lower.startsWith("max(") || lower.startsWith("max_")) {
-            return AggregateFunction.MAXIMUM;
-        }
-        return AggregateFunction.SUM;
     }
 
     private String normalize(String aggregate) {

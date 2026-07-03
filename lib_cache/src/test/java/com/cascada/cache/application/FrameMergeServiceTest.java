@@ -33,6 +33,50 @@ class FrameMergeServiceTest {
     }
 
     @Test
+    void combinesAnAliasedMaxByMaximumWhenTheParsedAggregateMapIsPresent() {
+        // README caveat 4: MAX(latency) AS peak_latency stores a column whose NAME carries no max
+        // signal — the old name-sniffing combiner SUMmed it across buckets. The parsed map recorded at
+        // canonicalization time is authoritative.
+        QueryMetadata metadata = QueryMetadata.globalAggregate().withMeasureAggregates(
+                Map.of("peak_latency", com.cascada.cache.domain.merge.AggregateFunction.MAXIMUM));
+        CanonicalQueryObject canonical = globalAgg(List.of("appName"),
+                List.of("MAX(latency)"), metadata);
+
+        ResultFrame monday = ResultFrame.builder()
+                .column("appName", ColumnType.STRING).column("peak_latency", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "peak_latency", 9.0)).build();
+        ResultFrame tuesday = ResultFrame.builder()
+                .column("appName", ColumnType.STRING).column("peak_latency", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "peak_latency", 5.0)).build();
+
+        ResultFrame result = merge.mergeAndReconstruct(List.of(monday, tuesday), canonical);
+
+        assertThat(result.rowCount()).isEqualTo(1);
+        assertThat(((Number) result.rows().get(0).get("peak_latency")).doubleValue())
+                .isEqualTo(9.0); // MAX, not 14.0 (the SUM the sniffing heuristic produced)
+    }
+
+    @Test
+    void combinesAnAliasedMaxByMaximumFromTheAggregateSpecsFallback() {
+        // Same correctness through the aggregate-spec strings alone (older canonical objects that
+        // carry specs but no explicit measure map).
+        QueryMetadata metadata = QueryMetadata.globalAggregate()
+                .withAggregateSpecs(List.of("MAX(latency) AS peak_latency"));
+        CanonicalQueryObject canonical = globalAgg(List.of("appName"),
+                List.of("MAX(latency)"), metadata);
+
+        ResultFrame monday = ResultFrame.builder()
+                .column("appName", ColumnType.STRING).column("peak_latency", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "peak_latency", 3.0)).build();
+        ResultFrame tuesday = ResultFrame.builder()
+                .column("appName", ColumnType.STRING).column("peak_latency", ColumnType.DOUBLE)
+                .row(Map.of("appName", "netflix", "peak_latency", 7.0)).build();
+
+        ResultFrame result = merge.mergeAndReconstruct(List.of(monday, tuesday), canonical);
+        assertThat(((Number) result.rows().get(0).get("peak_latency")).doubleValue()).isEqualTo(7.0);
+    }
+
+    @Test
     void reconstructsAnAdditiveCompositeAliasFromStoredIngredients() {
         // The query asked for SUM(bytesFromClient) + SUM(bytesFromServer) AS total_bytes; the cache
         // stores the two SUM ingredients. Without reconstruction the result lacks total_bytes.

@@ -4,17 +4,17 @@ A lakehouse query engine with a smart bucket cache: queries hit Spark once, then
 merged cached time buckets. The more a workload repeats, the less Spark it needs.
 
 Java 21, Maven multi-module, hexagonal architecture — the `domain` packages have zero framework
-imports (no Spring/Spark/Lettuce/Calcite/Jackson), enforced at build time by ArchUnit. The Python
-under `data_collector/` and `data_explory/` is the reference implementation this was ported from;
-it is not run in production.
+imports (no Spring/Spark/Lettuce/Calcite/Jackson), enforced at build time by ArchUnit.
 
 ## How it answers a query
 
 1. **Compile** — Calcite parses the SQL, extracts a canonical object (aggregates, group-by,
    filters, time range, step, HAVING/JOIN/DISTINCT signature) and a deterministic logic hash.
 2. **Guard** — safety rules decide if the query is cacheable at all (must aggregate, must have a
-   time column, no high-cardinality group-by, step compatible with the bucket grid, ...).
-   Anything unsafe bypasses straight to Spark. Correctness beats hit rate, always.
+   time column, no high-cardinality group-by, step compatible with the bucket grid — and no
+   DISTINCT/HAVING/JOIN, which are not mergeable across buckets: the distinct set of two days is
+   not the union of each day's distinct set). Anything unsafe bypasses straight to Spark.
+   Correctness beats hit rate, always.
 3. **Cover** — the coverage bitmap answers "which buckets are cached" in one fetch instead of one
    EXISTS per bucket. Cube subsumption can answer a coarse query from a finer cached shape.
 4. **Fetch + fill** — cached buckets (MGET) and the Spark gap query run in parallel on virtual
@@ -30,7 +30,7 @@ it is not run in production.
 | `lib_identity` | Framework-free value objects: `TenantIdentifier`, `SchemaVersion`, `LineageHash`, `QueryHash`, `PolicyVersion` |
 | `lib_cache` | The cache domain + runnable engine: canonical query object, bucket math + pyramid, logic hashing, safety rules, columnar merge (`domain/merge/columnar`), AVG reconstruction, cube subsumption + consistency verifier, DataSketches HLL/KLL buckets, warming queue + popularity tracker + Markov predictor, coverage bitmaps, `ResultFrame` + Arrow/zstd serialization, in-memory + Lettuce/Valkey backends, `CacheExecutionEngine` |
 | `lib_sql` | Calcite SQL compiler: canonical extraction (AVG→SUM/COUNT, group-by/filter/time detection, HAVING/JOIN/DISTINCT logic signature, per-alias aggregate map), MySQL→Spark dialect translation, gap-query builder, cache-correctness simulation gate |
-| `lib_spark_config` | Pure three-knob (RAM/CPU/placement) Spark config derivation, golden-tested against the reference `spark.json` |
+| `lib_spark_config` | Pure three-knob (RAM/CPU/placement) Spark config derivation, golden-tested key-by-key |
 | `lib_spark` | SparkSession assembly and the Spark/Delta execution adapter |
 | `lib_fabric` | Cluster deployment: env-driven K8s YAML templates applied via Fabric8 (ServiceAccount/RBAC, ConfigMaps, executor pod template, driver Deployment), tested against the Fabric8 mock server |
 | `app` | Wiring. `mvn -Plocal-spark` bundles real Spark 3.5 + Delta for a local `local[*]` run (JDK 17 toolchain, or add-opens on newer) |
@@ -69,13 +69,15 @@ built at canonicalization), never from sniffing column names.
 - The logic hash ignores the time range and clause order, but changes with aggregates, group-by,
   filters, step, HAVING, JOIN ON conditions, and DISTINCT — and stays byte-stable for queries
   that use none of the new signature (no cold-cache event on upgrade).
+- DISTINCT, HAVING, and JOIN bypass the cache entirely (`NON_MERGEABLE_SQL_FEATURE`): their
+  per-bucket partials cannot be recombined into the whole-window answer.
 - Warming stops at the last **complete** bucket boundary; a mid-bucket `warmEnd` never stores a
   partial bucket under a full-bucket key.
 - A query with no aggregate bypasses the cache (`NO_AGGREGATION`) instead of having a GROUP BY
   fabricated for it.
 - `MAX(latency) AS peak_latency` merges as MAX across buckets, and the cube consistency verifier
   rejects the old SUMmed answer.
-- The zero-config derivation reproduces the reference `spark.json` key-by-key and never
+- The zero-config derivation reproduces the golden `spark.json` key-by-key and never
   oversubscribes RAM.
 - ArchUnit fails the build if a framework import enters a `domain` package.
 

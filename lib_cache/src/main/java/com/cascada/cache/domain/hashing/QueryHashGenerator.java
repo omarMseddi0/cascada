@@ -58,6 +58,14 @@ public final class QueryHashGenerator {
             hashDna.put("composite_aliases", new TreeMap<>(compositeAliases));
         }
 
+        // README caveats 5 & 6: HAVING, JOIN ON conditions and DISTINCT change the answer, so they
+        // MUST change the key. Folded in only when present, so every query that has none of them
+        // keeps its historical hash (no cold-cache event on upgrade).
+        List<String> logicSignature = canonicalObject.logicSignature();
+        if (!logicSignature.isEmpty()) {
+            hashDna.put("logic_signature", sortedCopy(logicSignature));
+        }
+
         return CanonicalJsonWriter.write(hashDna);
     }
 

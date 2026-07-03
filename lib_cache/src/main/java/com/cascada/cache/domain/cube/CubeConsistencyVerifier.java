@@ -2,6 +2,8 @@ package com.cascada.cache.domain.cube;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.merge.AggregateFunctionResolver;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -149,6 +151,14 @@ public final class CubeConsistencyVerifier {
         Set<String> extraFilters = new java.util.HashSet<>(query.filters());
         extraFilters.removeAll(candidate.shape().filters());
 
+        // README caveat 4: the combine op comes from the DECLARED aggregate specs (candidate shape
+        // first, then the query's own), never from the column name alone — otherwise an aliased
+        // MAX(latency) AS peak_latency is SUMmed here too and this "independent" oracle confirms the
+        // planner's identical mistake instead of catching it.
+        Map<String, AggregateFunction> declaredAggregates =
+                new LinkedHashMap<>(AggregateFunctionResolver.fromAggregateSpecs(query.aggregates()));
+        declaredAggregates.putAll(AggregateFunctionResolver.fromAggregateSpecs(candidate.shape().aggregates()));
+
         Map<Map<String, String>, Map<String, Double>> groups = new LinkedHashMap<>();
         for (Map<String, Object> row : frame.rows()) {
             if (!allFiltersMatch(row, extraFilters)) {
@@ -161,21 +171,11 @@ public final class CubeConsistencyVerifier {
             Map<String, Double> combined = groups.computeIfAbsent(key, ignored -> new TreeMap<>());
             for (String measure : measureColumns) {
                 double value = readNumber(row.get(measure), "measure '" + measure + "'");
-                combined.merge(measure, value, combinerFor(measure));
+                AggregateFunction combiner = AggregateFunctionResolver.resolve(measure, declaredAggregates);
+                combined.merge(measure, value, combiner::combine);
             }
         }
         return new Oracle(dimensionColumns, measureColumns, averages, groups);
-    }
-
-    private java.util.function.BiFunction<Double, Double, Double> combinerFor(String measure) {
-        String lower = measure.toLowerCase(Locale.ROOT);
-        if (lower.startsWith("min(") || lower.startsWith("min_")) {
-            return Math::min;
-        }
-        if (lower.startsWith("max(") || lower.startsWith("max_")) {
-            return Math::max;
-        }
-        return Double::sum; // SUM and COUNT both combine additively (RC4: never average averages).
     }
 
     private List<AverageColumn> requestedAverages(QueryShape query, List<String> measureColumns) {

@@ -31,6 +31,35 @@ class SafetyRulesTest {
     }
 
     @Nested
+    class RequiresAggregation {
+
+        @Test
+        void bypassesAPlainRowFetchSelectWithNoAggregate() {
+            // README caveat 7: without this rule a raw SELECT passed every guardrail and the merge
+            // fabricated a GROUP BY + SUM the user never wrote.
+            CanonicalQueryObject query = query(List.of(), List.of(),
+                    List.of("appName = 'netflix'"), new TimeRange(0, DAY - 1), QueryMetadata.globalAggregate());
+            assertThat(new RequiresAggregationRule().evaluate(query, CacheConfiguration.defaults()))
+                    .contains(BypassReason.NO_AGGREGATION);
+        }
+
+        @Test
+        void allowsAnyQueryWithAtLeastOneAggregate() {
+            CanonicalQueryObject query = query(List.of("appName"), List.of("SUM(bytes)"),
+                    List.of(), new TimeRange(0, DAY - 1), QueryMetadata.globalAggregate());
+            assertThat(new RequiresAggregationRule().evaluate(query, CacheConfiguration.defaults())).isEmpty();
+        }
+
+        @Test
+        void defaultRegistryBypassesAggregatelessQueriesFirst() {
+            CanonicalQueryObject query = query(List.of(), List.of(), List.of(),
+                    new TimeRange(0, 2 * DAY - 1), QueryMetadata.globalAggregate());
+            assertThat(SafetyRuleRegistry.defaultRegistry().findFirstBypassReason(query,
+                    CacheConfiguration.defaults())).contains(BypassReason.NO_AGGREGATION);
+        }
+    }
+
+    @Nested
     class ImpossibleMath {
 
         @Test

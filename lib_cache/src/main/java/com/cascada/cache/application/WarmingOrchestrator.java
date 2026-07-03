@@ -155,9 +155,14 @@ public final class WarmingOrchestrator {
         int bucketsWarmed = 0;
         int bucketsSkipped = 0;
 
+        // README caveat 1: warm only COMPLETE buckets. The bucket key claims the FULL window
+        // [bucketStart, bucketStart + bucketSeconds - 1]; storing a frame truncated at warmEnd under
+        // that key would permanently undercount — the EXISTS-skip then sees the bucket as present and
+        // never recomputes it, so the hole can never self-heal. The trailing partial bucket is simply
+        // not warmed; the read path computes it live as a gap, exactly as on any miss.
         long currentBucketStart = Math.floorDiv(warmStartTimestampSeconds, bucketSeconds) * bucketSeconds;
-        while (currentBucketStart <= warmEndTimestampSeconds) {
-            long bucketEnd = Math.min(currentBucketStart + bucketSeconds - 1, warmEndTimestampSeconds);
+        while (currentBucketStart + bucketSeconds - 1 <= warmEndTimestampSeconds) {
+            long bucketEnd = currentBucketStart + bucketSeconds - 1;
             String key = CacheKeyFactory.buildBucketKey(queryHash, currentBucketStart, bucketSeconds);
 
             if (!forceOverwrite && isAlreadyWarmed(key)) {

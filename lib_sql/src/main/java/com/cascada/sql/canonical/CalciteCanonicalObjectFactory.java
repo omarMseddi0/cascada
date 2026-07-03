@@ -6,6 +6,7 @@ import com.cascada.cache.domain.OrderByClause;
 import com.cascada.cache.domain.PostProcessing;
 import com.cascada.cache.domain.QueryMetadata;
 import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.sql.calcite.CalciteSql;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
@@ -57,8 +58,11 @@ public final class CalciteCanonicalObjectFactory {
         List<String> groupBy = extractGroupBy(select);
         Map<String, String> compositeAliases = new LinkedHashMap<>();
         List<String> aggregateSpecs = new ArrayList<>();
-        List<String> rawAggregateExpressions = extractAggregates(select, aggregateSpecs, compositeAliases);
+        Map<String, AggregateFunction> measureAggregates = new LinkedHashMap<>();
+        List<String> rawAggregateExpressions =
+                extractAggregates(select, aggregateSpecs, compositeAliases, measureAggregates);
         List<String> projectionSignature = extractProjectionSignature(select);
+        List<String> logicSignature = extractLogicSignature(select);
 
         TimeRangeExtraction timeExtraction = extractTimeRangeAndFilters(select, timeDimensionMap);
         if (timeExtraction.timeRange().isEmpty()) {
@@ -82,12 +86,13 @@ public final class CalciteCanonicalObjectFactory {
                 compositeAliases,
                 shape.userStepSeconds(),
                 shape.preserveRawTimeSeries(),
-                aggregateSpecs);
+                aggregateSpecs,
+                measureAggregates);
 
         PostProcessing postProcessing = new PostProcessing(extractLimit(parsed), extractOrderBy(parsed));
 
         return new CanonicalQueryObject(hashComponents, timeExtraction.timeRange().orElseThrow(), postProcessing,
-                metadata, sql, extractSourceSignature(select), projectionSignature);
+                metadata, sql, extractSourceSignature(select), projectionSignature, logicSignature);
     }
 
     // --- parsing ---------------------------------------------------------------------------------
@@ -120,7 +125,8 @@ public final class CalciteCanonicalObjectFactory {
     // --- aggregates ------------------------------------------------------------------------------
 
     private List<String> extractAggregates(SqlSelect select, List<String> aggregateSpecsOut,
-                                           Map<String, String> compositeAliasesOut) {
+                                           Map<String, String> compositeAliasesOut,
+                                           Map<String, AggregateFunction> measureAggregatesOut) {
         List<String> rawAggregateExpressions = new ArrayList<>();
         for (SqlNode item : select.getSelectList()) {
             SqlNode expression = item;
@@ -144,6 +150,19 @@ public final class CalciteCanonicalObjectFactory {
             boolean isComposite = aggregatesInItem.size() > 1 || !isSingleAggregateCall(expression);
             if (isComposite && aliasName != null) {
                 compositeAliasesOut.put(aliasName, CalciteSql.unparse(expression));
+            }
+
+            // README caveat 4: record the PARSED aggregate function per output column while the AST
+            // is still in hand. The merge path must never re-derive the combine op from the column
+            // name — an alias like MAX(latency) AS peak_latency hides the max signal and would be
+            // SUMmed across buckets. AVG is deliberately absent: it is decomposed into SUM/COUNT
+            // ingredient columns whose names carry their (additive) combine op exactly.
+            if (!isComposite && expression instanceof SqlBasicCall single) {
+                AggregateFunction function = combineFunctionFor(single.getOperator().getName());
+                if (function != null) {
+                    String outputColumn = aliasName != null ? aliasName : CalciteSql.unparse(expression);
+                    measureAggregatesOut.put(outputColumn, function);
+                }
             }
 
             String spec = aliasName != null
@@ -174,6 +193,57 @@ public final class CalciteCanonicalObjectFactory {
             if (operand != null) {
                 collectAggregateFunctions(operand, collector);
             }
+        }
+    }
+
+    /** Maps a parsed aggregate keyword to its cross-bucket combine op; {@code null} when not simple. */
+    private AggregateFunction combineFunctionFor(String operatorName) {
+        return switch (operatorName.toUpperCase(Locale.ROOT)) {
+            case "SUM" -> AggregateFunction.SUM;
+            case "COUNT" -> AggregateFunction.COUNT;
+            case "MIN" -> AggregateFunction.MINIMUM;
+            case "MAX" -> AggregateFunction.MAXIMUM;
+            default -> null;
+        };
+    }
+
+    // --- logic signature (HAVING / JOIN ON / DISTINCT) --------------------------------------------
+
+    /**
+     * Extracts the logic markers that are neither group-by, aggregate, filter nor projection but
+     * still change the answer (README caveats 5 and 6): the {@code HAVING} expression, every
+     * {@code JOIN ... ON} condition, and the {@code DISTINCT} flag. These feed the logic hash via
+     * {@link CanonicalQueryObject#logicSignature()} — without them a query with {@code HAVING}
+     * (or different join keys, or {@code SELECT DISTINCT}) collides on the cache key of its
+     * unfiltered sibling and one of the two is served the other's rows. Full canonicalization of
+     * the HAVING/ON expressions is not required for correctness here: the normalized unparse is
+     * deterministic, so equal intents share a key and different intents never do (the unparse may
+     * split hairs two semantically equal spellings apart, which only costs a recompute, never a
+     * wrong answer).
+     */
+    private List<String> extractLogicSignature(SqlSelect select) {
+        List<String> logicSignature = new ArrayList<>();
+        if (select.isDistinct()) {
+            logicSignature.add("DISTINCT");
+        }
+        if (select.getHaving() != null) {
+            logicSignature.add("HAVING " + CalciteSql.unparse(select.getHaving()));
+        }
+        if (select.getFrom() != null) {
+            collectJoinConditions(select.getFrom(), logicSignature);
+        }
+        return new ArrayList<>(new TreeSet<>(logicSignature));
+    }
+
+    private void collectJoinConditions(SqlNode from, List<String> logicSignatureOut) {
+        if (from.getKind() != SqlKind.JOIN) {
+            return;
+        }
+        org.apache.calcite.sql.SqlJoin join = (org.apache.calcite.sql.SqlJoin) from;
+        collectJoinConditions(join.getLeft(), logicSignatureOut);
+        collectJoinConditions(join.getRight(), logicSignatureOut);
+        if (join.getCondition() != null) {
+            logicSignatureOut.add("JOIN ON " + CalciteSql.unparse(join.getCondition()));
         }
     }
 

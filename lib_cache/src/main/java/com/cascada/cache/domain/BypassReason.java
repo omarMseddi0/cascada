@@ -10,6 +10,7 @@ package com.cascada.cache.domain;
  */
 public enum BypassReason {
 
+    NO_AGGREGATION,
     IMPOSSIBLE_MATH,
     HIGH_CARDINALITY_GROUP_BY,
     LIQUID_CLUSTERED_FILTER,

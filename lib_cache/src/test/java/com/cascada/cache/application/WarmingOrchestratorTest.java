@@ -132,6 +132,40 @@ class WarmingOrchestratorTest {
     }
 
     @Test
+    void neverWarmsTheTrailingPartialBucket() {
+        // README caveat 1: with warmEnd mid-bucket (e.g. "now"), the truncated last bucket must NOT be
+        // stored under the full-bucket key — the EXISTS-skip would then treat the partial frame as the
+        // whole bucket forever (permanent undercount with no self-healing). Warming stops at the last
+        // COMPLETE bucket boundary; the live partial bucket stays a gap for the read path to compute.
+        WarmingOrchestrator orchestrator =
+                orchestrator(new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor());
+        CanonicalQueryObject canonical = canonical(
+                "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
+
+        long midThirdBucket = 2 * DAY + 12_345; // "now" is inside day 2
+        WarmingOrchestrator.PatternWarmingResult result =
+                orchestrator.warmSinglePattern(A, canonical, 0, midThirdBucket, false);
+
+        assertThat(result.bucketsWarmed()).isEqualTo(2); // days 0 and 1 only — day 2 is incomplete
+        assertThat(sparkCalls.get()).isEqualTo(2);
+        String partialBucketKey = com.cascada.cache.domain.CacheKeyFactory.buildBucketKey(A, 2 * DAY, DAY);
+        assertThat(backend.existsForKeys(List.of(partialBucketKey))).containsExactly(false);
+    }
+
+    @Test
+    void warmsTheLastBucketWhenTheWindowEndsExactlyOnItsBoundary() {
+        WarmingOrchestrator orchestrator =
+                orchestrator(new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor());
+        CanonicalQueryObject canonical = canonical(
+                "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
+
+        WarmingOrchestrator.PatternWarmingResult result =
+                orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, false); // inclusive boundary
+
+        assertThat(result.bucketsWarmed()).isEqualTo(3); // all three buckets are complete
+    }
+
+    @Test
     void speculativeWarmingEnqueuesPredictedNextDrillDowns() {
         WarmingQueue queue = new WarmingQueue();
         MarkovNextQueryPredictor predictor = new MarkovNextQueryPredictor();

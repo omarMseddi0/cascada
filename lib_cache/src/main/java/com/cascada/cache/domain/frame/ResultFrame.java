@@ -1,6 +1,7 @@
 package com.cascada.cache.domain.frame;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,7 +52,9 @@ public final class ResultFrame {
     }
 
     public List<Map<String, Object>> rows() {
-        return List.copyOf(rows);
+        // Unmodifiable VIEW, not a copy: rows() is called inside per-frame loops on the merge and
+        // serialization hot paths, and copying the whole list each call made those loops O(n^2).
+        return Collections.unmodifiableList(rows);
     }
 
     public int rowCount() {

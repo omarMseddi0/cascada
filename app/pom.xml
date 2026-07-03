@@ -42,4 +42,26 @@
             <scope>provided</scope>
         </dependency>
     </dependencies>
+
+    <profiles>
+        <!-- `mvn -Plocal-spark ...` bundles the REAL Spark + Delta runtime so the app runs a
+             local[*] SparkSession with Delta tables outside the cluster image. Spark 3.5.x
+             officially supports Java 17, so run this profile on a JDK 17 toolchain (or add the
+             usual add-opens flags on newer JDKs). -->
+        <profile>
+            <id>local-spark</id>
+            <dependencies>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-sql_2.12</artifactId>
+                    <version>3.5.6</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>delta-spark_2.12</artifactId>
+                    <version>3.3.0</version>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
 </project>

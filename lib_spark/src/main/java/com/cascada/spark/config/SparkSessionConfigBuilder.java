@@ -50,7 +50,12 @@ public final class SparkSessionConfigBuilder {
 
     /** A Kubernetes session (the production data plane): {@code k8s://...} master. */
     public static SparkSessionConfigBuilder forKubernetes() {
-        return new SparkSessionConfigBuilder().master(DEFAULT_KUBERNETES_MASTER);
+        SparkSessionConfigBuilder builder = new SparkSessionConfigBuilder().master(DEFAULT_KUBERNETES_MASTER);
+        // K8s has no external shuffle service: if the operator's spark.json enables dynamic
+        // allocation, it is only legal with shuffle tracking — default it on so a spark.json that
+        // omits the key doesn't produce a session that refuses to start. spark.json still wins.
+        builder.properties.put("spark.dynamicAllocation.shuffleTracking.enabled", "true");
+        return builder;
     }
 
     public SparkSessionConfigBuilder appName(String appName) {

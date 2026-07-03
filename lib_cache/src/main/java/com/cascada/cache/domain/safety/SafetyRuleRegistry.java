@@ -28,6 +28,7 @@ public final class SafetyRuleRegistry {
     public static SafetyRuleRegistry defaultRegistry() {
         return new SafetyRuleRegistry(List.of(
                 new RequiresAggregationRule(),
+                new NonMergeableSqlFeatureRule(),
                 new ImpossibleMathRule(),
                 new HighCardinalityGroupByRule(),
                 new LiquidClusteredFilterRule(),

@@ -166,6 +166,49 @@ class WarmingOrchestratorTest {
     }
 
     @Test
+    void coverageBitmapSkipsWarmedBucketsWithoutAnyPerBucketExistsRoundTrip() {
+        // A 55-day lookback must NOT pay 55 EXISTS calls every cycle: with a coverage index, one
+        // bitmap load answers presence for the whole window and only the missing buckets are warmed.
+        com.cascada.cache.adapter.index.InMemoryCoverageIndexAdapter coverageIndex =
+                new com.cascada.cache.adapter.index.InMemoryCoverageIndexAdapter();
+        WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(),
+                passthroughGap, new WarmingQueue(), new QueryPopularityTracker(),
+                new MarkovNextQueryPredictor(), coverageIndex, DAY, 10);
+        CanonicalQueryObject canonical = canonical(
+                "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
+
+        orchestrator.warmSinglePattern(A, canonical, 0, 55 * DAY - 1, false); // day 0..54 warmed + bits set
+        sparkCalls.set(0);
+        long existsCallsBefore = backend.existsCallCount();
+
+        WarmingOrchestrator.PatternWarmingResult next =
+                orchestrator.warmSinglePattern(A, canonical, 0, 56 * DAY - 1, false); // one new day
+
+        assertThat(next.bucketsSkipped()).isEqualTo(55);
+        assertThat(next.bucketsWarmed()).isEqualTo(1);   // only day 55 computed
+        assertThat(sparkCalls.get()).isEqualTo(1);
+        assertThat(backend.existsCallCount()).isEqualTo(existsCallsBefore); // zero EXISTS round-trips
+    }
+
+    @Test
+    void forceOverwriteIgnoresTheCoverageBitmap() {
+        com.cascada.cache.adapter.index.InMemoryCoverageIndexAdapter coverageIndex =
+                new com.cascada.cache.adapter.index.InMemoryCoverageIndexAdapter();
+        WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(),
+                passthroughGap, new WarmingQueue(), new QueryPopularityTracker(),
+                new MarkovNextQueryPredictor(), coverageIndex, DAY, 10);
+        CanonicalQueryObject canonical = canonical(
+                "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
+        orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, false);
+        sparkCalls.set(0);
+
+        WarmingOrchestrator.PatternWarmingResult forced =
+                orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, true);
+        assertThat(forced.bucketsWarmed()).isEqualTo(3); // data-change signal recomputes everything
+        assertThat(sparkCalls.get()).isEqualTo(3);
+    }
+
+    @Test
     void speculativeWarmingEnqueuesPredictedNextDrillDowns() {
         WarmingQueue queue = new WarmingQueue();
         MarkovNextQueryPredictor predictor = new MarkovNextQueryPredictor();

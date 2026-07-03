@@ -75,6 +75,10 @@ public final class SparkConfigurationDeriver {
         if (memorySplit.offHeapGigabytes() > 0) {
             entries.put("spark.memory.offHeap.enabled", "true");
             entries.put("spark.memory.offHeap.size", memorySplit.offHeapGigabytes() + "g");
+            // The reserved overhead must reach Kubernetes explicitly: without this key Spark adds its
+            // own default (10% of heap) ON TOP of heap + off-heap, and the pod exceeds the RAM knob —
+            // the scheduler then rejects or OOMKills the executor.
+            entries.put("spark.executor.memoryOverhead", memorySplit.overheadGigabytes() + "g");
         }
 
         // --- Delta extension / catalog / file sizing (always on; advisory size tracks the profile) ---
@@ -99,6 +103,9 @@ public final class SparkConfigurationDeriver {
 
         // --- Dynamic allocation from the placement budget ---
         entries.put("spark.dynamicAllocation.enabled", "true");
+        // On Kubernetes there is no external shuffle service, so dynamic allocation is only legal
+        // with shuffle tracking — without this key Spark refuses to start the application at all.
+        entries.put("spark.dynamicAllocation.shuffleTracking.enabled", "true");
         entries.put("spark.dynamicAllocation.minExecutors", Integer.toString(executorPlacement.minimumExecutors()));
         entries.put("spark.dynamicAllocation.maxExecutors", Integer.toString(executorPlacement.maximumExecutors()));
 

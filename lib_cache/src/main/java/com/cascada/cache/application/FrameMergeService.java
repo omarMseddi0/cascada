@@ -181,7 +181,7 @@ public final class FrameMergeService {
                     dimensionCodes[d][r] = encoder.encode(String.valueOf(row.get(dimensionColumns.get(d))));
                 }
                 for (int m = 0; m < measures.length; m++) {
-                    measures[m][r] = asDouble(row.get(measureColumns.get(m)));
+                    measures[m][r] = asMeasure(row.get(measureColumns.get(m)));
                 }
                 r++;
             }
@@ -259,7 +259,7 @@ public final class FrameMergeService {
                     }
                 }
                 for (int m = 0; m < measures.length; m++) {
-                    measures[m][r] = asDouble(row.get(measureColumns.get(m)));
+                    measures[m][r] = asMeasure(row.get(measureColumns.get(m)));
                 }
                 r++;
             }
@@ -524,6 +524,16 @@ public final class FrameMergeService {
 
     private double asDouble(Object value) {
         return ((Number) value).doubleValue();
+    }
+
+    /**
+     * A measure cell for the columnar hot loop: {@code null} (a NULL aggregate from Spark or a
+     * serializer round-trip) maps to {@link Double#NaN}, the aggregator's "absent in this row"
+     * marker — the same semantics {@code GlobalAggregateMerger} gives missing cells, instead of an
+     * NPE that would fail the whole merge.
+     */
+    private double asMeasure(Object value) {
+        return value == null ? Double.NaN : ((Number) value).doubleValue();
     }
 
     private Object toComparable(Object value) {

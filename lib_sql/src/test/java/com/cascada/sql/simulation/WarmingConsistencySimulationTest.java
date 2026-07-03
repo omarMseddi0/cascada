@@ -2,7 +2,6 @@ package com.cascada.sql.simulation;
 
 import com.cascada.cache.adapter.backend.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.tracking.MarkovNextQueryPredictor;
 import com.cascada.cache.adapter.tracking.QueryPopularityTracker;
 import com.cascada.cache.application.CacheExecutionConfiguration;
 import com.cascada.cache.application.CacheExecutionEngine;
@@ -122,7 +121,7 @@ class WarmingConsistencySimulationTest {
         QueryHash hash = hashGenerator.generateQueryHash(canonical, DirectComputeOracle.FIXED_STEP_SECONDS);
         InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
         WarmingOrchestrator warmer = new WarmingOrchestrator(backend, oracle, gapRewriter,
-                new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor(), DAY, 10);
+                new WarmingQueue(), new QueryPopularityTracker(), DAY, 10);
         warmer.recordQuery(hash, canonical);
 
         WarmingOrchestrator.WarmingReport report = warmer.warmCycle(START, END, false);
@@ -137,7 +136,7 @@ class WarmingConsistencySimulationTest {
         InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
 
         WarmingOrchestrator warmer = new WarmingOrchestrator(backend, oracle, gapRewriter,
-                new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor(), DAY, 10);
+                new WarmingQueue(), new QueryPopularityTracker(), DAY, 10);
         warmer.recordQuery(hash, canonical);
         warmer.warmCycle(START, END, false);
 

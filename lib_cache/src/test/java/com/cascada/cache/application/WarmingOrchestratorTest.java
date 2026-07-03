@@ -2,7 +2,6 @@ package com.cascada.cache.application;
 
 import com.cascada.cache.adapter.backend.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.tracking.MarkovNextQueryPredictor;
 import com.cascada.cache.adapter.tracking.QueryPopularityTracker;
 import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.HashComponents;
@@ -24,8 +23,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Verifies the warming orchestration ({@code _perform_warming_cycle} / {@code _warm_single_pattern_sequential}):
- * Layer-1 queue drain, Layer-2 top-N de-duplication, per-bucket EXISTS-skip, force-overwrite, and
- * speculative Markov enqueue — using a fake Spark that counts executions and the real in-memory backend.
+ * Layer-1 queue drain, Layer-2 top-N de-duplication, per-bucket EXISTS-skip, and force-overwrite —
+ * using a fake Spark that counts executions and the real in-memory backend.
  */
 class WarmingOrchestratorTest {
 
@@ -51,16 +50,15 @@ class WarmingOrchestratorTest {
                 sql, List.of("traffic"), List.of());
     }
 
-    private WarmingOrchestrator orchestrator(WarmingQueue queue, QueryPopularityTracker tracker,
-                                             MarkovNextQueryPredictor predictor) {
+    private WarmingOrchestrator orchestrator(WarmingQueue queue, QueryPopularityTracker tracker) {
         return new WarmingOrchestrator(backend, sql -> fakeResult(), passthroughGap,
-                queue, tracker, predictor, DAY, 10);
+                queue, tracker, DAY, 10);
     }
 
     @Test
     void warmsEveryBodyBucketForEachQueuedPattern() {
         WarmingOrchestrator orchestrator =
-                orchestrator(new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor());
+                orchestrator(new WarmingQueue(), new QueryPopularityTracker());
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
         orchestrator.recordQuery(B, canonical("SELECT appName, SUM(bytes) FROM other WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
 
@@ -75,7 +73,7 @@ class WarmingOrchestratorTest {
     @Test
     void skipsAlreadyWarmedBucketsOnTheSecondCycle() {
         QueryPopularityTracker tracker = new QueryPopularityTracker();
-        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker, new MarkovNextQueryPredictor());
+        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker);
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
 
         orchestrator.warmCycle(0, 3 * DAY - 1, false); // Layer 1 warms 3 buckets
@@ -91,7 +89,7 @@ class WarmingOrchestratorTest {
     @Test
     void forceOverwriteRewarmsEvenAlreadyWarmedBuckets() {
         QueryPopularityTracker tracker = new QueryPopularityTracker();
-        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker, new MarkovNextQueryPredictor());
+        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker);
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
         orchestrator.warmCycle(0, 3 * DAY - 1, false);
         sparkCalls.set(0);
@@ -104,7 +102,7 @@ class WarmingOrchestratorTest {
     @Test
     void layer2DoesNotDoubleWarmAHashLayer1AlreadyCovered() {
         QueryPopularityTracker tracker = new QueryPopularityTracker();
-        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker, new MarkovNextQueryPredictor());
+        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker);
         // record twice so the tracker definitely has it in top-N, and the queue has one vote
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
@@ -117,7 +115,7 @@ class WarmingOrchestratorTest {
     @Test
     void perBucketExistsSkipWarmsOnlyTheNewlyRequestedBucket() {
         WarmingOrchestrator orchestrator =
-                orchestrator(new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor());
+                orchestrator(new WarmingQueue(), new QueryPopularityTracker());
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
@@ -138,7 +136,7 @@ class WarmingOrchestratorTest {
         // whole bucket forever (permanent undercount with no self-healing). Warming stops at the last
         // COMPLETE bucket boundary; the live partial bucket stays a gap for the read path to compute.
         WarmingOrchestrator orchestrator =
-                orchestrator(new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor());
+                orchestrator(new WarmingQueue(), new QueryPopularityTracker());
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
@@ -155,7 +153,7 @@ class WarmingOrchestratorTest {
     @Test
     void warmsTheLastBucketWhenTheWindowEndsExactlyOnItsBoundary() {
         WarmingOrchestrator orchestrator =
-                orchestrator(new WarmingQueue(), new QueryPopularityTracker(), new MarkovNextQueryPredictor());
+                orchestrator(new WarmingQueue(), new QueryPopularityTracker());
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
@@ -173,7 +171,7 @@ class WarmingOrchestratorTest {
                 new com.cascada.cache.adapter.index.InMemoryCoverageIndexAdapter();
         WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(),
                 passthroughGap, new WarmingQueue(), new QueryPopularityTracker(),
-                new MarkovNextQueryPredictor(), coverageIndex, DAY, 10);
+                coverageIndex, DAY, 10);
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
@@ -196,7 +194,7 @@ class WarmingOrchestratorTest {
                 new com.cascada.cache.adapter.index.InMemoryCoverageIndexAdapter();
         WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(),
                 passthroughGap, new WarmingQueue(), new QueryPopularityTracker(),
-                new MarkovNextQueryPredictor(), coverageIndex, DAY, 10);
+                coverageIndex, DAY, 10);
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
         orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, false);
@@ -206,20 +204,5 @@ class WarmingOrchestratorTest {
                 orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, true);
         assertThat(forced.bucketsWarmed()).isEqualTo(3); // data-change signal recomputes everything
         assertThat(sparkCalls.get()).isEqualTo(3);
-    }
-
-    @Test
-    void speculativeWarmingEnqueuesPredictedNextDrillDowns() {
-        WarmingQueue queue = new WarmingQueue();
-        MarkovNextQueryPredictor predictor = new MarkovNextQueryPredictor();
-        WarmingOrchestrator orchestrator = orchestrator(queue, new QueryPopularityTracker(), predictor);
-        orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
-        orchestrator.recordQuery(B, canonical("SELECT appName, SUM(bytes) FROM other WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
-        queue.consumeAll(); // clear the votes from recordQuery
-        predictor.recordTransition(A, B);
-
-        int enqueued = orchestrator.enqueueSpeculativeNext(A, 3);
-        assertThat(enqueued).isEqualTo(1);          // only B is known + predicted
-        assertThat(queue.consumeAll()).containsExactly(B);
     }
 }

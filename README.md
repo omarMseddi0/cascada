@@ -1,27 +1,7 @@
 # Cascada
 
-A lakehouse query engine with a smart bucket cache: queries hit Spark once, then answer from
-merged cached time buckets. The more a workload repeats, the less Spark it needs.
+A lakehouse query engine with a smart bucket cache
 
-Java 21, Maven multi-module, hexagonal architecture — the `domain` packages have zero framework
-imports (no Spring/Spark/Lettuce/Calcite/Jackson), enforced at build time by ArchUnit.
-
-## How it answers a query
-
-1. **Compile** — Calcite parses the SQL, extracts a canonical object (aggregates, group-by,
-   filters, time range, step, HAVING/JOIN/DISTINCT signature) and a deterministic logic hash.
-2. **Guard** — safety rules decide if the query is cacheable at all (must aggregate, must have a
-   time column, no high-cardinality group-by, step compatible with the bucket grid — and no
-   DISTINCT/HAVING/JOIN, which are not mergeable across buckets: the distinct set of two days is
-   not the union of each day's distinct set). Anything unsafe bypasses straight to Spark.
-   Correctness beats hit rate, always.
-3. **Cover** — the coverage bitmap answers "which buckets are cached" in one fetch instead of one
-   EXISTS per bucket. Cube subsumption can answer a coarse query from a finer cached shape.
-4. **Fetch + fill** — cached buckets (MGET) and the Spark gap query run in parallel on virtual
-   threads.
-5. **Merge** — the columnar merge engine combines partial buckets: dictionary-encoded group keys
-   packed into primitive arrays, open-addressed hashing, tight `double[]` loops. AVG is never
-   stored — SUM and COUNT are, and the divide happens once at the end.
 
 ## Modules
 
@@ -107,14 +87,6 @@ The bucket width is configurable (`cache_bucket_hours`); "bucket" below means on
 5. **Sketch blob serialization is deferred** — `datasketches-memory 3.0.2` refuses JDK > 21. The
    cross-bucket sketch *merge* works and is tested on any JDK.
 
-## No ML in the engine
 
-Warming and prefetch are deterministic statistics: a popularity tracker, built and tested. "Gets
-faster the more you use it" is measured frequency, not a learned policy.
 
-## Next
 
-Per `ARCHITECTURE.md` §12 and `FULL_PROJECT_PLAN.md`: the auto-profiler, the service shells
-(api_gateway, query_service, spark_orchestrator), the live Spark/Delta adapter wiring, the zone-
-sketch sidecars (plan Appendix J.3), and the Appendix L track (CDF bucket patching, per-family
-zstd dictionaries, hot-bucket fission).

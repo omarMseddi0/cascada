@@ -1,14 +1,14 @@
 package com.cascada.cache.admin;
 
-import com.cascada.cache.adapter.backend.InMemoryBlobCacheBackendAdapter;
-import com.cascada.cache.adapter.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.CacheAdministrationService;
+import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
+import com.cascada.cache.application.service.CacheAdministrationService;
 import com.cascada.cache.domain.admin.CacheKeyTenantSegment;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.port.CacheBackendPort;
+import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.identity.domain.TenantIdentifier;
 import org.junit.jupiter.api.Test;
 

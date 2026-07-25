@@ -1,6 +1,6 @@
 package com.cascada.cache.warming;
 
-import com.cascada.cache.adapter.tracking.QueryPopularityTracker;
+import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
 import com.cascada.cache.domain.warming.WarmingQueue;
 import com.cascada.identity.domain.QueryHash;
 import org.junit.jupiter.api.Test;

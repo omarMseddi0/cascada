@@ -1,4 +1,4 @@
-package com.cascada.sql.canonical;
+package com.cascada.sql.adapter.calcite;
 
 import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;

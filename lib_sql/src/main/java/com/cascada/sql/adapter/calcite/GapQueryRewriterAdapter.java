@@ -1,7 +1,7 @@
-package com.cascada.sql.rewrite;
+package com.cascada.sql.adapter.calcite;
 
 import com.cascada.cache.domain.GapPlan;
-import com.cascada.cache.domain.port.GapQueryRewriterPort;
+import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 
 /**
  * Adapts the Apache Calcite-based {@link GapQueryBuilder} to the cache's {@link GapQueryRewriterPort}, so

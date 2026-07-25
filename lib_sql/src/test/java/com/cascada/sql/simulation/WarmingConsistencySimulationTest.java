@@ -1,11 +1,12 @@
 package com.cascada.sql.simulation;
 
-import com.cascada.cache.adapter.backend.InMemoryBlobCacheBackendAdapter;
-import com.cascada.cache.adapter.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.tracking.QueryPopularityTracker;
-import com.cascada.cache.application.CacheExecutionConfiguration;
-import com.cascada.cache.application.CacheExecutionEngine;
-import com.cascada.cache.application.WarmingOrchestrator;
+import com.cascada.cache.application.port.in.WarmCacheUseCase;
+import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
+import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
+import com.cascada.cache.application.service.CacheExecutionConfiguration;
+import com.cascada.cache.application.service.CacheExecutionEngine;
+import com.cascada.cache.application.service.WarmingOrchestrator;
 import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.HashComponents;
 import com.cascada.cache.domain.PostProcessing;
@@ -16,7 +17,7 @@ import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.warming.WarmingQueue;
 import com.cascada.identity.domain.QueryHash;
-import com.cascada.sql.rewrite.GapQueryRewriterAdapter;
+import com.cascada.sql.adapter.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.simulation.DirectComputeOracle.MeasureSpec;
 import com.cascada.sql.simulation.DirectComputeOracle.TrafficEvent;
 import org.junit.jupiter.api.Test;
@@ -124,7 +125,7 @@ class WarmingConsistencySimulationTest {
                 new WarmingQueue(), new QueryPopularityTracker(), DAY, 10);
         warmer.recordQuery(hash, canonical);
 
-        WarmingOrchestrator.WarmingReport report = warmer.warmCycle(START, END, false);
+        WarmCacheUseCase.Report report = warmer.warmCycle(START, END, false);
         assertThat(report.bucketsWarmed()).isEqualTo(3); // exactly the three body days
         assertThat(backend.storedBucketCount()).isEqualTo(3);
     }

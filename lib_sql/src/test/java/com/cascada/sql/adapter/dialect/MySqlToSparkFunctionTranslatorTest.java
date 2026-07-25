@@ -1,4 +1,4 @@
-package com.cascada.sql.translate;
+package com.cascada.sql.adapter.dialect;
 
 import org.junit.jupiter.api.Test;
 

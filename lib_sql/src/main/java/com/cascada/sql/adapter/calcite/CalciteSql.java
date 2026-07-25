@@ -1,6 +1,6 @@
-package com.cascada.sql.calcite;
+package com.cascada.sql.adapter.calcite;
 
-import com.cascada.sql.canonical.UnsupportedSqlException;
+import com.cascada.sql.domain.UnsupportedSqlException;
 import org.apache.calcite.config.Lex;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlNode;

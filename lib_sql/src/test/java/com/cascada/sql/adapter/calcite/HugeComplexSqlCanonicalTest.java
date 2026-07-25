@@ -1,5 +1,6 @@
-package com.cascada.sql.canonical;
+package com.cascada.sql.adapter.calcite;
 
+import com.cascada.sql.domain.UnsupportedSqlException;
 import com.cascada.cache.domain.CanonicalQueryObject;
 import org.junit.jupiter.api.Test;
 

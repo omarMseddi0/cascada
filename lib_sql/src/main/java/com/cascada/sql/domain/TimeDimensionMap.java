@@ -1,4 +1,4 @@
-package com.cascada.sql.canonical;
+package com.cascada.sql.domain;
 
 import java.util.Locale;
 import java.util.Set;

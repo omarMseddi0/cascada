@@ -23,23 +23,8 @@ mvn -N install   # parent BOM, first time only
 mvn test
 ```
 
-JDK 21+ (developed on JDK 22 with `--release 21`), Maven 3.9+. 335 tests, all green.
 
-## The merge engine is columnar on purpose
 
-Merging cached buckets used to walk `Map<String,Object>` rows — every cell boxed, every group key
-a rebuilt string. On the canonical shape (30 buckets × 288 steps × 20 groups ≈ 170K rows) that was
-millions of short-lived objects per merge; GC, not arithmetic, set the tail latency. The rewrite
-follows what Spark's `HashAggregateExec` and its sketch code do:
-
-- dimensions are dictionary-encoded to `int` ids once, group keys pack into a single `long`
-- measures live in `double[]` accumulators indexed by an open-addressed `long→slot` table
-- SUM/COUNT/MIN/MAX combine in tight primitive loops the JIT can vectorize
-- `GlobalAggregateMerger` and `TimeSeriesBucketResampler` are thin row-object adapters over the
-  same `ColumnarHashAggregator`, so the row-level API and its tests are unchanged
-
-The combine function for every measure comes from the **parsed aggregate** (an alias→function map
-built at canonicalization), never from sniffing column names.
 
 ## What the tests pin down
 
@@ -70,22 +55,7 @@ off-heap, so `spark.memory.offHeap.size` takes ~60% of executor RAM and the JVM 
 the per-query kill switch; any Gluten failure retries once with it off. Verify with `EXPLAIN`
 (look for `VeloxNativeScan`); many `VeloxColumnarToRowExec` boundaries mean a mostly-fallback plan.
 
-## Known limitations
 
-The bucket width is configurable (`cache_bucket_hours`); "bucket" below means one configured span.
-
-1. **Global-aggregate dedup can undercount.** Non-time-series partial rows carry no bucket
-   identity, so byte-identical rows from two different buckets collapse before summing. The
-   overlap this dedup protects against cannot occur (the gap plan excludes cached buckets), so
-   the fix is to drop or bucket-tag the dedup on this path.
-2. **A time column is mandatory.** Tables without one cannot be bucket-cached and must bypass to
-   Spark.
-3. **`SELECT AVG(x), SUM(x)` can drop the user's SUM.** AVG reconstruction rewrites AVG to
-   SUM/COUNT and may swallow a SUM the user also selected in its own right.
-4. **`TimeBucketPyramid.assemble` is latent.** It mishandles the head partial and the current
-   bucket; it is not wired into the live path and must be fixed before it is.
-5. **Sketch blob serialization is deferred** — `datasketches-memory 3.0.2` refuses JDK > 21. The
-   cross-bucket sketch *merge* works and is tested on any JDK.
 
 
 

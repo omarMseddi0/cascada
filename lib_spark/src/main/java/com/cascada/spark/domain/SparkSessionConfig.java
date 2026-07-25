@@ -1,4 +1,4 @@
-package com.cascada.spark.config;
+package com.cascada.spark.domain;
 
 import java.util.LinkedHashMap;
 import java.util.Map;

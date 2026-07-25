@@ -2,7 +2,7 @@ package com.cascada.sql.simulation;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.port.SparkQueryExecutorPort;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -15,14 +15,14 @@ import java.util.regex.Pattern;
 /**
  * The independent ground-truth engine for the cache-correctness gate â€” the Java heir to the Tablesaw
  * "direct compute" oracle in {@code in_memory_simulation.py}. It aggregates fake events in-process and
- * also serves as the fake {@link SparkQueryExecutorPort}: when the cache engine hands it a (gap or
+ * also serves as the fake {@link QueryExecutorPort}: when the cache engine hands it a (gap or
  * full) SQL string, it extracts the {@code ts} ranges from that SQL and aggregates only those events,
  * exactly as a real Spark gap query would.
  *
  * <p>Cache buckets are computed at the fixed internal step (300s); the ground truth is computed
  * independently at the user's step, so a match proves the engine's merge does the same math.
  */
-final class DirectComputeOracle implements SparkQueryExecutorPort {
+final class DirectComputeOracle implements QueryExecutorPort {
 
     static final int FIXED_STEP_SECONDS = 300;
     private static final Pattern TS_RANGE =

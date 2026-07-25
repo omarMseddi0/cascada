@@ -1,4 +1,4 @@
-package com.cascada.sql.rewrite;
+package com.cascada.sql.adapter.calcite;
 
 import com.cascada.cache.domain.GapPlan;
 import com.cascada.cache.domain.TimeRange;

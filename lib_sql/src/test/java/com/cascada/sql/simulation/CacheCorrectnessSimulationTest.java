@@ -1,9 +1,9 @@
 package com.cascada.sql.simulation;
 
-import com.cascada.cache.adapter.backend.InMemoryBlobCacheBackendAdapter;
-import com.cascada.cache.adapter.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.CacheExecutionConfiguration;
-import com.cascada.cache.application.CacheExecutionEngine;
+import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
+import com.cascada.cache.application.service.CacheExecutionConfiguration;
+import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.domain.CacheKeyFactory;
 import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.HashComponents;
@@ -13,9 +13,9 @@ import com.cascada.cache.domain.TimeRange;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;
-import com.cascada.cache.domain.port.GapQueryRewriterPort;
+import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.identity.domain.QueryHash;
-import com.cascada.sql.rewrite.GapQueryRewriterAdapter;
+import com.cascada.sql.adapter.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.simulation.DirectComputeOracle.MeasureSpec;
 import com.cascada.sql.simulation.DirectComputeOracle.TrafficEvent;
 import org.junit.jupiter.api.Test;

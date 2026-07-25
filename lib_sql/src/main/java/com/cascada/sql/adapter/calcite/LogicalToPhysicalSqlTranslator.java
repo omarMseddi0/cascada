@@ -1,7 +1,9 @@
-package com.cascada.sql.translate;
+package com.cascada.sql.adapter.calcite;
 
-import com.cascada.sql.calcite.CalciteSql;
-import com.cascada.sql.canonical.UnsupportedSqlException;
+import com.cascada.sql.domain.RegisteredTable;
+import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
+import com.cascada.sql.domain.TableCatalog;
+import com.cascada.sql.domain.UnsupportedSqlException;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
@@ -32,14 +34,39 @@ import java.util.Optional;
  * {@code delta.`/the/path`} afterwards, guaranteeing valid Spark SQL. Anything Calcite cannot parse
  * bypasses to Spark via {@link UnsupportedSqlException}.
  */
-public final class LogicalToPhysicalSqlTranslator {
+public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslatorPort {
 
     private static final String DELTA_TABLE_SENTINEL = "CASCADA_DELTA_TABLE_SENTINEL";
 
     private final int bucketStepSeconds;
+    private final TableCatalog boundCatalog;
 
+    /**
+     * Bare translator: the catalog is supplied per call via {@link #translate(String, TableCatalog)}.
+     * Use {@link #LogicalToPhysicalSqlTranslator(int, TableCatalog)} when you need the
+     * {@link LogicalSqlTranslatorPort} form.
+     */
     public LogicalToPhysicalSqlTranslator(int bucketStepSeconds) {
+        this(bucketStepSeconds, null);
+    }
+
+    /**
+     * Binds a catalog so this translator satisfies {@link LogicalSqlTranslatorPort} — the seam the
+     * cache side depends on. The port method takes only the SQL string, so the catalog (a piece of
+     * deployment configuration, not query input) is captured here at wiring time.
+     */
+    public LogicalToPhysicalSqlTranslator(int bucketStepSeconds, TableCatalog boundCatalog) {
         this.bucketStepSeconds = bucketStepSeconds;
+        this.boundCatalog = boundCatalog;
+    }
+
+    @Override
+    public String translateToPhysicalSql(String logicalSql) {
+        if (boundCatalog == null) {
+            throw new IllegalStateException(
+                    "no TableCatalog was bound at construction; use translate(sql, catalog) instead");
+        }
+        return translate(logicalSql, boundCatalog);
     }
 
     public String translate(String logicalSql, TableCatalog catalog) {

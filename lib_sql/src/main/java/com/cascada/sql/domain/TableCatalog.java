@@ -1,4 +1,4 @@
-package com.cascada.sql.translate;
+package com.cascada.sql.domain;
 
 import java.util.HashMap;
 import java.util.Locale;

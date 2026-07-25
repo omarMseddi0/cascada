@@ -1,5 +1,8 @@
-package com.cascada.sql.canonical;
+package com.cascada.sql.adapter.calcite;
 
+import com.cascada.sql.domain.AggregateNormalizer;
+import com.cascada.sql.domain.TimeDimensionMap;
+import com.cascada.sql.domain.UnsupportedSqlException;
 import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.HashComponents;
 import com.cascada.cache.domain.OrderByClause;
@@ -7,7 +10,8 @@ import com.cascada.cache.domain.PostProcessing;
 import com.cascada.cache.domain.QueryMetadata;
 import com.cascada.cache.domain.TimeRange;
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.sql.calcite.CalciteSql;
+import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
+import com.cascada.sql.adapter.calcite.CalciteSql;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlIdentifier;
@@ -41,7 +45,17 @@ import java.util.TreeSet;
  * without an extractable time range raises {@link UnsupportedSqlException} so the caller bypasses to
  * Spark rather than caching a guess.
  */
-public final class CalciteCanonicalObjectFactory {
+public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort {
+
+    /**
+     * The {@link SqlCanonicalizerPort} entry point — this is the seam the cache actually depends on.
+     * It delegates to {@link #extractCanonicalObjectFromSql(String)} with the default time-dimension
+     * map; use the two-argument overload directly when a domain supplies its own time column names.
+     */
+    @Override
+    public CanonicalQueryObject canonicalize(String physicalSql) {
+        return extractCanonicalObjectFromSql(physicalSql);
+    }
 
     private static final Set<String> AGGREGATE_FUNCTION_NAMES = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX");
 

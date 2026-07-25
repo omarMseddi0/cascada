@@ -1,4 +1,4 @@
-package com.cascada.sql.canonical;
+package com.cascada.sql.domain;
 
 /**
  * Thrown when a SQL statement cannot be canonicalised for caching — it does not parse, is not a

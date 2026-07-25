@@ -1,6 +1,6 @@
-package com.cascada.sql.translate;
+package com.cascada.sql.adapter.dialect;
 
-import com.cascada.sql.calcite.CalciteSql;
+import com.cascada.sql.adapter.calcite.CalciteSql;
 
 import java.util.LinkedHashMap;
 import java.util.Map;

@@ -2,7 +2,6 @@ package com.cascada.sql.adapter.calcite;
 
 import com.cascada.cache.domain.GapPlan;
 import com.cascada.cache.domain.TimeRange;
-import com.cascada.sql.adapter.calcite.CalciteSql;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlIdentifier;

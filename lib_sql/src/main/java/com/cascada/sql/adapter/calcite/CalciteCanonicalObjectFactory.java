@@ -11,7 +11,6 @@ import com.cascada.cache.domain.QueryMetadata;
 import com.cascada.cache.domain.TimeRange;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
-import com.cascada.sql.adapter.calcite.CalciteSql;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlIdentifier;

@@ -1,4 +1,4 @@
-package com.cascada.fabric;
+package com.cascada.fabric.domain;
 
 import org.junit.jupiter.api.Test;
 

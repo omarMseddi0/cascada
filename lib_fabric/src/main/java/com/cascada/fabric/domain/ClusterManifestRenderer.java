@@ -1,4 +1,4 @@
-package com.cascada.fabric;
+package com.cascada.fabric.domain;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,7 +16,7 @@ import java.util.Map;
  * (the HDFS XML, {@code spark.json}, log4j, and the executor pod template) into their ConfigMaps.
  *
  * <p>No YAML is built in Java and there is no Kubernetes dependency here — that lives in
- * {@code com.cascada.fabric.adapter.FabricClusterDeployer}. This class is pure string templating, so it
+ * {@code com.cascada.fabric.adapter.out.kubernetes.FabricClusterDeployer}. This class is pure string templating, so it
  * is fast and trivially unit-testable.
  */
 public final class ClusterManifestRenderer {

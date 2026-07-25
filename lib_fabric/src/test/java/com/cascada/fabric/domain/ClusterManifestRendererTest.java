@@ -1,10 +1,10 @@
-package com.cascada.fabric;
+package com.cascada.fabric.domain;
 
+import com.cascada.fabric.application.port.out.EnvironmentPort;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.function.UnaryOperator;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -13,7 +13,7 @@ class ClusterManifestRendererTest {
     private final ClusterManifestRenderer renderer = new ClusterManifestRenderer();
 
     private ClusterValues values(Map<String, String> env) {
-        UnaryOperator<String> lookup = env::get;
+        EnvironmentPort lookup = env::get;
         return ClusterValues.fromEnvironment(lookup);
     }
 

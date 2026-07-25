@@ -1,8 +1,9 @@
-package com.cascada.fabric;
+package com.cascada.fabric.domain;
+
+import com.cascada.fabric.application.port.out.EnvironmentPort;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.function.UnaryOperator;
 
 /**
  * Every value the Fabric YAML templates need, read from environment variables with sensible defaults
@@ -11,8 +12,10 @@ import java.util.function.UnaryOperator;
  * derived numbers (executor limit-cores = cores + 1, the in-cluster driver host) are computed here so
  * the templates only ever see ready-to-substitute strings.
  *
- * <p>{@link #fromEnvironment(UnaryOperator)} takes an env lookup so it is trivially testable;
- * {@link #fromSystemEnvironment()} wires it to {@link System#getenv(String)} in production.
+ * <p>{@link #fromEnvironment(EnvironmentPort)} takes the environment as a <em>port</em>, so this class
+ * performs no I/O of its own and is trivially testable with a map. A composition root supplies the real
+ * process environment by passing {@code SystemEnvironmentAdapter.INSTANCE}; there is deliberately no
+ * convenience method that reads the OS from inside the domain.
  */
 public final class ClusterValues {
 
@@ -22,11 +25,12 @@ public final class ClusterValues {
         this.placeholders = placeholders;
     }
 
-    public static ClusterValues fromSystemEnvironment() {
-        return fromEnvironment(System::getenv);
+    /** Defaults only — every {@code CASCADA_*} value falls back. Useful for tests and for docs. */
+    public static ClusterValues defaults() {
+        return fromEnvironment(EnvironmentPort.empty());
     }
 
-    public static ClusterValues fromEnvironment(UnaryOperator<String> env) {
+    public static ClusterValues fromEnvironment(EnvironmentPort env) {
         String release = get(env, "CASCADA_RELEASE_NAME", "cascada");
         String suffix = get(env, "CASCADA_COPY_SUFFIX", "copy1");
         String namespace = get(env, "CASCADA_NAMESPACE", "default");
@@ -103,9 +107,8 @@ public final class ClusterValues {
         return placeholders.get(key);
     }
 
-    private static String get(UnaryOperator<String> env, String key, String fallback) {
-        String value = env.apply(key);
-        return (value == null || value.isBlank()) ? fallback : value;
+    private static String get(EnvironmentPort env, String key, String fallback) {
+        return env.getOrDefault(key, fallback);
     }
 
     private static int parseInt(String value, int fallback) {

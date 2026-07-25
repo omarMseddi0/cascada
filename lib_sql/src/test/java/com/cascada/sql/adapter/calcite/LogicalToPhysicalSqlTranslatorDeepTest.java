@@ -3,8 +3,6 @@ package com.cascada.sql.adapter.calcite;
 import com.cascada.sql.domain.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
 import com.cascada.cache.domain.CanonicalQueryObject;
-import com.cascada.sql.adapter.calcite.CalciteSql;
-import com.cascada.sql.adapter.calcite.CalciteCanonicalObjectFactory;
 import com.cascada.sql.domain.TimeDimensionMap;
 import com.cascada.sql.domain.UnsupportedSqlException;
 import org.junit.jupiter.api.Test;

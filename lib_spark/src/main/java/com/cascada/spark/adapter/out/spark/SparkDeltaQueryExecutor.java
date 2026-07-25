@@ -1,9 +1,9 @@
-package com.cascada.spark.execution;
+package com.cascada.spark.adapter.out.spark;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.port.SparkQueryExecutorPort;
-import com.cascada.spark.config.SparkSessionConfig;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.spark.domain.SparkSessionConfig;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -16,7 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * The production {@link SparkQueryExecutorPort}: runs a physical SQL string on a Spark 3.5.x session
+ * The production {@link QueryExecutorPort}: runs a physical SQL string on a Spark 3.5.x session
  * with Delta Lake enabled, and maps the resulting {@code Dataset<Row>} into the cache's framework-free
  * {@link ResultFrame}. Ported from {@code SparkSessionManager.get_session} + the query path of
  * {@code query_engine.py} (the {@code SparkQueryEngine} that calls {@code spark.sql(sql)}).
@@ -32,7 +32,7 @@ import java.util.Map;
  * which is why the config builder (pure) carries the unit-test coverage and this class is a thin,
  * well-typed bridge.
  */
-public final class SparkDeltaQueryExecutor implements SparkQueryExecutorPort, AutoCloseable {
+public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoCloseable {
 
     /**
      * Hard ceiling on rows materialised into the engine's JVM per query. The cache path only ever

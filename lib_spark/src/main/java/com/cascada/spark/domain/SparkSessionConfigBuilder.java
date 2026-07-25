@@ -1,8 +1,9 @@
-package com.cascada.spark.config;
+package com.cascada.spark.domain;
+
+import com.cascada.spark.application.port.out.EnvironmentPort;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.function.Function;
 
 /**
  * Builds a {@link SparkSessionConfig} the same way {@code spark_manager.py} /
@@ -32,7 +33,12 @@ public final class SparkSessionConfigBuilder {
     private String appName = "CascadaDeltaQueryExecutor";
     private String master = DEFAULT_KUBERNETES_MASTER;
     private final Map<String, String> properties = new LinkedHashMap<>();
-    private Function<String, String> environment = System::getenv;
+    /**
+     * Defaults to "nothing is configured" so this builder is deterministic on every machine. The
+     * composition root opts in to the real process environment by passing
+     * {@code SystemEnvironmentAdapter.INSTANCE}; reading the OS is never implicit.
+     */
+    private EnvironmentPort environment = EnvironmentPort.empty();
 
     public SparkSessionConfigBuilder() {
         // Delta-enabling defaults — the minimum that makes delta.`/path` queryable.
@@ -68,9 +74,12 @@ public final class SparkSessionConfigBuilder {
         return this;
     }
 
-    /** Override the environment lookup (used by tests to inject a fixed env without touching the OS). */
-    public SparkSessionConfigBuilder withEnvironment(Function<String, String> environment) {
-        this.environment = environment;
+    /**
+     * Supply the environment this builder reads. Pass {@code SystemEnvironmentAdapter.INSTANCE} in a
+     * composition root, or a map-backed lambda in a test. Omitting it means "nothing is set".
+     */
+    public SparkSessionConfigBuilder withEnvironment(EnvironmentPort environment) {
+        this.environment = environment == null ? EnvironmentPort.empty() : environment;
         return this;
     }
 
@@ -95,7 +104,7 @@ public final class SparkSessionConfigBuilder {
      * precedence (env > spark.json > defaults) is testable.
      */
     public SparkSessionConfigBuilder withEnvOverride(String sparkKey, String envVar) {
-        String value = environment.apply(envVar);
+        String value = environment.get(envVar);
         if (value != null && !value.isEmpty()) {
             properties.put(sparkKey, value);
         }
@@ -104,7 +113,7 @@ public final class SparkSessionConfigBuilder {
 
     public SparkSessionConfig build() {
         // SPARK_MASTER env always wins for the master (matches spark_manager.py's os.getenv("SPARK_MASTER")).
-        String envMaster = environment.apply("SPARK_MASTER");
+        String envMaster = environment.get("SPARK_MASTER");
         String resolvedMaster = (envMaster != null && !envMaster.isEmpty()) ? envMaster : master;
         return new SparkSessionConfig(appName, resolvedMaster, properties);
     }

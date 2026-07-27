@@ -446,9 +446,14 @@ public final class FrameMergeService {
         if (frame.isEmpty()) {
             return frame;
         }
+        List<OrderByClause> orderBy = canonicalObject.postProcessing().orderBy();
+        if (orderBy.isEmpty() && canonicalObject.postProcessing().limit().isEmpty()) {
+            // The merge already emits its deterministic group order. Rebuilding every row here when
+            // there is no deferred SQL clause only adds map allocations and a second frame copy.
+            return frame;
+        }
         List<Map<String, Object>> rows = new ArrayList<>(frame.rows());
 
-        List<OrderByClause> orderBy = canonicalObject.postProcessing().orderBy();
         // Apply stable sorts from lowest priority to highest (mirrors merging.apply_post_processing).
         for (int index = orderBy.size() - 1; index >= 0; index--) {
             OrderByClause clause = orderBy.get(index);

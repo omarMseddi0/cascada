@@ -74,6 +74,19 @@ class HexagonalLayeringArchitectureTest {
     }
 
     /**
+     * The mirror rule to the one above. An outbound adapter implements an out-port; it must not bind
+     * itself to an application service and thereby make the service implementation part of the adapter
+     * contract. The composition root in {@code app} is the one intentional place that wires both sides.
+     */
+    @Test
+    void adapterDoesNotDependOnApplicationService() {
+        noClasses().that().resideInAPackage("com.cascada.cache.adapter..")
+                .should().dependOnClassesThat().resideInAPackage("com.cascada.cache.application.service..")
+                .because("adapters depend on ports, not on application service implementations")
+                .check(moduleClasses);
+    }
+
+    /**
      * Every <em>top-level</em> type in a port package must be an interface: a port is a contract, and a
      * concrete class sitting there would be an implementation detail that services and adapters would both
      * bind to, defeating the substitution the port exists to allow.

@@ -7,9 +7,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A small, framework-free columnar result table — the unit the cache stores, fetches, and merges.
- * It is the portable stand-in for a pandas/Tablesaw {@code DataFrame} (the substrate the merge math
- * runs on), kept dependency-free so the correctness gate can run without a dataframe library.
+ * A small, framework-free result table — the unit the cache stores, fetches, and merges.
+ * It is the portable stand-in for a pandas/Tablesaw {@code DataFrame}, kept dependency-free so the
+ * correctness gate can run without a dataframe library. The merge service converts this boundary
+ * representation to primitive column arrays before running the hot aggregation loop.
  *
  * <p>The schema (ordered column names + their {@link ColumnType}) travels with the frame so the
  * Arrow/portable serializer can round-trip it losslessly. Internally the data is row-oriented, which
@@ -20,15 +21,30 @@ public final class ResultFrame {
     private final List<String> columnNames;
     private final Map<String, ColumnType> columnTypes;
     private final List<Map<String, Object>> rows;
+    private final List<Map<String, Object>> readOnlyRows;
 
     public ResultFrame(List<String> columnNames, Map<String, ColumnType> columnTypes,
                        List<Map<String, Object>> rows) {
+        this(columnNames, columnTypes, rows, false);
+    }
+
+    /**
+     * Internal constructor used by {@link Builder}: builder rows are already detached from caller
+     * maps, so copying every map again at build time only creates GC pressure on merge output.
+     */
+    private ResultFrame(List<String> columnNames, Map<String, ColumnType> columnTypes,
+                        List<Map<String, Object>> rows, boolean rowsAlreadyCopied) {
         this.columnNames = List.copyOf(columnNames);
         this.columnTypes = new LinkedHashMap<>(columnTypes);
-        this.rows = new ArrayList<>();
-        for (Map<String, Object> row : rows) {
-            this.rows.add(new LinkedHashMap<>(row));
+        if (rowsAlreadyCopied) {
+            this.rows = new ArrayList<>(rows);
+        } else {
+            this.rows = new ArrayList<>(rows.size());
+            for (Map<String, Object> row : rows) {
+                this.rows.add(new LinkedHashMap<>(row));
+            }
         }
+        this.readOnlyRows = Collections.unmodifiableList(this.rows);
     }
 
     public static ResultFrame empty() {
@@ -54,7 +70,7 @@ public final class ResultFrame {
     public List<Map<String, Object>> rows() {
         // Unmodifiable VIEW, not a copy: rows() is called inside per-frame loops on the merge and
         // serialization hot paths, and copying the whole list each call made those loops O(n^2).
-        return Collections.unmodifiableList(rows);
+        return readOnlyRows;
     }
 
     public int rowCount() {
@@ -87,7 +103,7 @@ public final class ResultFrame {
         }
 
         public ResultFrame build() {
-            return new ResultFrame(columnNames, columnTypes, rows);
+            return new ResultFrame(columnNames, columnTypes, rows, true);
         }
     }
 

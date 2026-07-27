@@ -175,13 +175,16 @@ public final class FrameMergeService {
         double[][] measures = new double[measureColumns.size()][rowCount];
         int r = 0;
         for (ResultFrame frame : frames) {
-            for (Map<String, Object> row : frame.rows()) {
-                fixedBuckets[r] = asLong(row.get(timeColumnName));
+            int timeColumn = frame.columnIndex(timeColumnName);
+            int[] dimensionIndexes = columnIndexes(frame, dimensionColumns);
+            int[] measureIndexes = columnIndexes(frame, measureColumns);
+            for (int row = 0; row < frame.rowCount(); row++) {
+                fixedBuckets[r] = frame.longAt(row, timeColumn);
                 for (int d = 0; d < dimensionCodes.length; d++) {
-                    dimensionCodes[d][r] = encoder.encode(String.valueOf(row.get(dimensionColumns.get(d))));
+                    dimensionCodes[d][r] = encoder.encode(stringDimension(frame, row, dimensionIndexes[d]));
                 }
                 for (int m = 0; m < measures.length; m++) {
-                    measures[m][r] = asMeasure(row.get(measureColumns.get(m)));
+                    measures[m][r] = numericMeasure(frame, row, measureIndexes[m]);
                 }
                 r++;
             }
@@ -199,8 +202,7 @@ public final class FrameMergeService {
             // RC1: never re-derive a finer step — emit the surviving rows unchanged, in arrival order.
             for (int row = 0; row < rowCount; row++) {
                 if (keep[row]) {
-                    builder.row(rowValues(fixedBuckets[row], dimensionColumns, dimensionCodes,
-                            measureColumns, measures, row, encoder));
+                    appendTimeSeriesRow(builder, fixedBuckets[row], dimensionCodes, measures, row, encoder);
                 }
             }
             return builder.build();
@@ -216,15 +218,13 @@ public final class FrameMergeService {
 
         int[] order = sortedGroupOrder(grouped, dimensionColumns, encoder, true);
         for (int g : order) {
-            Map<String, Object> values = new LinkedHashMap<>();
-            values.put(timeColumnName, grouped.groupBuckets()[g]);
+            builder.appendLong(grouped.groupBuckets()[g]);
             for (int d = 0; d < dimensionColumns.size(); d++) {
-                values.put(dimensionColumns.get(d), encoder.decode(grouped.dimensionCode(g, d)));
+                builder.appendString(encoder.decode(grouped.dimensionCode(g, d)));
             }
             for (int m = 0; m < measureColumns.size(); m++) {
-                values.put(measureColumns.get(m), grouped.measureAccumulators()[m][g]);
+                appendMeasure(builder, grouped.measureAccumulators()[m][g]);
             }
-            builder.row(values);
         }
         return builder.build();
     }
@@ -247,19 +247,21 @@ public final class FrameMergeService {
         double[][] measures = new double[measureColumns.size()][rowCount];
         int r = 0;
         for (ResultFrame frame : frames) {
-            for (Map<String, Object> row : frame.rows()) {
+            int[] dimensionIndexes = columnIndexes(frame, dimensionColumns);
+            int[] measureIndexes = columnIndexes(frame, measureColumns);
+            for (int row = 0; row < frame.rowCount(); row++) {
                 for (int d = 0; d < dimensionCodes.length; d++) {
                     String dimension = dimensionColumns.get(d);
                     if (floorTime && dimension.equals(timeColumnName)) {
-                        long flooredTs = Math.floorDiv(asLong(row.get(dimension)), fixedStepSeconds)
+                        long flooredTs = Math.floorDiv(frame.longAt(row, dimensionIndexes[d]), fixedStepSeconds)
                                 * (long) fixedStepSeconds;
                         dimensionCodes[d][r] = encoder.encode(String.valueOf(flooredTs));
                     } else {
-                        dimensionCodes[d][r] = encoder.encode(String.valueOf(row.get(dimension)));
+                        dimensionCodes[d][r] = encoder.encode(stringDimension(frame, row, dimensionIndexes[d]));
                     }
                 }
                 for (int m = 0; m < measures.length; m++) {
-                    measures[m][r] = asMeasure(row.get(measureColumns.get(m)));
+                    measures[m][r] = numericMeasure(frame, row, measureIndexes[m]);
                 }
                 r++;
             }
@@ -275,14 +277,12 @@ public final class FrameMergeService {
         measureColumns.forEach(measure -> builder.column(measure, ColumnType.DOUBLE));
         int[] order = sortedGroupOrder(grouped, dimensionColumns, encoder, false);
         for (int g : order) {
-            Map<String, Object> values = new LinkedHashMap<>();
             for (int d = 0; d < dimensionColumns.size(); d++) {
-                values.put(dimensionColumns.get(d), encoder.decode(grouped.dimensionCode(g, d)));
+                builder.appendString(encoder.decode(grouped.dimensionCode(g, d)));
             }
             for (int m = 0; m < measureColumns.size(); m++) {
-                values.put(measureColumns.get(m), grouped.measureAccumulators()[m][g]);
+                appendMeasure(builder, grouped.measureAccumulators()[m][g]);
             }
-            builder.row(values);
         }
         return builder.build();
     }
@@ -320,18 +320,43 @@ public final class FrameMergeService {
         return functions;
     }
 
-    private Map<String, Object> rowValues(long bucket, List<String> dimensionColumns, int[][] dimensionCodes,
-                                          List<String> measureColumns, double[][] measures, int row,
-                                          DictionaryEncoder encoder) {
-        Map<String, Object> values = new LinkedHashMap<>();
-        values.put(timeColumnName, bucket);
-        for (int d = 0; d < dimensionColumns.size(); d++) {
-            values.put(dimensionColumns.get(d), encoder.decode(dimensionCodes[d][row]));
+    private int[] columnIndexes(ResultFrame frame, List<String> columns) {
+        int[] indexes = new int[columns.size()];
+        for (int column = 0; column < indexes.length; column++) {
+            indexes[column] = frame.columnIndex(columns.get(column));
         }
-        for (int m = 0; m < measureColumns.size(); m++) {
-            values.put(measureColumns.get(m), measures[m][row]);
+        return indexes;
+    }
+
+    private String stringDimension(ResultFrame frame, int row, int column) {
+        // String.valueOf was the previous map-based contract: a SQL NULL dimension groups as "null".
+        return frame.isNullAt(row, column) ? "null" : frame.stringValueAt(row, column);
+    }
+
+    private double numericMeasure(ResultFrame frame, int row, int column) {
+        if (frame.isNullAt(row, column)) {
+            return Double.NaN;
         }
-        return values;
+        return frame.columnType(frame.columnNames().get(column)) == ColumnType.LONG
+                ? frame.longAt(row, column)
+                : frame.doubleAt(row, column);
+    }
+
+    private void appendTimeSeriesRow(ResultFrame.Builder builder, long bucket, int[][] dimensionCodes,
+                                     double[][] measures, int row, DictionaryEncoder encoder) {
+        builder.appendLong(bucket);
+        for (int[] dimensionCode : dimensionCodes) {
+            builder.appendString(encoder.decode(dimensionCode[row]));
+        }
+        for (double[] measure : measures) {
+            appendMeasure(builder, measure[row]);
+        }
+    }
+
+    private void appendMeasure(ResultFrame.Builder builder, double value) {
+        // NaN is a valid numeric payload and is also the aggregator's internal absent marker; retain
+        // the prior frame contract, which emitted it as a DOUBLE rather than a SQL null.
+        builder.appendDouble(value);
     }
 
     /**

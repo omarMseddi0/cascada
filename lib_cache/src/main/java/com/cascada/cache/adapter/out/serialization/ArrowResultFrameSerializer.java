@@ -24,9 +24,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * The language-neutral production cache serializer: encodes a {@link ResultFrame} as **Apache Arrow IPC
@@ -83,8 +81,9 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
              ByteArrayOutputStream out = new ByteArrayOutputStream();
              ArrowStreamWriter writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))) {
 
-            for (String column : frame.columnNames()) {
-                writeColumn(root.getVector(column), frame.columnType(column), frame.rows(), column);
+            for (int column = 0; column < frame.columnNames().size(); column++) {
+                String name = frame.columnNames().get(column);
+                writeColumn(root.getVector(name), frame, column);
             }
             // Set the row count AFTER populating the vectors (Arrow's contract); setting it first leaves
             // the writer expecting buffers that the vectors have not filled yet.
@@ -99,21 +98,21 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
         }
     }
 
-    private void writeColumn(FieldVector vector, ColumnType type, List<Map<String, Object>> rows, String column) {
+    private void writeColumn(FieldVector vector, ResultFrame frame, int column) {
         vector.allocateNew();
-        for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
-            Object value = rows.get(rowIndex).get(column);
-            if (value == null) {
+        ColumnType type = frame.columnType(frame.columnNames().get(column));
+        for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
+            if (frame.isNullAt(rowIndex, column)) {
                 vector.setNull(rowIndex);
                 continue;
             }
             switch (type) {
-                case LONG -> ((BigIntVector) vector).setSafe(rowIndex, ((Number) value).longValue());
-                case DOUBLE -> ((Float8Vector) vector).setSafe(rowIndex, ((Number) value).doubleValue());
-                case STRING -> ((VarCharVector) vector).setSafe(rowIndex, new Text(value.toString()));
+                case LONG -> ((BigIntVector) vector).setSafe(rowIndex, frame.longAt(rowIndex, column));
+                case DOUBLE -> ((Float8Vector) vector).setSafe(rowIndex, frame.doubleAt(rowIndex, column));
+                case STRING -> ((VarCharVector) vector).setSafe(rowIndex, new Text(frame.stringAt(rowIndex, column)));
             }
         }
-        vector.setValueCount(rows.size());
+        vector.setValueCount(frame.rowCount());
     }
 
     private ResultFrame decodeFromArrowIpc(byte[] ipc) {
@@ -122,38 +121,40 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
 
             VectorSchemaRoot root = reader.getVectorSchemaRoot();
             List<String> columnNames = new ArrayList<>();
-            Map<String, ColumnType> columnTypes = new LinkedHashMap<>();
+            List<ColumnType> columnTypes = new ArrayList<>();
+            ResultFrame.Builder builder = ResultFrame.builder();
             for (Field field : root.getSchema().getFields()) {
                 columnNames.add(field.getName());
-                columnTypes.put(field.getName(), fromArrowType(field));
+                ColumnType type = fromArrowType(field);
+                columnTypes.add(type);
+                builder.column(field.getName(), type);
             }
 
-            List<Map<String, Object>> rows = new ArrayList<>();
             while (reader.loadNextBatch()) {
                 int rowCount = root.getRowCount();
                 for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    for (String column : columnNames) {
-                        row.put(column, readValue(root.getVector(column), columnTypes.get(column), rowIndex));
+                    for (int column = 0; column < columnNames.size(); column++) {
+                        appendValue(root.getVector(columnNames.get(column)), columnTypes.get(column), rowIndex, builder);
                     }
-                    rows.add(row);
                 }
             }
-            return new ResultFrame(columnNames, columnTypes, rows);
+            return builder.build();
         } catch (Exception corrupt) {
             throw new CacheSerializationException("Arrow frame decoding failed", corrupt);
         }
     }
 
-    private Object readValue(FieldVector vector, ColumnType type, int rowIndex) {
+    private void appendValue(FieldVector vector, ColumnType type, int rowIndex, ResultFrame.Builder builder) {
         if (vector.isNull(rowIndex)) {
-            return null;
+            builder.appendNull();
+            return;
         }
-        return switch (type) {
-            case LONG -> ((BigIntVector) vector).get(rowIndex);
-            case DOUBLE -> ((Float8Vector) vector).get(rowIndex);
-            case STRING -> new String(((VarCharVector) vector).get(rowIndex), java.nio.charset.StandardCharsets.UTF_8);
-        };
+        switch (type) {
+            case LONG -> builder.appendLong(((BigIntVector) vector).get(rowIndex));
+            case DOUBLE -> builder.appendDouble(((Float8Vector) vector).get(rowIndex));
+            case STRING -> builder.appendString(new String(((VarCharVector) vector).get(rowIndex),
+                    java.nio.charset.StandardCharsets.UTF_8));
+        }
     }
 
     private Schema toArrowSchema(ResultFrame frame) {

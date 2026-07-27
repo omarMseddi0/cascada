@@ -30,4 +30,21 @@ class ResultFrameTest {
 
         assertThat(frame.rows()).isSameAs(frame.rows());
     }
+
+    @Test
+    void typedColumnsPreserveNullsWithoutBoxedRowsOnTheWritePath() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("bucket", ColumnType.LONG)
+                .column("value", ColumnType.DOUBLE)
+                .column("service", ColumnType.STRING)
+                .appendLong(1_700_000_000L)
+                .appendNull()
+                .appendString("api")
+                .build();
+
+        assertThat(frame.longAt(0, frame.columnIndex("bucket"))).isEqualTo(1_700_000_000L);
+        assertThat(frame.isNullAt(0, frame.columnIndex("value"))).isTrue();
+        assertThat(frame.stringAt(0, frame.columnIndex("service"))).isEqualTo("api");
+        assertThat(frame.rows().get(0)).containsEntry("value", null).containsEntry("service", "api");
+    }
 }

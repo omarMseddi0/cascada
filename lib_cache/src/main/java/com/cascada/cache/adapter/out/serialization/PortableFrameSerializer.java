@@ -12,9 +12,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * A dependency-light cache serializer that preserves the exact two-stage contract of
@@ -65,9 +63,9 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
                 out.writeByte(frame.columnType(column).ordinal());
             }
             out.writeInt(frame.rowCount());
-            for (Map<String, Object> row : frame.rows()) {
-                for (String column : columns) {
-                    writeValue(out, frame.columnType(column), row.get(column));
+            for (int row = 0; row < frame.rowCount(); row++) {
+                for (int column = 0; column < columns.size(); column++) {
+                    writeValue(out, frame, row, column);
                 }
             }
         } catch (IOException impossible) {
@@ -76,16 +74,16 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         return bytes.toByteArray();
     }
 
-    private void writeValue(DataOutputStream out, ColumnType type, Object value) throws IOException {
-        boolean present = value != null;
-        out.writeBoolean(present);
-        if (!present) {
+    private void writeValue(DataOutputStream out, ResultFrame frame, int row, int column) throws IOException {
+        boolean valuePresent = !frame.isNullAt(row, column);
+        out.writeBoolean(valuePresent);
+        if (!valuePresent) {
             return;
         }
-        switch (type) {
-            case LONG -> out.writeLong(((Number) value).longValue());
-            case DOUBLE -> out.writeDouble(((Number) value).doubleValue());
-            case STRING -> out.writeUTF(value.toString());
+        switch (frame.columnType(frame.columnNames().get(column))) {
+            case LONG -> out.writeLong(frame.longAt(row, column));
+            case DOUBLE -> out.writeDouble(frame.doubleAt(row, column));
+            case STRING -> out.writeUTF(frame.stringAt(row, column));
         }
     }
 
@@ -93,36 +91,36 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(encoded))) {
             int columnCount = in.readInt();
             List<String> columnNames = new ArrayList<>(columnCount);
-            Map<String, ColumnType> columnTypes = new LinkedHashMap<>();
+            List<ColumnType> columnTypes = new ArrayList<>(columnCount);
+            ResultFrame.Builder builder = ResultFrame.builder();
             for (int index = 0; index < columnCount; index++) {
                 String name = in.readUTF();
                 ColumnType type = ColumnType.values()[in.readByte()];
                 columnNames.add(name);
-                columnTypes.put(name, type);
+                columnTypes.add(type);
+                builder.column(name, type);
             }
             int rowCount = in.readInt();
-            List<Map<String, Object>> rows = new ArrayList<>(rowCount);
             for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                for (String column : columnNames) {
-                    row.put(column, readValue(in, columnTypes.get(column)));
+                for (int column = 0; column < columnNames.size(); column++) {
+                    appendValue(in, builder, columnTypes.get(column));
                 }
-                rows.add(row);
             }
-            return new ResultFrame(columnNames, columnTypes, rows);
+            return builder.build();
         } catch (IOException corrupt) {
             throw new CacheSerializationException("frame decoding failed", corrupt);
         }
     }
 
-    private Object readValue(DataInputStream in, ColumnType type) throws IOException {
+    private void appendValue(DataInputStream in, ResultFrame.Builder builder, ColumnType type) throws IOException {
         if (!in.readBoolean()) {
-            return null;
+            builder.appendNull();
+            return;
         }
-        return switch (type) {
-            case LONG -> in.readLong();
-            case DOUBLE -> in.readDouble();
-            case STRING -> in.readUTF();
-        };
+        switch (type) {
+            case LONG -> builder.appendLong(in.readLong());
+            case DOUBLE -> builder.appendDouble(in.readDouble());
+            case STRING -> builder.appendString(in.readUTF());
+        }
     }
 }

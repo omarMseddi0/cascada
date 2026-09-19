@@ -36,12 +36,19 @@ public final class TimeBucketPyramid {
      * only {@code livePartial} reaches Spark.
      */
     public HierarchicalPlan assemble(long startSeconds, long nowSeconds) {
+        if (startSeconds > nowSeconds) {
+            throw new IllegalArgumentException("startSeconds must not be after nowSeconds");
+        }
         long currentDayStart = bucketStart(nowSeconds, BucketLevel.DAY);
+        long startDay = bucketStart(startSeconds, BucketLevel.DAY);
 
         List<Long> completeDays = new ArrayList<>();
-        long day = bucketStart(startSeconds, BucketLevel.DAY);
+        Optional<TimeRange> leadingPartial = Optional.empty();
+        long day = startDay;
         if (day < startSeconds) {
-            day += BucketLevel.DAY.secondsPerBucket(); // first whole day at/after start
+            long firstDayEnd = day + BucketLevel.DAY.secondsPerBucket() - 1;
+            if (day < currentDayStart) leadingPartial = Optional.of(new TimeRange(startSeconds, firstDayEnd));
+            day += BucketLevel.DAY.secondsPerBucket();
         }
         while (day < currentDayStart) {
             completeDays.add(day);
@@ -50,22 +57,26 @@ public final class TimeBucketPyramid {
 
         List<Long> completeHoursOfToday = new ArrayList<>();
         long liveHourStart = bucketStart(nowSeconds, BucketLevel.HOUR);
-        for (long hour = currentDayStart; hour < liveHourStart; hour += BucketLevel.HOUR.secondsPerBucket()) {
+        long firstHour = Math.max(currentDayStart, bucketStart(startSeconds, BucketLevel.HOUR));
+        if (firstHour < startSeconds) firstHour += BucketLevel.HOUR.secondsPerBucket();
+        for (long hour = firstHour; hour < liveHourStart; hour += BucketLevel.HOUR.secondsPerBucket()) {
             completeHoursOfToday.add(hour);
         }
 
-        Optional<TimeRange> livePartial = liveHourStart <= nowSeconds
-                ? Optional.of(new TimeRange(liveHourStart, nowSeconds))
+        long liveStart = Math.max(startSeconds, liveHourStart);
+        Optional<TimeRange> livePartial = liveStart <= nowSeconds
+                ? Optional.of(new TimeRange(liveStart, nowSeconds))
                 : Optional.empty();
 
-        return new HierarchicalPlan(completeDays, completeHoursOfToday, livePartial);
+        return new HierarchicalPlan(leadingPartial, completeDays, completeHoursOfToday, livePartial);
     }
 
     /**
      * The assembled levels for a query: complete day-bucket starts (cache), complete hour-bucket starts
      * of the in-progress day (cache), and the live partial range (recompute).
      */
-    public record HierarchicalPlan(List<Long> completeDayBucketStarts, List<Long> completeHourBucketStartsToday,
+    public record HierarchicalPlan(Optional<TimeRange> leadingPartialRange, List<Long> completeDayBucketStarts,
+                                   List<Long> completeHourBucketStartsToday,
                                    Optional<TimeRange> livePartialRange) {
         public HierarchicalPlan {
             completeDayBucketStarts = List.copyOf(completeDayBucketStarts);

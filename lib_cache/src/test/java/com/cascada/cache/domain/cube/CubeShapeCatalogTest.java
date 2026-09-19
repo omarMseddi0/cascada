@@ -144,6 +144,16 @@ class CubeShapeCatalogTest {
     }
 
     @Test
+    void boundsTheNumberOfShapesWithinOneFrequentlyUsedWindow() {
+        CubeShapeCatalog bounded = new CubeShapeCatalog(2, 2);
+        bounded.register(WINDOW, fineShape(), fineFrame());
+        bounded.register(WINDOW, coarseShape(), fineFrame());
+        bounded.register(WINDOW, new QueryShape(Set.of("deviceType"), Set.of(), Set.of("SUM(bytes)")), fineFrame());
+
+        assertThat(bounded.entryCount()).isEqualTo(2);
+    }
+
+    @Test
     void clearDropsEveryWindow() {
         catalog.register(WINDOW, fineShape(), fineFrame());
         catalog.register(OTHER_WINDOW, fineShape(), fineFrame());

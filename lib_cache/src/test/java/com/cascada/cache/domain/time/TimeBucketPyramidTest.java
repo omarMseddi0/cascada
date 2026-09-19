@@ -48,6 +48,29 @@ class TimeBucketPyramidTest {
     }
 
     @Test
+    void honorsAStartInsideTheCurrentDay() {
+        long start = 2 * DAY + HOUR + 1_800;
+        long now = 2 * DAY + 3 * HOUR + 100;
+
+        HierarchicalPlan plan = pyramid.assemble(start, now);
+
+        assertThat(plan.completeDayBucketStarts()).isEmpty();
+        assertThat(plan.completeHourBucketStartsToday()).containsExactly(2 * DAY + 2 * HOUR);
+        assertThat(plan.livePartialRange()).contains(new com.cascada.cache.domain.TimeRange(2 * DAY + 3 * HOUR, now));
+    }
+
+    @Test
+    void retainsThePartialHeadOfAnEarlierDay() {
+        long start = HOUR;
+        long now = 2 * DAY + 100;
+
+        HierarchicalPlan plan = pyramid.assemble(start, now);
+
+        assertThat(plan.leadingPartialRange()).contains(new com.cascada.cache.domain.TimeRange(HOUR, DAY - 1));
+        assertThat(plan.completeDayBucketStarts()).containsExactly(DAY);
+    }
+
+    @Test
     void compactionFromFiveMinuteToHourPreservesTotals() {
         // twelve 5-minute buckets in one hour, each summing 1.0 -> the hour bucket must sum to 12.0
         TimeSeriesBucketResampler resampler = new TimeSeriesBucketResampler();

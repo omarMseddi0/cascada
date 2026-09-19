@@ -32,21 +32,28 @@ public final class CubeShapeCatalog {
 
     /** Distinct time windows retained by default; dashboards revisit few windows, LRU fits. */
     public static final int DEFAULT_MAX_WINDOWS = 256;
+    public static final int DEFAULT_MAX_SHAPES_PER_WINDOW = 64;
 
     private final CubeSubsumptionPlanner planner = new CubeSubsumptionPlanner();
     private final CubeConsistencyVerifier verifier = new CubeConsistencyVerifier();
     private final int maxWindows;
+    private final int maxShapesPerWindow;
     private final Map<TimeRange, WindowShapes> windows;
 
     public CubeShapeCatalog() {
-        this(DEFAULT_MAX_WINDOWS);
+        this(DEFAULT_MAX_WINDOWS, DEFAULT_MAX_SHAPES_PER_WINDOW);
     }
 
     public CubeShapeCatalog(int maxWindows) {
-        if (maxWindows <= 0) {
-            throw new IllegalArgumentException("maxWindows must be > 0, but was: " + maxWindows);
+        this(maxWindows, DEFAULT_MAX_SHAPES_PER_WINDOW);
+    }
+
+    public CubeShapeCatalog(int maxWindows, int maxShapesPerWindow) {
+        if (maxWindows <= 0 || maxShapesPerWindow <= 0) {
+            throw new IllegalArgumentException("cube bounds must be positive");
         }
         this.maxWindows = maxWindows;
+        this.maxShapesPerWindow = maxShapesPerWindow;
         this.windows = new LinkedHashMap<>(16, 0.75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<TimeRange, WindowShapes> eldest) {
@@ -79,7 +86,7 @@ public final class CubeShapeCatalog {
             return;
         }
         WindowShapes window = windows.computeIfAbsent(timeRange, ignored -> new WindowShapes());
-        if (window.shapes.add(shape)) {
+        if (window.shapes.size() < maxShapesPerWindow && window.shapes.add(shape)) {
             window.index.register(new CachedShapeEntry(shape, frame));
         }
     }
@@ -116,6 +123,10 @@ public final class CubeShapeCatalog {
 
     public synchronized int windowCount() {
         return windows.size();
+    }
+
+    public synchronized int entryCount() {
+        return windows.values().stream().mapToInt(window -> window.shapes.size()).sum();
     }
 
     private static final class WindowShapes {

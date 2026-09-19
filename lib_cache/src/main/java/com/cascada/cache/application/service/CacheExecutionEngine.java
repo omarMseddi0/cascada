@@ -135,8 +135,12 @@ public final class CacheExecutionEngine {
 
         // Fast path 2: zero cache hits -> bypass all cache machinery.
         if (cachedKeys.isEmpty()) {
+            if (!canonicalObject.metadata().isTimeSeries()) {
+                return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
+                        sparkExecutor.execute(canonicalObject.physicalSql()));
+            }
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    sparkExecutor.execute(canonicalObject.physicalSql()));
+                    computeAndStoreColdBuckets(canonicalObject, queryHash, buckets, requiredKeys));
         }
 
         GapPlan gapPlan = computeGapPlan(startTimestamp, endTimestamp, bodyDays, missingDays);
@@ -204,6 +208,31 @@ public final class CacheExecutionEngine {
             cubeCatalog.register(canonicalObject.timeRange(), queryShape, answer);
         }
         return answer;
+    }
+
+    /**
+     * A cold cache is filled with complete bucket ingredients, never with a full-window aggregate
+     * under a bucket key. This makes the next request a genuine cache hit while preserving head/tail
+     * correctness for partial boundary buckets.
+     */
+    private ResultFrame computeAndStoreColdBuckets(CanonicalQueryObject canonicalObject, QueryHash queryHash,
+                                                    DailyBuckets buckets, List<String> keys) {
+        List<ResultFrame> frames = new ArrayList<>();
+        for (int index = 0; index < buckets.body().size(); index++) {
+            long bucketStart = buckets.body().get(index);
+            ResultFrame frame = sparkExecutor.execute(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
+                    new GapPlan(Optional.empty(), List.of(bucketStart), Optional.empty())));
+            cacheBackend.store(keys.get(index), frame);
+            if (coverageIndex != null) coverageIndex.markCached(queryHash, configuration.bucketSeconds(), bucketStart);
+            if (!frame.isEmpty()) frames.add(frame);
+        }
+        GapPlan boundaries = new GapPlan(buckets.head(), List.of(), buckets.tail());
+        if (boundaries.hasGaps()) {
+            ResultFrame boundaryFrame = sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
+                    canonicalObject.physicalSql(), boundaries));
+            if (!boundaryFrame.isEmpty()) frames.add(boundaryFrame);
+        }
+        return frameMergeService.mergeAndReconstruct(frames, canonicalObject);
     }
 
     /**

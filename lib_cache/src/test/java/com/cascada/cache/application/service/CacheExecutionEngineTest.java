@@ -93,8 +93,31 @@ class CacheExecutionEngineTest {
                 backend, fakeSpark, fakeRewriter, CacheExecutionConfiguration.defaults());
         ResultFrame result = engine.execute(canonical, hash);
 
-        assertThat(seenSql.toString()).isEqualTo("FULL_SQL"); // ran the original SQL, not a gap rewrite
+        assertThat(seenSql.toString()).isEqualTo("FULL_SQL");
         assertThat(((Number) result.rows().get(0).get("bytes")).doubleValue()).isEqualTo(99.0);
+    }
+
+    @Test
+    void coldTimeSeriesQueryFillsCompleteBucketsForTheNextRequest() {
+        HashComponents components = HashComponents.of(List.of("ts", "appName"), List.of("SUM(bytes)"), List.of());
+        CanonicalQueryObject canonical = new CanonicalQueryObject(components, new TimeRange(0, 3 * DAY - 1),
+                PostProcessing.none(), QueryMetadata.timeSeries(300), "FULL_SQL", List.of("traffic"), List.of());
+        QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
+        InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        AtomicInteger calls = new AtomicInteger();
+        QueryExecutorPort fakeSpark = sql -> {
+            calls.incrementAndGet();
+            return ResultFrame.builder().column("ts", ColumnType.LONG).column("appName", ColumnType.STRING)
+                    .column("bytes", ColumnType.DOUBLE).row(0L, "netflix", 99.0).build();
+        };
+        CacheExecutionEngine engine = new CacheExecutionEngine(backend, fakeSpark,
+                (physicalSql, gapPlan) -> "GAP_SQL", CacheExecutionConfiguration.defaults());
+
+        engine.execute(canonical, hash);
+        assertThat(calls.get()).isEqualTo(3);
+        assertThat(backend.storedBucketCount()).isEqualTo(3);
+        engine.execute(canonical, hash);
+        assertThat(calls.get()).isEqualTo(3);
     }
 
     @Test

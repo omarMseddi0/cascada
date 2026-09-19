@@ -187,7 +187,10 @@ class CacheExecutionEngineCubeTest {
         AtomicInteger sparkCalls = new AtomicInteger();
         QueryExecutorPort fakeSpark = sql -> {
             sparkCalls.incrementAndGet();
-            return fineGrainedFrame();
+            return ResultFrame.builder().column("ts", ColumnType.LONG)
+                    .column("appName", ColumnType.STRING).column("deviceType", ColumnType.STRING)
+                    .column("SUM(bytes)", ColumnType.DOUBLE)
+                    .row(0L, "netflix", "mobile", 10.0).build();
         };
         CacheExecutionEngine engine = engineWith(fakeSpark, new CubeShapeCatalog());
 
@@ -199,6 +202,6 @@ class CacheExecutionEngineCubeTest {
         engine.execute(timeSeries, hashGenerator.generateQueryHash(timeSeries, 300));
         engine.execute(timeSeries, hashGenerator.generateQueryHash(timeSeries, 300));
 
-        assertThat(sparkCalls.get()).isEqualTo(2); // never catalogued, never served from the cube
+        assertThat(sparkCalls.get()).isEqualTo(3); // one call per cold bucket, never served from the cube
     }
 }

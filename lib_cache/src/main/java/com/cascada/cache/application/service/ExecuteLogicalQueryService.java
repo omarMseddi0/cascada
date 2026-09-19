@@ -36,10 +36,13 @@ public final class ExecuteLogicalQueryService implements ExecuteLogicalQueryUseC
     private final LogicalSqlTranslatorPort translator;
     private final SqlCanonicalizerPort canonicalizer;
     private final ExecuteCachedQueryUseCase executeCachedQuery;
+    private final com.cascada.cache.application.port.out.QueryExecutorPort executor;
 
     public ExecuteLogicalQueryService(LogicalSqlTranslatorPort translator,
                                      SqlCanonicalizerPort canonicalizer,
-                                     ExecuteCachedQueryUseCase executeCachedQuery) {
+                                     ExecuteCachedQueryUseCase executeCachedQuery,
+                                     com.cascada.cache.application.port.out.QueryExecutorPort executor) {
+        this.executor = Objects.requireNonNull(executor, "executor");
         this.translator = Objects.requireNonNull(translator, "translator");
         this.canonicalizer = Objects.requireNonNull(canonicalizer, "canonicalizer");
         this.executeCachedQuery = Objects.requireNonNull(executeCachedQuery, "executeCachedQuery");
@@ -48,7 +51,12 @@ public final class ExecuteLogicalQueryService implements ExecuteLogicalQueryUseC
     @Override
     public ExecuteCachedQueryUseCase.Result query(String logicalSql) {
         String physicalSql = translator.translateToPhysicalSql(logicalSql);
-        CanonicalQueryObject canonicalObject = canonicalizer.canonicalize(physicalSql);
+        CanonicalQueryObject canonicalObject;
+        try {
+            canonicalObject = canonicalizer.canonicalize(physicalSql);
+        } catch (com.cascada.cache.domain.UncacheableQueryException unsupported) {
+            return new ExecuteCachedQueryUseCase.Result(executor.execute(physicalSql), false);
+        }
         return executeCachedQuery.execute(canonicalObject);
     }
 }

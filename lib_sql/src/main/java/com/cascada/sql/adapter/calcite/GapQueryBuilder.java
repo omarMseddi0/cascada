@@ -119,16 +119,8 @@ public final class GapQueryBuilder {
     // --- flat path (ported from the else branch of _redefine_spark_query_for_gaps) ----------------
 
     private void applyFlatGap(SqlSelect select, SqlNode gapCondition) {
-        SqlNode existing = select.getWhere();
-        if (existing == null) {
-            select.setWhere(gapCondition);
-            return;
-        }
-        if (hasTimeOnlySubtree(existing)) {
-            select.setWhere(replaceTimeCondition(existing, gapCondition));
-        } else {
-            select.setWhere(and(existing, gapCondition));
-        }
+        SqlNode remainder = filterOutTimeConditions(select.getWhere());
+        select.setWhere(remainder == null ? cloneCondition(gapCondition) : and(remainder, cloneCondition(gapCondition)));
     }
 
     // --- union / subquery path (ported from _inject_gap_into_inner_where) -------------------------
@@ -136,14 +128,7 @@ public final class GapQueryBuilder {
     private void injectGapIntoInnerWhere(SqlNode root, SqlNode gapCondition) {
         List<SqlSelect> innerSelects = findInnermostSelectsWithFrom(root);
         for (SqlSelect select : innerSelects) {
-            SqlNode existing = select.getWhere();
-            if (existing == null) {
-                select.setWhere(cloneCondition(gapCondition));
-            } else if (hasTimeOnlySubtree(existing)) {
-                select.setWhere(replaceTimeCondition(existing, cloneCondition(gapCondition)));
-            } else {
-                select.setWhere(and(existing, cloneCondition(gapCondition)));
-            }
+            applyFlatGap(select, gapCondition);
         }
     }
 
@@ -257,23 +242,35 @@ public final class GapQueryBuilder {
 
     /** Ported from {@code _filter_out_time_conditions}: drop {@code timeCol >/>=/</<=} predicates. */
     private SqlNode filterOutTimeConditions(SqlNode condition) {
-        if (condition == null) {
+        if (condition == null || isRangeBound(condition)) {
             return null;
         }
-        switch (condition.getKind()) {
-            case GREATER_THAN, GREATER_THAN_OR_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL -> {
-                return referencesTimeColumn(condition) ? null : condition;
-            }
-            case AND, OR -> {
-                SqlBasicCall call = (SqlBasicCall) condition;
-                SqlNode left = filterOutTimeConditions(call.operand(0));
-                SqlNode right = filterOutTimeConditions(call.operand(1));
-                return combine(condition.getKind(), left, right);
-            }
-            default -> {
-                return condition;
-            }
+        if (condition.getKind() == SqlKind.AND && condition instanceof SqlBasicCall call) {
+            return combine(SqlKind.AND, filterOutTimeConditions(call.operand(0)),
+                    filterOutTimeConditions(call.operand(1)));
         }
+        // OR, NOT, functions and time-dependent business filters retain their original meaning.
+        return condition;
+    }
+
+    private boolean isRangeBound(SqlNode node) {
+        if (!(node instanceof SqlBasicCall call)) return false;
+        switch (node.getKind()) {
+            case GREATER_THAN, GREATER_THAN_OR_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL -> {
+                return isTimeIdentifier(call.operand(0)) && call.operand(1) instanceof org.apache.calcite.sql.SqlNumericLiteral
+                        || isTimeIdentifier(call.operand(1)) && call.operand(0) instanceof org.apache.calcite.sql.SqlNumericLiteral;
+            }
+            case BETWEEN -> {
+                return call.getOperandList().size() == 3 && isTimeIdentifier(call.operand(0))
+                        && call.operand(1) instanceof org.apache.calcite.sql.SqlNumericLiteral
+                        && call.operand(2) instanceof org.apache.calcite.sql.SqlNumericLiteral;
+            }
+            default -> { return false; }
+        }
+    }
+
+    private boolean isTimeIdentifier(SqlNode node) {
+        return node instanceof SqlIdentifier identifier && isTimeColumn(identifier);
     }
 
     private boolean isTimeOnlyPredicate(SqlNode node) {

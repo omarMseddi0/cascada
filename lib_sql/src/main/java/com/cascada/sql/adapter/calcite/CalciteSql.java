@@ -35,7 +35,12 @@ import org.apache.calcite.sql.validate.SqlConformanceEnum;
 public final class CalciteSql {
 
     /** Spark is the physical execution dialect; all generated SQL targets it. */
-    public static final SqlDialect SPARK_DIALECT = SparkSqlDialect.DEFAULT;
+    public static final SqlDialect SPARK_DIALECT = new SparkSqlDialect(SparkSqlDialect.DEFAULT_CONTEXT.withIdentifierQuoteString("`")) {
+        @Override
+        protected boolean identifierNeedsQuote(String identifier) {
+            return !identifier.matches("[A-Za-z_][A-Za-z0-9_]*") || super.identifierNeedsQuote(identifier);
+        }
+    };
 
     /**
      * MySQL lexing matches the customer's input dialect: back-tick quoting, case-insensitive name
@@ -87,6 +92,7 @@ public final class CalciteSql {
                 .withUpdateSetListNewline(false)
                 .withIndentation(0)
                 .withLineFolding(org.apache.calcite.sql.SqlWriterConfig.LineFolding.WIDE)
-        ).getSql().replace('\n', ' ').replaceAll("\\s+", " ").trim();
+        ).getSql().trim();
     }
 }
+

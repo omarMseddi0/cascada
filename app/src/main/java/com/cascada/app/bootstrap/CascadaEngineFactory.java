@@ -198,7 +198,7 @@ public final class CascadaEngineFactory {
 
     /** The read path for logical SQL — what a REST or JDBC adapter should drive. */
     public ExecuteLogicalQueryUseCase executeLogicalQueryUseCase() {
-        return new ExecuteLogicalQueryService(translator(), canonicalizer(), executeCachedQueryUseCase());
+        return new ExecuteLogicalQueryService(translator(), canonicalizer(), executeCachedQueryUseCase(), queryExecutor);
     }
 
     /** The administrator console's size measurement. */

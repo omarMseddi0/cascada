@@ -156,7 +156,8 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
                     && isColumnNamed(asCall.operand(0), physicalTime)) {
                 asCall.setOperand(0, bucketExpression(physicalTime));
             } else if (isColumnNamed(item, physicalTime)) {
-                selectList.set(index, bucketExpression(physicalTime));
+                selectList.set(index, org.apache.calcite.sql.fun.SqlStdOperatorTable.AS.createCall(
+                        SqlParserPos.ZERO, bucketExpression(physicalTime), new SqlIdentifier(physicalTime, SqlParserPos.ZERO)));
             }
         }
         for (int index = 0; index < group.size(); index++) {
@@ -168,7 +169,7 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
 
     private SqlNode bucketExpression(String physicalTime) {
         return CalciteSql.parseExpression(
-                "CAST(FLOOR(`" + physicalTime + "` / " + bucketStepSeconds + ") * " + bucketStepSeconds
+                "CAST(FLOOR(" + (physicalTime.matches("[A-Za-z_][A-Za-z0-9_]*") ? physicalTime : "`" + physicalTime.replace("`", "``") + "`") + " / " + bucketStepSeconds + ") * " + bucketStepSeconds
                         + " AS BIGINT)");
     }
 

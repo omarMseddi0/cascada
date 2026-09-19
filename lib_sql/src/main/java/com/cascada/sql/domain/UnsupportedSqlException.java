@@ -8,7 +8,7 @@ package com.cascada.sql.domain;
  * <b>bypasses to Spark</b> rather than being silently accepted — exactly like the Python
  * {@code _is_supported_order_expression} guard. Callers translate this exception into a cache bypass.
  */
-public class UnsupportedSqlException extends RuntimeException {
+public class UnsupportedSqlException extends com.cascada.cache.domain.UncacheableQueryException {
 
     public UnsupportedSqlException(String message) {
         super(message);

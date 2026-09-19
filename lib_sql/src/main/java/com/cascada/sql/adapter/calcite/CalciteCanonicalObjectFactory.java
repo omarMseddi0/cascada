@@ -53,7 +53,15 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
      */
     @Override
     public CanonicalQueryObject canonicalize(String physicalSql) {
-        return extractCanonicalObjectFromSql(physicalSql);
+        return extractCanonicalObjectFromSql(physicalSql, configuredTimeDimensions);
+    }
+
+    private final TimeDimensionMap configuredTimeDimensions;
+
+    public CalciteCanonicalObjectFactory() { this(TimeDimensionMap.defaults()); }
+
+    public CalciteCanonicalObjectFactory(TimeDimensionMap timeDimensions) {
+        this.configuredTimeDimensions = java.util.Objects.requireNonNull(timeDimensions);
     }
 
     private static final Set<String> AGGREGATE_FUNCTION_NAMES = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX");
@@ -76,6 +84,9 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                 extractAggregates(select, aggregateSpecs, compositeAliases, measureAggregates);
         List<String> projectionSignature = extractProjectionSignature(select);
         List<String> logicSignature = extractLogicSignature(select);
+        if (!hasMergeableProjection(parsed, timeDimensionMap)) {
+            logicSignature.add("UNSUPPORTED_MERGE_SHAPE");
+        }
 
         TimeRangeExtraction timeExtraction = extractTimeRangeAndFilters(select, timeDimensionMap);
         if (timeExtraction.timeRange().isEmpty()) {
@@ -106,6 +117,36 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
 
         return new CanonicalQueryObject(hashComponents, timeExtraction.timeRange().orElseThrow(), postProcessing,
                 metadata, sql, extractSourceSignature(select), projectionSignature, logicSignature);
+    }
+
+    private boolean hasMergeableProjection(ParsedQuery parsed, TimeDimensionMap dimensions) {
+        SqlSelect select = parsed.select();
+        if ((parsed.orderBy() != null && parsed.orderBy().offset != null) || select.getOffset() != null) return false;
+        if (extractOrderBy(parsed).stream().anyMatch(order -> order.expression().isPresent())) return false;
+        List<String> grouped = extractGroupBy(select);
+        Set<String> projectedGroups = new java.util.HashSet<>();
+        for (SqlNode item : select.getSelectList()) {
+            SqlNode expression = item;
+            String alias = null;
+            if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall as) {
+                expression = as.operand(0);
+                alias = ((SqlIdentifier) as.operand(1)).getSimple();
+            }
+            if (expression instanceof SqlBasicCall call && isAggregateName(call)) {
+                if (combineFunctionFor(call.getOperator().getName()) == null || call.getFunctionQuantifier() != null) return false;
+                continue;
+            }
+            String rendered = CalciteSql.unparse(expression);
+            if (!grouped.contains(rendered)) return false;
+            if (expression instanceof SqlIdentifier id && id.isSimple()
+                    && (alias == null || alias.equals(id.getSimple()))) {
+                projectedGroups.add(rendered);
+            } else if (floorBucketStep(expression, dimensions).isPresent()
+                    && alias != null && dimensions.isTimeColumn(alias)) {
+                projectedGroups.add(rendered);
+            } else return false;
+        }
+        return projectedGroups.containsAll(grouped);
     }
 
     // --- parsing ---------------------------------------------------------------------------------
@@ -494,7 +535,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         }
         for (SqlNode element : orderList) {
             boolean ascending = true;
-            boolean nullsFirst = false;
+            Boolean nullsFirst = null;
             SqlNode current = element;
             boolean unwrapping = true;
             while (unwrapping) {
@@ -515,9 +556,9 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                 }
             }
             if (current instanceof SqlIdentifier identifier) {
-                orderBy.add(OrderByClause.forColumn(simpleName(identifier), ascending, nullsFirst));
+                orderBy.add(OrderByClause.forColumn(simpleName(identifier), ascending, nullsFirst == null ? ascending : nullsFirst));
             } else {
-                orderBy.add(OrderByClause.forExpression(CalciteSql.unparse(current), ascending, nullsFirst));
+                orderBy.add(OrderByClause.forExpression(CalciteSql.unparse(current), ascending, nullsFirst == null ? ascending : nullsFirst));
             }
         }
         return orderBy;

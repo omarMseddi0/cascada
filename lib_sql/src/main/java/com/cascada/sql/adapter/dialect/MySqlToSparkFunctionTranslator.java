@@ -91,8 +91,8 @@ public final class MySqlToSparkFunctionTranslator {
      * and {@code OLD} to the prior-row alias.
      */
     public String resolveNewOldReferences(String triggerBodySql, String newRowAlias, String oldRowAlias) {
-        String resolved = NEW_REFERENCE.matcher(triggerBodySql).replaceAll(newRowAlias + ".$1");
-        resolved = OLD_REFERENCE.matcher(resolved).replaceAll(oldRowAlias + ".$1");
+        String resolved = replaceCode(triggerBodySql, NEW_REFERENCE, match -> newRowAlias + "." + match.group(1));
+        resolved = replaceCode(resolved, OLD_REFERENCE, match -> oldRowAlias + "." + match.group(1));
         return resolved;
     }
 
@@ -101,7 +101,7 @@ public final class MySqlToSparkFunctionTranslator {
         for (Map.Entry<String, String> rename : FUNCTION_RENAMES.entrySet()) {
             // \bFUNC\s*\( -> spark(   (case-insensitive; only at a call site)
             Pattern callSite = Pattern.compile("(?i)\\b" + Pattern.quote(rename.getKey()) + "\\s*\\(");
-            result = callSite.matcher(result).replaceAll(Matcher.quoteReplacement(rename.getValue() + "("));
+            result = replaceCode(result, callSite, match -> rename.getValue() + "(");
         }
         return result;
     }
@@ -110,6 +110,7 @@ public final class MySqlToSparkFunctionTranslator {
         Matcher matcher = DATE_FORMAT_CALL.matcher(sql);
         StringBuilder rebuilt = new StringBuilder();
         while (matcher.find()) {
+            if (!codePositions(sql)[matcher.start()]) continue;
             String functionName = matcher.group(1).toLowerCase(java.util.Locale.ROOT);
             String firstArgument = matcher.group(2).trim();
             String formatString = matcher.group(3);
@@ -131,11 +132,51 @@ public final class MySqlToSparkFunctionTranslator {
 
     private String fixCastTypes(String sql) {
         String result = sql;
-        result = Pattern.compile("(?i)\\bAS\\s+SIGNED\\b").matcher(result).replaceAll("AS BIGINT");
-        result = Pattern.compile("(?i)\\bAS\\s+UNSIGNED\\b").matcher(result).replaceAll("AS BIGINT");
-        result = Pattern.compile("(?i)\\bAS\\s+CHAR\\b").matcher(result).replaceAll("AS STRING");
-        result = Pattern.compile("(?i)\\bAS\\s+DATETIME\\b").matcher(result).replaceAll("AS TIMESTAMP");
+        result = replaceCode(result, Pattern.compile("(?i)\\bAS\\s+SIGNED\\b"), match -> "AS BIGINT");
+        result = replaceCode(result, Pattern.compile("(?i)\\bAS\\s+UNSIGNED\\b"), match -> "AS BIGINT");
+        result = replaceCode(result, Pattern.compile("(?i)\\bAS\\s+CHAR\\b"), match -> "AS STRING");
+        result = replaceCode(result, Pattern.compile("(?i)\\bAS\\s+DATETIME\\b"), match -> "AS TIMESTAMP");
         return result;
+    }
+
+    private static String replaceCode(String sql, Pattern pattern,
+                                      java.util.function.Function<Matcher, String> replacement) {
+        boolean[] code = codePositions(sql);
+        Matcher matcher = pattern.matcher(sql);
+        StringBuilder out = new StringBuilder();
+        while (matcher.find()) {
+            if (code[matcher.start()]) matcher.appendReplacement(out, Matcher.quoteReplacement(replacement.apply(matcher)));
+        }
+        matcher.appendTail(out);
+        return out.toString();
+    }
+
+    private static boolean[] codePositions(String sql) {
+        boolean[] code = new boolean[sql.length()];
+        int i = 0;
+        while (i < sql.length()) {
+            char c = sql.charAt(i);
+            if (c == '\'' || c == '"' || c == '`') {
+                char quote = c;
+                i++;
+                while (i < sql.length()) {
+                    char next = sql.charAt(i++);
+                    if (next == '\\' && i < sql.length()) { i++; continue; }
+                    if (next == quote) {
+                        if (i < sql.length() && sql.charAt(i) == quote) { i++; continue; }
+                        break;
+                    }
+                }
+            } else if (sql.startsWith("--", i)) {
+                while (i < sql.length() && sql.charAt(i) != '\n') i++;
+            } else if (sql.startsWith("/*", i)) {
+                int end = sql.indexOf("*/", i + 2);
+                i = end < 0 ? sql.length() : end + 2;
+            } else {
+                code[i++] = true;
+            }
+        }
+        return code;
     }
 
     /** Principle 4 of the plan: the translated SQL must parse (now validated by Apache Calcite). */

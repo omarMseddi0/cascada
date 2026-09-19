@@ -113,4 +113,17 @@ class CascadaEngineFactoryTest {
         ExecuteCachedQueryUseCase.Result result = factory.executeLogicalQueryUseCase().query(LOGICAL_SQL);
         assertThat(result.frame().rowCount()).isEqualTo(2);
     }
+
+    @Test
+    void configuredTimeColumnIsRecognisedByCanonicalization() {
+        EngineSettings settings = new EngineSettings(
+                new com.cascada.cache.application.service.CacheExecutionConfiguration(86_400, 300, "event_time"),
+                "redis://unused:6379", "traffic", "/tmp/traffic", true, 10);
+        CascadaEngineFactory configured = new CascadaEngineFactory(settings, executor);
+
+        ExecuteCachedQueryUseCase.Result result = configured.executeLogicalQueryUseCase().query(
+                "SELECT SUM(bytes) AS total_bytes FROM traffic WHERE event_time >= 0 AND event_time <= 86399");
+
+        assertThat(result.servedThroughCache()).isTrue();
+    }
 }

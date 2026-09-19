@@ -165,9 +165,7 @@ class WarmingOrchestratorTest {
     }
 
     @Test
-    void coverageBitmapSkipsWarmedBucketsWithoutAnyPerBucketExistsRoundTrip() {
-        // A 55-day lookback must NOT pay 55 EXISTS calls every cycle: with a coverage index, one
-        // bitmap load answers presence for the whole window and only the missing buckets are warmed.
+    void coverageBitmapVerifiesAClaimedBucketStillExists() {
         com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter coverageIndex =
                 new com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter();
         WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(),
@@ -186,7 +184,24 @@ class WarmingOrchestratorTest {
         assertThat(next.bucketsSkipped()).isEqualTo(55);
         assertThat(next.bucketsWarmed()).isEqualTo(1);   // only day 55 computed
         assertThat(sparkCalls.get()).isEqualTo(1);
-        assertThat(backend.existsCallCount()).isEqualTo(existsCallsBefore); // zero EXISTS round-trips
+        assertThat(backend.existsCallCount()).isGreaterThan(existsCallsBefore);
+    }
+
+    @Test
+    void staleCoverageBitIsRepairedAndTheMissingBucketIsWarmedAgain() {
+        com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter coverageIndex =
+                new com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter();
+        WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(), passthroughGap,
+                new WarmingQueue(), new QueryPopularityTracker(), coverageIndex, DAY, 10);
+        CanonicalQueryObject canonical = canonical("SELECT SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100");
+        orchestrator.warmSinglePattern(A, canonical, 0, DAY - 1, false);
+        backend.flush(com.cascada.cache.domain.admin.CacheScope.everything());
+        sparkCalls.set(0);
+
+        WarmingOrchestrator.PatternWarmingResult result = orchestrator.warmSinglePattern(A, canonical, 0, DAY - 1, false);
+
+        assertThat(result.bucketsWarmed()).isEqualTo(1);
+        assertThat(sparkCalls.get()).isEqualTo(1);
     }
 
     @Test

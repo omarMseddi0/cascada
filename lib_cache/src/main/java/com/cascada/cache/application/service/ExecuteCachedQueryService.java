@@ -1,6 +1,7 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
+import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.domain.CacheDecision;
 import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;
@@ -24,16 +25,25 @@ public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCas
     private final QueryHashGenerator queryHashGenerator;
     private final CacheExecutionEngine cacheExecutionEngine;
     private final QueryExecutorPort sparkExecutor;
+    private final WarmCacheUseCase warmer;
 
     public ExecuteCachedQueryService(SafetyRuleRegistry safetyRuleRegistry, CacheConfiguration cacheConfiguration,
                                      QueryHashGenerator queryHashGenerator,
                                      CacheExecutionEngine cacheExecutionEngine,
                                      QueryExecutorPort sparkExecutor) {
+        this(safetyRuleRegistry, cacheConfiguration, queryHashGenerator, cacheExecutionEngine, sparkExecutor, null);
+    }
+
+    public ExecuteCachedQueryService(SafetyRuleRegistry safetyRuleRegistry, CacheConfiguration cacheConfiguration,
+                                     QueryHashGenerator queryHashGenerator,
+                                     CacheExecutionEngine cacheExecutionEngine,
+                                     QueryExecutorPort sparkExecutor, WarmCacheUseCase warmer) {
         this.safetyRuleRegistry = safetyRuleRegistry;
         this.cacheConfiguration = cacheConfiguration;
         this.queryHashGenerator = queryHashGenerator;
         this.cacheExecutionEngine = cacheExecutionEngine;
         this.sparkExecutor = sparkExecutor;
+        this.warmer = warmer;
     }
 
     @Override
@@ -44,6 +54,7 @@ public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCas
         }
         QueryHash queryHash =
                 queryHashGenerator.generateQueryHash(canonicalObject, cacheConfiguration.fixedStepSeconds());
+        if (warmer != null) warmer.recordQuery(queryHash, canonicalObject);
         return new Result(cacheExecutionEngine.execute(canonicalObject, queryHash), true);
     }
 

@@ -163,7 +163,10 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             if (forceOverwrite) {
                 alreadyWarmed = false;
             } else if (coverage.isPresent()) {
-                alreadyWarmed = coverage.get().isCovered(currentBucketStart);
+                alreadyWarmed = coverage.get().isCovered(currentBucketStart) && isAlreadyWarmed(key);
+                if (!alreadyWarmed) {
+                    coverageIndex.markEvicted(queryHash, bucketSeconds, currentBucketStart);
+                }
             } else {
                 alreadyWarmed = isAlreadyWarmed(key);
             }

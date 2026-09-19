@@ -144,15 +144,14 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     @Override
     public long flush(CacheScope scope) {
         RedisCommands<byte[], byte[]> sync = connection.sync();
-        ScanArgs scanArgs = scope.isEverything()
-                ? ScanArgs.Builder.limit(512)
-                : ScanArgs.Builder.limit(512).match(scope.keyPrefix() + "*");
+        ScanArgs scanArgs = ScanArgs.Builder.limit(512);
 
         long purged = 0L;
         ScanCursor cursor = ScanCursor.INITIAL;
         do {
             KeyScanCursor<byte[]> page = sync.scan(cursor, scanArgs);
-            List<byte[]> keys = page.getKeys();
+            List<byte[]> keys = page.getKeys().stream()
+                    .filter(key -> scope.matches(new String(key, StandardCharsets.UTF_8))).toList();
             if (!keys.isEmpty()) {
                 purged += sync.del(keys.toArray(new byte[0][]));
             }

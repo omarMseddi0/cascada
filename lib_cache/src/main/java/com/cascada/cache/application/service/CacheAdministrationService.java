@@ -5,6 +5,8 @@ import com.cascada.cache.application.port.in.MeasureCacheSizeUseCase;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.application.port.out.CacheBackendPort;
+import com.cascada.cache.application.port.out.CoverageIndexPort;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.identity.domain.TenantIdentifier;
 
 import java.util.Objects;
@@ -29,9 +31,18 @@ import java.util.Objects;
 public final class CacheAdministrationService implements MeasureCacheSizeUseCase, FlushCacheUseCase {
 
     private final CacheBackendPort cacheBackend;
+    private final CoverageIndexPort coverageIndex;
+    private final CubeShapeCatalog cubeCatalog;
 
     public CacheAdministrationService(CacheBackendPort cacheBackend) {
+        this(cacheBackend, null, null);
+    }
+
+    public CacheAdministrationService(CacheBackendPort cacheBackend, CoverageIndexPort coverageIndex,
+                                      CubeShapeCatalog cubeCatalog) {
         this.cacheBackend = Objects.requireNonNull(cacheBackend, "cacheBackend");
+        this.coverageIndex = coverageIndex;
+        this.cubeCatalog = cubeCatalog;
     }
 
     /** The whole-cache size report (admin "Cache size" button, all tenants). */
@@ -62,18 +73,28 @@ public final class CacheAdministrationService implements MeasureCacheSizeUseCase
     /** Purge the entire cache; returns the number of buckets removed. */
     @Override
     public long flushEverything() {
-        return cacheBackend.flush(CacheScope.everything());
+        long purged = cacheBackend.flush(CacheScope.everything());
+        if (coverageIndex != null) coverageIndex.clear();
+        if (cubeCatalog != null) cubeCatalog.clear();
+        return purged;
     }
 
     /** Purge one tenant's buckets only; returns the number removed. */
     @Override
     public long flushTenant(TenantIdentifier tenant) {
-        return cacheBackend.flush(CacheScope.forTenant(tenant));
+        long purged = cacheBackend.flush(CacheScope.forTenant(tenant));
+        // Coverage and cube entries are not tenant-addressable yet; clear their advisory state safely.
+        if (coverageIndex != null) coverageIndex.clear();
+        if (cubeCatalog != null) cubeCatalog.clear();
+        return purged;
     }
 
     /** Surgical eviction by an explicit key prefix (e.g. a query-hash family or a bucket-size band). */
     @Override
     public long flushKeyPrefix(String keyPrefix) {
-        return cacheBackend.flush(CacheScope.forKeyPrefix(keyPrefix));
+        long purged = cacheBackend.flush(CacheScope.forKeyPrefix(keyPrefix));
+        if (coverageIndex != null) coverageIndex.clear();
+        if (cubeCatalog != null) cubeCatalog.clear();
+        return purged;
     }
 }

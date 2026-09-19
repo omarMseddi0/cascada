@@ -51,6 +51,11 @@ public final class InMemoryCoverageIndexAdapter implements CoverageIndexPort {
         }
     }
 
+    @Override
+    public void clear() {
+        bitmapsByFamily.clear();
+    }
+
     private String familyKey(QueryHash queryHash, long bucketSeconds) {
         return "CV:B" + bucketSeconds + ":" + queryHash.value();
     }

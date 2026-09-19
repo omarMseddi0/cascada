@@ -25,4 +25,7 @@ public interface CoverageIndexPort {
 
     /** Record that one bucket of this family was evicted/expired. */
     void markEvicted(QueryHash queryHash, long bucketSeconds, long bucketStartTimestampSeconds);
+
+    /** Drop all advisory state after a whole-cache invalidation. */
+    void clear();
 }

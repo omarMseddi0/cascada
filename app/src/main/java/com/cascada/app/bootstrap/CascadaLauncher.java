@@ -43,8 +43,8 @@ public final class CascadaLauncher {
     public static void main(String[] args) {
         EngineSettings settings = new EnvironmentSettingsReader(SystemEnvironmentAdapter.INSTANCE).read();
 
-        try (SparkDeltaQueryExecutor executor = sparkExecutor(settings)) {
-            CascadaEngineFactory factory = new CascadaEngineFactory(settings, executor);
+        try (SparkDeltaQueryExecutor executor = sparkExecutor(settings);
+             CascadaEngineFactory factory = new CascadaEngineFactory(settings, executor)) {
 
             // TODO(cascada): replace this with a real driving adapter (REST server / JDBC listener) that
             // stays up. Handing the ports to the CLI is a placeholder so the wiring is exercised and the

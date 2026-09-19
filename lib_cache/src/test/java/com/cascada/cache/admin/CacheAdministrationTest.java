@@ -9,6 +9,8 @@ import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.application.port.out.CacheBackendPort;
+import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.identity.domain.TenantIdentifier;
 import org.junit.jupiter.api.Test;
 
@@ -115,6 +117,23 @@ final class CacheAdministrationTest {
 
         assertThat(purged).isEqualTo(2);
         assertThat(admin.measureCacheSize().totalBytes()).isZero();
+    }
+
+    @Test
+    void flushEverythingAlsoClearsCoverageAndCubeState() {
+        InMemoryCoverageIndexAdapter coverage = new InMemoryCoverageIndexAdapter();
+        CubeShapeCatalog cube = new CubeShapeCatalog();
+        CacheAdministrationService invalidatingAdmin = new CacheAdministrationService(backend, coverage, cube);
+        com.cascada.identity.domain.QueryHash hash = com.cascada.identity.domain.QueryHash.of("0000000000000000000000000000000a");
+        coverage.markCached(hash, 86_400, 0);
+        cube.register(new com.cascada.cache.domain.TimeRange(0, 86_399),
+                new com.cascada.cache.domain.cube.QueryShape(java.util.Set.of(), java.util.Set.of(), java.util.Set.of("SUM(x)")),
+                ResultFrame.builder().column("SUM(x)", ColumnType.DOUBLE).row(Map.of("SUM(x)", 1.0)).build());
+
+        invalidatingAdmin.flushEverything();
+
+        assertThat(coverage.load(hash, 86_400)).isEmpty();
+        assertThat(cube.windowCount()).isZero();
     }
 
     @Test

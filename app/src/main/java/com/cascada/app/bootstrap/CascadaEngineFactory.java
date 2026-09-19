@@ -32,6 +32,7 @@ import com.cascada.sql.adapter.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.adapter.calcite.LogicalToPhysicalSqlTranslator;
 import com.cascada.sql.domain.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
+import com.cascada.sql.domain.TimeDimensionMap;
 
 import java.util.Map;
 import java.util.Objects;
@@ -74,7 +75,7 @@ import java.util.Objects;
  *       never fire.</li>
  * </ul>
  */
-public final class CascadaEngineFactory {
+public final class CascadaEngineFactory implements AutoCloseable {
 
     private final EngineSettings settings;
 
@@ -84,6 +85,9 @@ public final class CascadaEngineFactory {
     private final CoverageIndexPort coverageIndex;
     private final QueryPopularityPort popularityTracker;
     private final TableCatalog tableCatalog;
+    private final CubeShapeCatalog cubeCatalog;
+    private final WarmingOrchestrator warmingOrchestrator;
+    private final ExecuteCachedQueryUseCase cachedQueryUseCase;
 
     /**
      * @param queryExecutor the execution tier. Passed in rather than built here because it is the one
@@ -97,6 +101,14 @@ public final class CascadaEngineFactory {
         this.coverageIndex = coverageIndex();
         this.popularityTracker = popularityTracker();
         this.tableCatalog = tableCatalog();
+        this.cubeCatalog = new CubeShapeCatalog();
+        this.warmingOrchestrator = new WarmingOrchestrator(cacheBackend, queryExecutor, gapQueryRewriter(),
+                new WarmingQueue(), popularityTracker, coverageIndex, settings.cacheExecution().bucketSeconds(),
+                settings.warmingTopNQueries());
+        CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
+                gapQueryRewriter(), settings.cacheExecution(), coverageIndex, cubeCatalog);
+        this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
+                cacheConfiguration(), new QueryHashGenerator(), executionEngine, queryExecutor, warmingOrchestrator);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -154,7 +166,8 @@ public final class CascadaEngineFactory {
 
     /** Calcite canonicalisation, behind the cache's port. */
     private SqlCanonicalizerPort canonicalizer() {
-        return new CalciteCanonicalObjectFactory();
+        return new CalciteCanonicalObjectFactory(new TimeDimensionMap(
+                java.util.Set.of(settings.cacheExecution().timeColumnName())));
     }
 
     /**
@@ -181,19 +194,7 @@ public final class CascadaEngineFactory {
 
     /** The read path for an already-canonicalised query. */
     public ExecuteCachedQueryUseCase executeCachedQueryUseCase() {
-        CacheExecutionEngine executionEngine = new CacheExecutionEngine(
-                cacheBackend, queryExecutor, gapQueryRewriter(), settings.cacheExecution(),
-                coverageIndex, new CubeShapeCatalog());
-        return new ExecuteCachedQueryService(
-                SafetyRuleRegistry.defaultRegistry(),
-                // TODO(cascada): the auto-profiler must supply highCardinalityColumns and
-                // liquidClusteredFilterColumns here. While both sets are empty,
-                // HighCardinalityGroupByRule and LiquidClusteredFilterRule can never fire, so a
-                // group-by on a near-unique column will be cached instead of bypassed.
-                CacheConfiguration.defaults(),
-                new QueryHashGenerator(),
-                executionEngine,
-                queryExecutor);
+        return cachedQueryUseCase;
     }
 
     /** The read path for logical SQL — what a REST or JDBC adapter should drive. */
@@ -203,12 +204,12 @@ public final class CascadaEngineFactory {
 
     /** The administrator console's size measurement. */
     public MeasureCacheSizeUseCase measureCacheSizeUseCase() {
-        return new CacheAdministrationService(cacheBackend);
+        return new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
     }
 
     /** The administrator console's flush action. */
     public FlushCacheUseCase flushCacheUseCase() {
-        return new CacheAdministrationService(cacheBackend);
+        return new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
     }
 
     /**
@@ -224,13 +225,33 @@ public final class CascadaEngineFactory {
      * a driving adapter (a scheduled executor, or a Kubernetes CronJob invoking a CLI subcommand).
      */
     public WarmCacheUseCase warmCacheUseCase() {
-        return new WarmingOrchestrator(
-                cacheBackend, queryExecutor, gapQueryRewriter(), new WarmingQueue(), popularityTracker,
-                coverageIndex, settings.cacheExecution().bucketSeconds(), settings.warmingTopNQueries());
+        return warmingOrchestrator;
     }
 
     /** Exposed so a launcher can close adapters that hold sockets or sessions. */
     public CacheBackendPort cacheBackendForShutdown() {
         return cacheBackend;
+    }
+
+    private CacheConfiguration cacheConfiguration() {
+        long bucketSeconds = settings.cacheExecution().bucketSeconds();
+        if (bucketSeconds % 3_600L != 0) {
+            throw new IllegalArgumentException("CASCADA_BUCKET_SECONDS must be a whole number of hours");
+        }
+        CacheConfiguration defaults = CacheConfiguration.defaults();
+        return new CacheConfiguration(defaults.impossibleAggregates(), defaults.highCardinalityColumns(),
+                defaults.liquidClusteredFilterColumns(), settings.cacheExecution().fixedStepSeconds(),
+                Math.toIntExact(bucketSeconds / 3_600L), defaults.minimumCacheableTimeRangeSeconds());
+    }
+
+    @Override
+    public void close() {
+        if (cacheBackend instanceof AutoCloseable closeable) {
+            try {
+                closeable.close();
+            } catch (Exception failure) {
+                throw new IllegalStateException("failed to close cache backend", failure);
+            }
+        }
     }
 }

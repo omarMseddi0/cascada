@@ -158,6 +158,9 @@ public final class CubeConsistencyVerifier {
         Map<String, AggregateFunction> declaredAggregates =
                 new LinkedHashMap<>(AggregateFunctionResolver.fromAggregateSpecs(query.aggregates()));
         declaredAggregates.putAll(AggregateFunctionResolver.fromAggregateSpecs(candidate.shape().aggregates()));
+        query.outputAggregates().forEach((column, function) -> declaredAggregates.put(normalize(column), function));
+        candidate.shape().outputAggregates()
+                .forEach((column, function) -> declaredAggregates.put(normalize(column), function));
 
         Map<Map<String, String>, Map<String, Double>> groups = new LinkedHashMap<>();
         for (Map<String, Object> row : frame.rows()) {

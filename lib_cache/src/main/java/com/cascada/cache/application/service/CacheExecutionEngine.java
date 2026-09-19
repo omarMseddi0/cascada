@@ -94,7 +94,7 @@ public final class CacheExecutionEngine {
                 && !canonicalObject.postProcessing().hasLimit()
                 && !canonicalObject.postProcessing().hasOrderBy();
         QueryShape queryShape = cubeEligible
-                ? CubeShapeCatalog.shapeOf(canonicalObject.hashComponents())
+                ? CubeShapeCatalog.shapeOf(canonicalObject)
                 : null;
         if (cubeEligible) {
             Optional<ResultFrame> cubeAnswer = cubeCatalog.tryAnswer(canonicalObject.timeRange(), queryShape);

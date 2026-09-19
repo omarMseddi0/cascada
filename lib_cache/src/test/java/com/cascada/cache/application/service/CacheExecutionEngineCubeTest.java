@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -100,6 +101,25 @@ class CacheExecutionEngineCubeTest {
         // coarser shape but a SHORTER window: serving the 3-day roll-up would be wrong data
         CanonicalQueryObject differentWindow = globalAggregate(List.of("appName"), new TimeRange(0, 2 * DAY - 1));
         engine.execute(differentWindow, hashGenerator.generateQueryHash(differentWindow, 300));
+
+        assertThat(sparkCalls.get()).isEqualTo(2);
+    }
+
+    @Test
+    void aDifferentSourceNeverSeesTheCataloguedShape() {
+        TimeRange window = new TimeRange(0, 3 * DAY - 1);
+        AtomicInteger sparkCalls = new AtomicInteger();
+        QueryExecutorPort fakeSpark = sql -> {
+            sparkCalls.incrementAndGet();
+            return fineGrainedFrame();
+        };
+        CacheExecutionEngine engine = engineWith(fakeSpark, new CubeShapeCatalog());
+        CanonicalQueryObject traffic = globalAggregate(List.of("appName", "deviceType"), window);
+        engine.execute(traffic, hashGenerator.generateQueryHash(traffic, 300));
+        CanonicalQueryObject archive = new CanonicalQueryObject(traffic.hashComponents(), window,
+                PostProcessing.none(), QueryMetadata.globalAggregate(), "FULL_SQL", List.of("traffic_archive"), List.of());
+
+        engine.execute(archive, hashGenerator.generateQueryHash(archive, 300));
 
         assertThat(sparkCalls.get()).isEqualTo(2);
     }

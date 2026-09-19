@@ -84,7 +84,9 @@ public final class CubeSubsumptionPlanner {
     }
 
     public boolean subsumes(QueryShape candidate, QueryShape query) {
-        return isGroupBySuperset(candidate, query)
+        return candidate.sources().equals(query.sources())
+                && candidate.outputAggregates().equals(query.outputAggregates())
+                && isGroupBySuperset(candidate, query)
                 && areAggregatesCompatible(query)
                 && areAggregatesDerivable(candidate, query)
                 && isFilterNarrowable(candidate, query)
@@ -200,6 +202,9 @@ public final class CubeSubsumptionPlanner {
         Map<String, AggregateFunction> declaredAggregates =
                 new LinkedHashMap<>(AggregateFunctionResolver.fromAggregateSpecs(query.aggregates()));
         declaredAggregates.putAll(AggregateFunctionResolver.fromAggregateSpecs(candidate.shape().aggregates()));
+        query.outputAggregates().forEach((column, function) -> declaredAggregates.put(normalize(column), function));
+        candidate.shape().outputAggregates()
+                .forEach((column, function) -> declaredAggregates.put(normalize(column), function));
         Map<String, AggregateFunction> aggregations = new LinkedHashMap<>();
         measureColumns.forEach(measure ->
                 aggregations.put(measure, AggregateFunctionResolver.resolve(measure, declaredAggregates)));

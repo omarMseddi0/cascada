@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import com.cascada.cache.domain.merge.AggregateFunction;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -102,6 +103,31 @@ class CubeShapeCatalogTest {
         QueryShape avgQuery = new QueryShape(Set.of("appName"), Set.of(), Set.of("AVG(latency)"));
 
         assertThat(catalog.tryAnswer(WINDOW, avgQuery)).isEmpty();
+    }
+
+    @Test
+    void preservesAnAliasedMaximumDuringRollUp() {
+        QueryShape fine = new QueryShape(Set.of("country"), Set.of(), Set.of("MAX(x)"), Set.of("traffic"),
+                Map.of("peak", AggregateFunction.MAXIMUM));
+        QueryShape coarse = new QueryShape(Set.of(), Set.of(), Set.of("MAX(x)"), Set.of("traffic"),
+                Map.of("peak", AggregateFunction.MAXIMUM));
+        ResultFrame frame = ResultFrame.builder().column("country", ColumnType.STRING).column("peak", ColumnType.LONG)
+                .row("FR", 10L).row("US", 20L).build();
+        catalog.register(WINDOW, fine, frame);
+
+        Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, coarse);
+
+        assertThat(answer).isPresent();
+        assertThat(answer.get().rows().getFirst().get("peak")).isEqualTo(20.0);
+    }
+
+    @Test
+    void refusesNullMeasuresInsteadOfThrowing() {
+        QueryShape shape = new QueryShape(Set.of(), Set.of(), Set.of("SUM(x)"));
+        ResultFrame nullSum = ResultFrame.builder().column("SUM(x)", ColumnType.LONG).appendNull().build();
+        catalog.register(WINDOW, shape, nullSum);
+
+        assertThat(catalog.tryAnswer(WINDOW, shape)).isEmpty();
     }
 
     @Test

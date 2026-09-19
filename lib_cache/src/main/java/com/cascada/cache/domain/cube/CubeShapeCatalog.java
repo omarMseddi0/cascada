@@ -1,6 +1,7 @@
 package com.cascada.cache.domain.cube;
 
 import com.cascada.cache.domain.HashComponents;
+import com.cascada.cache.domain.CanonicalQueryObject;
 import com.cascada.cache.domain.TimeRange;
 import com.cascada.cache.domain.frame.ResultFrame;
 
@@ -60,6 +61,14 @@ public final class CubeShapeCatalog {
                 new HashSet<>(components.aggregates()));
     }
 
+    /** The production shape includes source and output aliases, both required for safe reuse. */
+    public static QueryShape shapeOf(CanonicalQueryObject query) {
+        HashComponents components = query.hashComponents();
+        return new QueryShape(new HashSet<>(components.groupBy()), new HashSet<>(components.filters()),
+                new HashSet<>(components.aggregates()), new HashSet<>(query.sourceSignature()),
+                query.metadata().measureAggregates());
+    }
+
     /**
      * Catalog a complete answer for {@code timeRange} computed at {@code shape}. Empty frames carry
      * no roll-up information; re-registering an already-catalogued shape for the same window is a
@@ -88,7 +97,12 @@ public final class CubeShapeCatalog {
         if (best.isEmpty()) {
             return Optional.empty();
         }
-        ResultFrame answer = planner.rollUpAndFilterDown(best.get(), query);
+        ResultFrame answer;
+        try {
+            answer = planner.rollUpAndFilterDown(best.get(), query);
+        } catch (RuntimeException malformedCandidate) {
+            return Optional.empty();
+        }
         if (!verifier.verifyRollUp(best.get(), query, answer).isConsistent()) {
             return Optional.empty();
         }

@@ -121,6 +121,7 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
             return null;
         }
         return switch (type) {
+            case DECIMAL -> row.getDecimal(index);
             case LONG -> ((Number) row.get(index)).longValue();
             case DOUBLE -> ((Number) row.get(index)).doubleValue();
             case STRING -> String.valueOf(row.get(index));
@@ -133,9 +134,10 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
             return ColumnType.LONG;
         }
         if (dataType.equals(DataTypes.FloatType) || dataType.equals(DataTypes.DoubleType)
-                || dataType instanceof org.apache.spark.sql.types.DecimalType) {
+) {
             return ColumnType.DOUBLE;
         }
+        if (dataType instanceof org.apache.spark.sql.types.DecimalType) return ColumnType.DECIMAL;
         return ColumnType.STRING;
     }
 

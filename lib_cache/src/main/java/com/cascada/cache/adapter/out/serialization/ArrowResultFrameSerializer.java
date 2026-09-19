@@ -110,6 +110,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
                 case LONG -> ((BigIntVector) vector).setSafe(rowIndex, frame.longAt(rowIndex, column));
                 case DOUBLE -> ((Float8Vector) vector).setSafe(rowIndex, frame.doubleAt(rowIndex, column));
                 case STRING -> ((VarCharVector) vector).setSafe(rowIndex, new Text(frame.stringAt(rowIndex, column)));
+                case DECIMAL -> ((VarCharVector) vector).setSafe(rowIndex, new Text(frame.valueAt(rowIndex, column).toString()));
             }
         }
         vector.setValueCount(frame.rowCount());
@@ -150,6 +151,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             return;
         }
         switch (type) {
+            case DECIMAL -> builder.appendDecimal(new java.math.BigDecimal(new String(((VarCharVector) vector).get(rowIndex), java.nio.charset.StandardCharsets.UTF_8)));
             case LONG -> builder.appendLong(((BigIntVector) vector).get(rowIndex));
             case DOUBLE -> builder.appendDouble(((Float8Vector) vector).get(rowIndex));
             case STRING -> builder.appendString(new String(((VarCharVector) vector).get(rowIndex),
@@ -160,7 +162,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
     private Schema toArrowSchema(ResultFrame frame) {
         List<Field> fields = new ArrayList<>(frame.columnNames().size());
         for (String column : frame.columnNames()) {
-            fields.add(new Field(column, FieldType.nullable(toArrowType(frame.columnType(column))), null));
+            fields.add(new Field(column, new FieldType(true, toArrowType(frame.columnType(column)), null, frame.columnType(column) == ColumnType.DECIMAL ? java.util.Map.of("cascada.type", "decimal") : null), null));
         }
         return new Schema(fields);
     }
@@ -169,11 +171,12 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
         return switch (type) {
             case LONG -> new ArrowType.Int(64, true);
             case DOUBLE -> new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE);
-            case STRING -> new ArrowType.Utf8();
+            case STRING, DECIMAL -> new ArrowType.Utf8();
         };
     }
 
     private ColumnType fromArrowType(Field field) {
+        if ("decimal".equals(field.getMetadata().get("cascada.type"))) return ColumnType.DECIMAL;
         ArrowType arrowType = field.getType();
         if (arrowType instanceof ArrowType.Int) {
             return ColumnType.LONG;

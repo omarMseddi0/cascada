@@ -98,14 +98,14 @@ class CacheExecutionEngineTest {
     }
 
     @Test
-    void mergeServiceDeduplicatesAnExactOverlapBucketAcrossCacheAndSpark() {
-        // RC3 at the engine level: identical frames from two sources must not double-count.
+    void mergeServicePreservesEqualContributionsFromDisjointBuckets() {
+        // Equal values from disjoint buckets are independent contributions, not duplicates.
         FrameMergeService merge = new FrameMergeService(300, "ts");
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         ResultFrame fromCache = appFrame("netflix", 10);
-        ResultFrame fromSpark = appFrame("netflix", 10); // exact duplicate
+        ResultFrame fromSpark = appFrame("netflix", 10); // equal contribution from a different bucket
         ResultFrame merged = merge.mergeAndReconstruct(List.of(fromCache, fromSpark), canonical);
-        assertThat(((Number) merged.rows().get(0).get("bytes")).doubleValue()).isEqualTo(10.0);
+        assertThat(((Number) merged.rows().get(0).get("bytes")).doubleValue()).isEqualTo(20.0);
     }
 
     @Test

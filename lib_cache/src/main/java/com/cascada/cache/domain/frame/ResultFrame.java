@@ -127,6 +127,7 @@ public final class ResultFrame {
         }
         return switch (columnTypes.get(columnNames.get(column))) {
             case STRING -> ((String[]) columns[column])[row];
+            case DECIMAL -> ((java.math.BigDecimal[]) columns[column])[row].toPlainString();
             case LONG -> Long.toString(((long[]) columns[column])[row]);
             case DOUBLE -> Double.toString(((double[]) columns[column])[row]);
         };
@@ -156,6 +157,7 @@ public final class ResultFrame {
             case LONG -> ((long[]) columns[column])[row];
             case DOUBLE -> ((double[]) columns[column])[row];
             case STRING -> ((String[]) columns[column])[row];
+            case DECIMAL -> ((java.math.BigDecimal[]) columns[column])[row];
         };
     }
 
@@ -302,6 +304,15 @@ public final class ResultFrame {
             return this;
         }
 
+        public Builder appendDecimal(java.math.BigDecimal value) {
+            requireType(ColumnType.DECIMAL);
+            ensureCapacityForCell();
+            ((java.math.BigDecimal[]) columns[nextColumn])[rowCount] = value;
+            present[nextColumn][rowCount] = value != null;
+            advance();
+            return this;
+        }
+
         public Builder appendNull() {
             ensureCapacityForCell();
             advance();
@@ -331,6 +342,7 @@ public final class ResultFrame {
                 case LONG -> appendLong(((Number) value).longValue());
                 case DOUBLE -> appendDouble(((Number) value).doubleValue());
                 case STRING -> appendString(value.toString());
+                case DECIMAL -> appendDecimal((java.math.BigDecimal) value);
             }
         }
 
@@ -381,6 +393,7 @@ public final class ResultFrame {
                 case LONG -> new long[length];
                 case DOUBLE -> new double[length];
                 case STRING -> new String[length];
+                case DECIMAL -> new java.math.BigDecimal[length];
             };
         }
 
@@ -389,6 +402,7 @@ public final class ResultFrame {
                 case LONG -> java.util.Arrays.copyOf((long[]) source, length);
                 case DOUBLE -> java.util.Arrays.copyOf((double[]) source, length);
                 case STRING -> java.util.Arrays.copyOf((String[]) source, length);
+                case DECIMAL -> java.util.Arrays.copyOf((java.math.BigDecimal[]) source, length);
             };
         }
 
@@ -397,6 +411,7 @@ public final class ResultFrame {
                 case LONG -> java.util.Arrays.copyOf((long[]) source, length);
                 case DOUBLE -> java.util.Arrays.copyOf((double[]) source, length);
                 case STRING -> java.util.Arrays.copyOf((String[]) source, length);
+                case DECIMAL -> java.util.Arrays.copyOf((java.math.BigDecimal[]) source, length);
             };
         }
     }

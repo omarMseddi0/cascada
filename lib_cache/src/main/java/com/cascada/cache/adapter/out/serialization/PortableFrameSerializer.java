@@ -84,6 +84,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
             case LONG -> out.writeLong(frame.longAt(row, column));
             case DOUBLE -> out.writeDouble(frame.doubleAt(row, column));
             case STRING -> out.writeUTF(frame.stringAt(row, column));
+            case DECIMAL -> out.writeUTF(frame.valueAt(row, column).toString());
         }
     }
 
@@ -121,6 +122,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
             case LONG -> builder.appendLong(in.readLong());
             case DOUBLE -> builder.appendDouble(in.readDouble());
             case STRING -> builder.appendString(in.readUTF());
+            case DECIMAL -> builder.appendDecimal(new java.math.BigDecimal(in.readUTF()));
         }
     }
 }

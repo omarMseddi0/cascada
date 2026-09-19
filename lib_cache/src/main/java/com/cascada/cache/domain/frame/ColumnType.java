@@ -7,5 +7,6 @@ package com.cascada.cache.domain.frame;
 public enum ColumnType {
     LONG,
     DOUBLE,
-    STRING
+    STRING,
+    DECIMAL
 }

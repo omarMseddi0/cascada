@@ -36,7 +36,6 @@ public final class FrameMergeService {
     private static final Pattern AVG_SPEC =
             Pattern.compile("(?i)AVG\\s*\\(\\s*([^)]+?)\\s*\\)(?:\\s+AS\\s+([A-Za-z_][A-Za-z0-9_]*))?");
 
-    private final ColumnarHashAggregator aggregator = new ColumnarHashAggregator();
     private final AverageReconstructionService averageReconstructionService = new AverageReconstructionService();
     private final int fixedStepSeconds;
     private final String timeColumnName;
@@ -163,244 +162,25 @@ public final class FrameMergeService {
     // --- time-series path -----------------------------------------------------------------------
 
     private ResultFrame mergeTimeSeries(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
-        List<String> dimensionColumns = dimensionColumns(frames.get(0), canonicalObject, true);
-        List<String> measureColumns = measureColumns(frames.get(0), canonicalObject, dimensionColumns, true);
-
-        // Extract every frame straight into columnar primitives — one dictionary lookup per cell,
-        // no row objects.
-        int rowCount = totalRowCount(frames);
-        long[] fixedBuckets = new long[rowCount];
-        DictionaryEncoder encoder = new DictionaryEncoder();
-        int[][] dimensionCodes = new int[dimensionColumns.size()][rowCount];
-        double[][] measures = new double[measureColumns.size()][rowCount];
-        int r = 0;
-        for (ResultFrame frame : frames) {
-            int timeColumn = frame.columnIndex(timeColumnName);
-            int[] dimensionIndexes = columnIndexes(frame, dimensionColumns);
-            int[] measureIndexes = columnIndexes(frame, measureColumns);
-            for (int row = 0; row < frame.rowCount(); row++) {
-                fixedBuckets[r] = frame.longAt(row, timeColumn);
-                for (int d = 0; d < dimensionCodes.length; d++) {
-                    dimensionCodes[d][r] = encoder.encode(stringDimension(frame, row, dimensionIndexes[d]));
-                }
-                for (int m = 0; m < measures.length; m++) {
-                    measures[m][r] = numericMeasure(frame, row, measureIndexes[m]);
-                }
-                r++;
-            }
-        }
-
-        // RC3 guard: exact duplicates at the fixed step (same bucket, dimensions AND measures).
-        boolean[] keep = aggregator.deduplicateExactRows(rowCount, fixedBuckets, dimensionCodes, measures);
-
-        ResultFrame.Builder builder = ResultFrame.builder().column(timeColumnName, ColumnType.LONG);
-        dimensionColumns.forEach(dimension -> builder.column(dimension, ColumnType.STRING));
-        measureColumns.forEach(measure -> builder.column(measure, ColumnType.DOUBLE));
-
-        int userStep = canonicalObject.userStepSeconds().orElse(fixedStepSeconds);
-        if (userStep <= fixedStepSeconds) {
-            // RC1: never re-derive a finer step — emit the surviving rows unchanged, in arrival order.
-            for (int row = 0; row < rowCount; row++) {
-                if (keep[row]) {
-                    appendTimeSeriesRow(builder, fixedBuckets[row], dimensionCodes, measures, row, encoder);
-                }
-            }
-            return builder.build();
-        }
-
-        // RC2/RC5: re-bucket on epoch-second longs, then roll up with the shared columnar group-by.
-        long[] userBuckets = new long[rowCount];
-        for (int row = 0; row < rowCount; row++) {
-            userBuckets[row] = Math.floorDiv(fixedBuckets[row], userStep) * (long) userStep;
-        }
-        GroupedResult grouped = aggregator.aggregate(rowCount, userBuckets, dimensionCodes, measures,
-                aggregateFunctions(measureColumns, canonicalObject), keep);
-
-        int[] order = sortedGroupOrder(grouped, dimensionColumns, encoder, true);
-        for (int g : order) {
-            builder.appendLong(grouped.groupBuckets()[g]);
-            for (int d = 0; d < dimensionColumns.size(); d++) {
-                builder.appendString(encoder.decode(grouped.dimensionCode(g, d)));
-            }
-            for (int m = 0; m < measureColumns.size(); m++) {
-                appendMeasure(builder, grouped.measureAccumulators()[m][g]);
-            }
-        }
-        return builder.build();
+        List<String> dimensions = new ArrayList<>();
+        dimensions.add(timeColumnName);
+        dimensions.addAll(dimensionColumns(frames.getFirst(), canonicalObject, true));
+        return typedMerge(frames, canonicalObject, dimensions,
+                canonicalObject.userStepSeconds().orElse(fixedStepSeconds));
     }
-
-    // --- global-aggregate path ------------------------------------------------------------------
 
     private ResultFrame mergeGlobalAggregate(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
-        List<String> dimensionColumns = dimensionColumns(frames.get(0), canonicalObject, false);
-        List<String> measureColumns = measureColumns(frames.get(0), canonicalObject, dimensionColumns, false);
-
-        // RC (Bug #3 in merging.py): floor the time column by the fixed step BEFORE grouping, so a
-        // cached bucket row (already aligned) and a Spark gap row in the same fixed-step window collapse
-        // to the same group key instead of being counted as two distinct groups. Only when the time
-        // column is itself a grouped dimension here.
-        boolean floorTime = dimensionColumns.contains(timeColumnName);
-
-        int rowCount = totalRowCount(frames);
-        DictionaryEncoder encoder = new DictionaryEncoder();
-        int[][] dimensionCodes = new int[dimensionColumns.size()][rowCount];
-        double[][] measures = new double[measureColumns.size()][rowCount];
-        int r = 0;
-        for (ResultFrame frame : frames) {
-            int[] dimensionIndexes = columnIndexes(frame, dimensionColumns);
-            int[] measureIndexes = columnIndexes(frame, measureColumns);
-            for (int row = 0; row < frame.rowCount(); row++) {
-                for (int d = 0; d < dimensionCodes.length; d++) {
-                    String dimension = dimensionColumns.get(d);
-                    if (floorTime && dimension.equals(timeColumnName)) {
-                        long flooredTs = Math.floorDiv(frame.longAt(row, dimensionIndexes[d]), fixedStepSeconds)
-                                * (long) fixedStepSeconds;
-                        dimensionCodes[d][r] = encoder.encode(String.valueOf(flooredTs));
-                    } else {
-                        dimensionCodes[d][r] = encoder.encode(stringDimension(frame, row, dimensionIndexes[d]));
-                    }
-                }
-                for (int m = 0; m < measures.length; m++) {
-                    measures[m][r] = numericMeasure(frame, row, measureIndexes[m]);
-                }
-                r++;
-            }
-        }
-
-        // RC3 dedup on (dimensions incl. floored time, measures), then the columnar group-by.
-        boolean[] keep = aggregator.deduplicateExactRows(rowCount, null, dimensionCodes, measures);
-        GroupedResult grouped = aggregator.aggregate(rowCount, null, dimensionCodes, measures,
-                aggregateFunctions(measureColumns, canonicalObject), keep);
-
-        ResultFrame.Builder builder = ResultFrame.builder();
-        dimensionColumns.forEach(dimension -> builder.column(dimension, ColumnType.STRING));
-        measureColumns.forEach(measure -> builder.column(measure, ColumnType.DOUBLE));
-        int[] order = sortedGroupOrder(grouped, dimensionColumns, encoder, false);
-        for (int g : order) {
-            for (int d = 0; d < dimensionColumns.size(); d++) {
-                builder.appendString(encoder.decode(grouped.dimensionCode(g, d)));
-            }
-            for (int m = 0; m < measureColumns.size(); m++) {
-                appendMeasure(builder, grouped.measureAccumulators()[m][g]);
-            }
-        }
-        return builder.build();
+        return typedMerge(frames, canonicalObject, dimensionColumns(frames.getFirst(), canonicalObject, false), fixedStepSeconds);
     }
 
-    // --- columnar helpers -------------------------------------------------------------------------
-
-    private int totalRowCount(List<ResultFrame> frames) {
-        int total = 0;
-        for (ResultFrame frame : frames) {
-            total += frame.rowCount();
-        }
-        return total;
-    }
-
-    /**
-     * The combine op per measure column. The parsed map from canonicalization is authoritative
-     * (README caveat 4: {@code MAX(latency) AS peak_latency} must combine as MAX, but the alias hides
-     * the {@code max} signal from any name heuristic). When the canonical object predates the map —
-     * or a column, like AVG's decomposed SUM/COUNT ingredients, is not in it — we derive a second map
-     * from the aggregate specs and only then fall back to name sniffing, which for unaliased columns
-     * is exactly the historical behaviour.
-     */
-    private AggregateFunction[] aggregateFunctions(List<String> measureColumns,
-                                                   CanonicalQueryObject canonicalObject) {
-        Map<String, AggregateFunction> parsed =
-                new LinkedHashMap<>(AggregateFunctionResolver.fromAggregateSpecs(
-                        canonicalObject.metadata().aggregateSpecs()));
-        canonicalObject.metadata().measureAggregates()
-                .forEach((column, function) -> parsed.put(
-                        column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT), function));
-        AggregateFunction[] functions = new AggregateFunction[measureColumns.size()];
-        for (int m = 0; m < measureColumns.size(); m++) {
-            functions[m] = AggregateFunctionResolver.resolve(measureColumns.get(m), parsed);
-        }
-        return functions;
-    }
-
-    private int[] columnIndexes(ResultFrame frame, List<String> columns) {
-        int[] indexes = new int[columns.size()];
-        for (int column = 0; column < indexes.length; column++) {
-            indexes[column] = frame.columnIndex(columns.get(column));
-        }
-        return indexes;
-    }
-
-    private String stringDimension(ResultFrame frame, int row, int column) {
-        // String.valueOf was the previous map-based contract: a SQL NULL dimension groups as "null".
-        return frame.isNullAt(row, column) ? "null" : frame.stringValueAt(row, column);
-    }
-
-    private double numericMeasure(ResultFrame frame, int row, int column) {
-        if (frame.isNullAt(row, column)) {
-            return Double.NaN;
-        }
-        return frame.columnType(frame.columnNames().get(column)) == ColumnType.LONG
-                ? frame.longAt(row, column)
-                : frame.doubleAt(row, column);
-    }
-
-    private void appendTimeSeriesRow(ResultFrame.Builder builder, long bucket, int[][] dimensionCodes,
-                                     double[][] measures, int row, DictionaryEncoder encoder) {
-        builder.appendLong(bucket);
-        for (int[] dimensionCode : dimensionCodes) {
-            builder.appendString(encoder.decode(dimensionCode[row]));
-        }
-        for (double[] measure : measures) {
-            appendMeasure(builder, measure[row]);
-        }
-    }
-
-    private void appendMeasure(ResultFrame.Builder builder, double value) {
-        // NaN is a valid numeric payload and is also the aggregator's internal absent marker; retain
-        // the prior frame contract, which emitted it as a DOUBLE rather than a SQL null.
-        builder.appendDouble(value);
-    }
-
-    /**
-     * Deterministic output order, matching the previous row-object implementation: bucket start
-     * first (time series only), then the canonical grouping-key string — dimension {@code name=value}
-     * pairs in sorted-name order, exactly as a {@code TreeMap#toString()} rendered them.
-     */
-    private int[] sortedGroupOrder(GroupedResult grouped, List<String> dimensionColumns,
-                                   DictionaryEncoder encoder, boolean byBucketFirst) {
-        int groupCount = grouped.groupCount();
-        Integer[] sortedDimensionIndexes = new Integer[dimensionColumns.size()];
-        for (int d = 0; d < sortedDimensionIndexes.length; d++) {
-            sortedDimensionIndexes[d] = d;
-        }
-        java.util.Arrays.sort(sortedDimensionIndexes, Comparator.comparing(dimensionColumns::get));
-
-        String[] sortKeys = new String[groupCount];
-        for (int g = 0; g < groupCount; g++) {
-            StringBuilder key = new StringBuilder("{");
-            for (int i = 0; i < sortedDimensionIndexes.length; i++) {
-                int d = sortedDimensionIndexes[i];
-                if (i > 0) {
-                    key.append(", ");
-                }
-                key.append(dimensionColumns.get(d)).append('=')
-                        .append(encoder.decode(grouped.dimensionCode(g, d)));
-            }
-            sortKeys[g] = key.append('}').toString();
-        }
-
-        Integer[] order = new Integer[groupCount];
-        for (int g = 0; g < groupCount; g++) {
-            order[g] = g;
-        }
-        Comparator<Integer> comparator = byBucketFirst
-                ? Comparator.<Integer>comparingLong(g -> grouped.groupBuckets()[g])
-                        .thenComparing(g -> sortKeys[g])
-                : Comparator.comparing(g -> sortKeys[g]);
-        java.util.Arrays.sort(order, comparator);
-        int[] primitive = new int[groupCount];
-        for (int g = 0; g < groupCount; g++) {
-            primitive[g] = order[g];
-        }
-        return primitive;
+    private ResultFrame typedMerge(List<ResultFrame> frames, CanonicalQueryObject canonicalObject,
+                                   List<String> dimensions, int step) {
+        Map<String, AggregateFunction> functions = new LinkedHashMap<>(
+                AggregateFunctionResolver.fromAggregateSpecs(canonicalObject.metadata().aggregateSpecs()));
+        canonicalObject.metadata().measureAggregates().forEach((column, function) ->
+                functions.put(column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT), function));
+        return com.cascada.cache.domain.merge.TypedFrameAggregator.aggregate(
+                frames, dimensions, functions, timeColumnName, step);
     }
 
     // --- AVG reconstruction (RC4) ----------------------------------------------------------------
@@ -483,15 +263,18 @@ public final class FrameMergeService {
         for (int index = orderBy.size() - 1; index >= 0; index--) {
             OrderByClause clause = orderBy.get(index);
             if (clause.column().isEmpty()) {
-                continue; // expression ordering is left to Spark (bypass), as in the Python guard
+                throw new IllegalArgumentException("expression ordering requires direct execution");
             }
             String column = clause.column().get();
-            Comparator<Map<String, Object>> comparator = Comparator.comparing(
-                    row -> (Comparable) toComparable(row.get(column)),
-                    Comparator.nullsFirst(Comparator.naturalOrder()));
-            if (!clause.ascending()) {
-                comparator = comparator.reversed();
-            }
+            Comparator<Map<String, Object>> comparator = (left, right) -> {
+                Object a = left.get(column), b = right.get(column);
+                if (a == null || b == null) {
+                    if (a == b) return 0;
+                    return (a == null ? -1 : 1) * (clause.nullsFirst() ? 1 : -1);
+                }
+                int compared = com.cascada.cache.domain.merge.TypedFrameAggregator.compare(a, b);
+                return clause.ascending() ? compared : -compared;
+            };
             rows.sort(comparator);
         }
 

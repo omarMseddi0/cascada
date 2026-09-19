@@ -164,13 +164,13 @@ public final class FrameMergeService {
     private ResultFrame mergeTimeSeries(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
         List<String> dimensions = new ArrayList<>();
         dimensions.add(timeColumnName);
-        dimensions.addAll(dimensionColumns(frames.getFirst(), canonicalObject, true));
+        dimensions.addAll(dimensionColumns(frames.get(0), canonicalObject, true));
         return typedMerge(frames, canonicalObject, dimensions,
                 canonicalObject.userStepSeconds().orElse(fixedStepSeconds));
     }
 
     private ResultFrame mergeGlobalAggregate(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
-        return typedMerge(frames, canonicalObject, dimensionColumns(frames.getFirst(), canonicalObject, false), fixedStepSeconds);
+        return typedMerge(frames, canonicalObject, dimensionColumns(frames.get(0), canonicalObject, false), fixedStepSeconds);
     }
 
     private ResultFrame typedMerge(List<ResultFrame> frames, CanonicalQueryObject canonicalObject,

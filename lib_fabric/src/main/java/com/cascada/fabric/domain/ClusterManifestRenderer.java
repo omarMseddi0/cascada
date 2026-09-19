@@ -24,7 +24,6 @@ public final class ClusterManifestRenderer {
     /** Manifest templates in {@code kubectl apply} order (RBAC → ConfigMaps → Deployment → Service). */
     private static final List<String> TEMPLATES = List.of(
             "service-account.yaml",
-            "cluster-role-binding.yaml",
             "namespace-role.yaml",
             "role-binding.yaml",
             "configmap-core-site.yaml",

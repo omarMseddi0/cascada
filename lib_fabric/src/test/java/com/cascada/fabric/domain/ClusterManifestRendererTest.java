@@ -18,11 +18,12 @@ class ClusterManifestRendererTest {
     }
 
     @Test
-    void rendersElevenManifestsInApplyOrderWithNoLeftoverPlaceholders() {
+    void rendersTenManifestsInApplyOrderWithNoLeftoverPlaceholders() {
         List<String> manifests = renderer.render(values(Map.of()));
-        assertThat(manifests).hasSize(11);
+        assertThat(manifests).hasSize(10);
         assertThat(manifests.get(0)).contains("kind: ServiceAccount");
-        assertThat(manifests.get(10)).contains("kind: Service");
+        assertThat(manifests.get(9)).contains("kind: Service");
+        assertThat(String.join("\n", manifests)).doesNotContain("kind: ClusterRoleBinding");
         assertThat(String.join("\n", manifests)).doesNotContain("${");
     }
 
@@ -30,7 +31,7 @@ class ClusterManifestRendererTest {
     void combinedYamlSeparatesEveryDocument() {
         String combined = renderer.renderCombined(values(Map.of()));
         long separators = combined.lines().filter(l -> l.equals("---")).count();
-        assertThat(separators).isEqualTo(11);
+        assertThat(separators).isEqualTo(10);
     }
 
     @Test
@@ -54,7 +55,7 @@ class ClusterManifestRendererTest {
 
     @Test
     void rbacRulesAreExpandedForTheSparkDriver() {
-        String role = renderer.render(values(Map.of())).get(2); // namespace-role.yaml
+        String role = renderer.render(values(Map.of())).get(1); // namespace-role.yaml
         assertThat(role)
                 .contains("kind: Role")
                 .contains("\"pods\", \"pods/log\", \"pods/exec\", \"pods/status\"")
@@ -65,13 +66,13 @@ class ClusterManifestRendererTest {
     @Test
     void embeddedFilesAreIndentedUnderTheirConfigMapBlock() {
         List<String> manifests = renderer.render(values(Map.of()));
-        String sparkConfigMap = manifests.get(7); // configmap-spark-config.yaml
+        String sparkConfigMap = manifests.get(6); // configmap-spark-config.yaml
         assertThat(sparkConfigMap)
                 .contains("spark.json: |")
                 .contains("    {")                        // json indented 4 under the block scalar
                 .contains("    \"spark.submit.deployMode\": \"client\"");
 
-        String podTemplateCm = manifests.get(6); // configmap-executor-pod-template.yaml
+        String podTemplateCm = manifests.get(5); // configmap-executor-pod-template.yaml
         assertThat(podTemplateCm)
                 .contains("executor-pod-template.yaml: |")
                 .contains("    kind: Pod");

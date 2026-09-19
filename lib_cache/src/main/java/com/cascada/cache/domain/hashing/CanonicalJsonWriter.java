@@ -28,17 +28,14 @@ public final class CanonicalJsonWriter {
 
     @SuppressWarnings("unchecked")
     private static void append(StringBuilder builder, Object value) {
-        switch (value) {
-            case null -> builder.append("null");
-            case String string -> appendString(builder, string);
-            case Integer integer -> builder.append(integer.intValue());
-            case Long longValue -> builder.append(longValue.longValue());
-            case Boolean booleanValue -> builder.append(booleanValue.booleanValue());
-            case Map<?, ?> map -> appendObject(builder, (Map<String, Object>) map);
-            case List<?> list -> appendArray(builder, list);
-            default -> throw new IllegalArgumentException(
-                    "unsupported value type for canonical json: " + value.getClass());
-        }
+        if (value == null) builder.append("null");
+        else if (value instanceof String string) appendString(builder, string);
+        else if (value instanceof Integer integer) builder.append(integer.intValue());
+        else if (value instanceof Long longValue) builder.append(longValue.longValue());
+        else if (value instanceof Boolean booleanValue) builder.append(booleanValue.booleanValue());
+        else if (value instanceof Map<?, ?> map) appendObject(builder, (Map<String, Object>) map);
+        else if (value instanceof List<?> list) appendArray(builder, list);
+        else throw new IllegalArgumentException("unsupported value type for canonical json: " + value.getClass());
     }
 
     private static void appendObject(StringBuilder builder, Map<String, Object> map) {

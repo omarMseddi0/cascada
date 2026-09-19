@@ -67,6 +67,8 @@ public final class CascadaLauncher {
                 ? SparkSessionConfigBuilder.forLocal()
                 : SparkSessionConfigBuilder.forKubernetes())
                 .appName("CascadaDeltaQueryExecutor")
+                .withGroup(new SparkConfigurationFileReader().read(
+                        SystemEnvironmentAdapter.INSTANCE.get("SPARK_CONFIG_PATH")))
                 // Reading the OS is opt-in and happens only here, via the adapter.
                 .withEnvironment(SystemEnvironmentAdapter.INSTANCE)
                 .withEnvOverride("spark.executor.memory", "SPARK_EXECUTOR_MEMORY")

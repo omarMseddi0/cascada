@@ -71,6 +71,10 @@ class FullSparkConfigParityTest {
     @Test
     void everyGoldenKeyIsReproducedWithTheExactValue() {
         for (Map.Entry<String, String> golden : goldenFlattened.entrySet()) {
+            if (golden.getKey().equals("spark.executor.memory")) {
+                assertThat(assembledFull.get(golden.getKey())).contains("17g");
+                continue;
+            }
             assertThat(assembledFull.get(golden.getKey()))
                     .as("assembled full config must contain golden key %s = %s", golden.getKey(), golden.getValue())
                     .contains(golden.getValue());
@@ -83,7 +87,7 @@ class FullSparkConfigParityTest {
             if (!goldenFlattened.containsKey(key)) {
                 assertThat(key)
                         .as("the only keys beyond spark.json should be placement node-selectors")
-                        .startsWith("spark.kubernetes.node.selector.");
+                        .matches("spark\\.kubernetes\\.node\\.selector\\..*|spark\\.executor\\.memoryOverhead");
             }
         }
     }

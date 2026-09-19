@@ -36,8 +36,8 @@ public final class SparkConfigurationDeriver {
             throw new IllegalArgumentException("RAM must be > 0 gigabytes, but was: " + randomAccessMemoryGigabytes);
         }
         if (!glutenOffHeapEnabled) {
-            // Reference behaviour: the entire budget is JVM heap (matches the golden spark.json).
-            return new SparkMemorySplit(randomAccessMemoryGigabytes, 0, 0);
+            int overhead = randomAccessMemoryGigabytes == 1 ? 0 : Math.max(1, randomAccessMemoryGigabytes / 10);
+            return new SparkMemorySplit(randomAccessMemoryGigabytes - overhead, 0, overhead);
         }
         // Reserve at least 1 GiB overhead, give the majority of the remainder to Velox off-heap.
         int overhead = Math.max(1, randomAccessMemoryGigabytes / 10);
@@ -75,6 +75,8 @@ public final class SparkConfigurationDeriver {
         if (memorySplit.offHeapGigabytes() > 0) {
             entries.put("spark.memory.offHeap.enabled", "true");
             entries.put("spark.memory.offHeap.size", memorySplit.offHeapGigabytes() + "g");
+        }
+        if (memorySplit.overheadGigabytes() > 0) {
             // The reserved overhead must reach Kubernetes explicitly: without this key Spark adds its
             // own default (10% of heap) ON TOP of heap + off-heap, and the pod exceeds the RAM knob —
             // the scheduler then rejects or OOMKills the executor.

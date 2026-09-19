@@ -33,6 +33,10 @@
             <groupId>com.cascada</groupId>
             <artifactId>cascada-lib-spark</artifactId>
         </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
         <!-- Spark/Delta runtime is supplied by the cluster image; provided here so app compiles
              against SparkDeltaQueryExecutor's transitive Spark types but does not bundle Spark. -->
         <dependency>

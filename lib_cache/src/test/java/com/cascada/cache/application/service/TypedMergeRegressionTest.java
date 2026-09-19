@@ -18,7 +18,7 @@ class TypedMergeRegressionTest {
     @Test void preservesEqualDailyTotalsAndLargeIntegers() {
         var frame = ResultFrame.builder().column("SUM(x)", ColumnType.LONG).row(9007199254740993L).build();
         var result = merger.mergeAndReconstruct(List.of(frame, frame), query(List.of(), PostProcessing.none()));
-        assertThat(result.rows().getFirst().get("SUM(x)")).isEqualTo(18014398509481986L);
+        assertThat(result.rows().get(0).get("SUM(x)")).isEqualTo(18014398509481986L);
     }
 
     @Test void nullAndLiteralNullRemainDifferentGroups() {
@@ -26,8 +26,8 @@ class TypedMergeRegressionTest {
                 .row(null, 10L).row("null", 20L).build();
         var result = merger.mergeAndReconstruct(List.of(frame), query(List.of("country"), PostProcessing.none()));
         assertThat(result.rowCount()).isEqualTo(2);
-        assertThat(result.rows().getFirst().get("country")).isNull();
-        assertThat(result.rows().getLast().get("country")).isEqualTo("null");
+        assertThat(result.rows().get(0).get("country")).isNull();
+        assertThat(result.rows().get(1).get("country")).isEqualTo("null");
     }
 
     @Test void ordersNumericDimensionsNumericallyAndHonorsNullPlacement() {
@@ -43,9 +43,9 @@ class TypedMergeRegressionTest {
         var frame = ResultFrame.builder().column("SUM(x)", ColumnType.DECIMAL).row(exact).build();
         for (var serializer : List.of(new PortableFrameSerializer(), new ArrowResultFrameSerializer())) {
             var restored = serializer.deserialize(serializer.serialize(frame));
-            assertThat(restored.rows().getFirst().get("SUM(x)")).isEqualTo(exact);
+            assertThat(restored.rows().get(0).get("SUM(x)")).isEqualTo(exact);
             var result = merger.mergeAndReconstruct(List.of(restored, restored), query(List.of(), PostProcessing.none()));
-            assertThat(result.rows().getFirst().get("SUM(x)")).isEqualTo(exact.add(exact));
+            assertThat(result.rows().get(0).get("SUM(x)")).isEqualTo(exact.add(exact));
         }
     }
 }

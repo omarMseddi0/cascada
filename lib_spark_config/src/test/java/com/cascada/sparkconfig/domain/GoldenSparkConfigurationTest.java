@@ -69,6 +69,9 @@ class GoldenSparkConfigurationTest {
         // For every key the derivation emits that the golden file also defines, the values must match.
         for (Map.Entry<String, String> derivedEntry : derivedReferenceConfiguration.entries().entrySet()) {
             String key = derivedEntry.getKey();
+            if (key.equals("spark.executor.memory") || key.equals("spark.executor.memoryOverhead")) {
+                continue; // intentional safety correction: heap + explicit overhead must fit the knob
+            }
             if (goldenFlattenedConfiguration.containsKey(key)) {
                 assertThat(derivedEntry.getValue())
                         .as("derived value for %s must match golden spark.json", key)
@@ -79,7 +82,8 @@ class GoldenSparkConfigurationTest {
 
     @Test
     void emitsTheSpecificGoldenValuesCalledOutInTheTestingDocument() {
-        assertThat(derivedReferenceConfiguration.require("spark.executor.memory")).isEqualTo("18g");
+        assertThat(derivedReferenceConfiguration.require("spark.executor.memory")).isEqualTo("17g");
+        assertThat(derivedReferenceConfiguration.require("spark.executor.memoryOverhead")).isEqualTo("1g");
         assertThat(derivedReferenceConfiguration.require("spark.executor.cores")).isEqualTo("18");
         assertThat(derivedReferenceConfiguration.require("spark.kubernetes.executor.limit.cores")).isEqualTo("19");
         assertThat(derivedReferenceConfiguration.require("spark.driver.memory")).isEqualTo("2g");

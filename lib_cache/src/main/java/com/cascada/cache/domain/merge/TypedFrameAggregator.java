@@ -10,7 +10,7 @@ public final class TypedFrameAggregator {
 
     public static ResultFrame aggregate(List<ResultFrame> frames, List<String> dimensions,
                                         Map<String, AggregateFunction> functions, String timeColumn, int step) {
-        ResultFrame schema = frames.getFirst();
+        ResultFrame schema = frames.get(0);
         List<String> measures = schema.columnNames().stream()
                 .filter(c -> !dimensions.contains(c) && schema.columnType(c) != ColumnType.STRING).toList();
         Map<List<Object>, Map<String, Object>> groups = new LinkedHashMap<>();

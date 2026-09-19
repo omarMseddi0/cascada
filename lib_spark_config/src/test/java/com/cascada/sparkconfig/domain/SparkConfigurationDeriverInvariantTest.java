@@ -80,6 +80,14 @@ class SparkConfigurationDeriverInvariantTest {
     }
 
     @Test
+    void nonGlutenWorkloadReservesExplicitContainerOverhead() {
+        SparkConfiguration configuration = deriver.deriveSparkConfigurationFromThreeKnobs(
+                8, 4, ExecutorPlacement.DEDICATED_NODE_POOL, WorkloadType.MIXED);
+        assertThat(configuration.require("spark.executor.memory")).isEqualTo("7g");
+        assertThat(configuration.require("spark.executor.memoryOverhead")).isEqualTo("1g");
+    }
+
+    @Test
     void rejectsNonPositiveCoreCountAndRam() {
         assertThatThrownBy(() -> deriver.deriveSparkConfigurationFromThreeKnobs(
                 16, 0, ExecutorPlacement.SPREAD_ACROSS_NODES, WorkloadType.MIXED))

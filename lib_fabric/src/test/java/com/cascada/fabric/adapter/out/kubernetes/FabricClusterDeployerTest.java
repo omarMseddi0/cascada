@@ -43,7 +43,7 @@ class FabricClusterDeployerTest {
     void deployCreatesEveryRenderedManifest() {
         List<String> applied = lifecycle().deploy(values());
 
-        assertThat(applied).hasSize(11);
+        assertThat(applied).hasSize(10);
         assertThat(applied).contains("ServiceAccount/rel-spark-c1", "Deployment/rel-driver-c1");
         assertThat(client.serviceAccounts().inNamespace("default").withName("rel-spark-c1").get())
                 .isNotNull();

@@ -141,7 +141,8 @@ public final class CacheExecutionEngine {
 
         GapPlan gapPlan = computeGapPlan(startTimestamp, endTimestamp, bodyDays, missingDays);
 
-        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
             CompletableFuture<List<Optional<ResultFrame>>> cacheFuture =
                     CompletableFuture.supplyAsync(() -> cacheBackend.multiGet(cachedKeys), executor);
 
@@ -191,6 +192,8 @@ public final class CacheExecutionEngine {
 
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
                     frameMergeService.mergeAndReconstruct(allFrames, canonicalObject));
+        } finally {
+            executor.shutdown();
         }
     }
 

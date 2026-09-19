@@ -40,6 +40,8 @@ spec:
         env:
         - name: SPARK_CONFIG_PATH
           value: ${sparkJsonMount}
+        - name: CASCADA_RUN_MODE
+          value: cluster
         - name: SPARK_DRIVER_HOST
           value: ${driverHost}
         - name: HADOOP_USER_NAME

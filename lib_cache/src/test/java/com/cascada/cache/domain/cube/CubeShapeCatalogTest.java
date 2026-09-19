@@ -118,7 +118,7 @@ class CubeShapeCatalogTest {
         Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, coarse);
 
         assertThat(answer).isPresent();
-        assertThat(answer.get().rows().getFirst().get("peak")).isEqualTo(20.0);
+        assertThat(answer.get().rows().get(0).get("peak")).isEqualTo(20.0);
     }
 
     @Test

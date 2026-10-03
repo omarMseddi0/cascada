@@ -8,6 +8,7 @@ import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -55,6 +56,11 @@ class CascadaEngineFactoryTest {
     private CapturingExecutor executor;
     private CascadaEngineFactory factory;
 
+    @AfterEach
+    void closeEngine() {
+        factory.close();
+    }
+
     @BeforeEach
     void wireEngine() {
         executor = new CapturingExecutor();
@@ -101,11 +107,9 @@ class CascadaEngineFactoryTest {
     }
 
     @Test
-    void theFactoryHandsBackPortsRatherThanServiceClasses() {
-        // Guards the rule that keeps driving adapters replaceable: if this ever compiles against a
-        // concrete service type, an adapter can bind to an implementation and the seam is lost.
-        ExecuteLogicalQueryUseCase logicalQueryPort = factory.executeLogicalQueryUseCase();
-        assertThat(logicalQueryPort).isInstanceOf(ExecuteLogicalQueryUseCase.class);
+    void theFactoryHandsBackPortsRatherThanServiceClasses() throws Exception {
+        assertThat(CascadaEngineFactory.class.getMethod("executeLogicalQueryUseCase").getReturnType())
+                .isEqualTo(ExecuteLogicalQueryUseCase.class);
     }
 
     @Test
@@ -121,11 +125,10 @@ class CascadaEngineFactoryTest {
         EngineSettings settings = new EngineSettings(
                 new com.cascada.cache.application.config.CacheExecutionConfiguration(86_400, 300, "event_time"),
                 "redis://unused:6379", "traffic", "/tmp/traffic", true, 10);
-        CascadaEngineFactory configured = new CascadaEngineFactory(settings, executor);
-
-        ExecuteCachedQueryUseCase.Result result = configured.executeLogicalQueryUseCase().query(
-                "SELECT SUM(bytes) AS total_bytes FROM traffic WHERE event_time >= 0 AND event_time <= 86399");
-
-        assertThat(result.servedThroughCache()).isTrue();
+        try (CascadaEngineFactory configured = new CascadaEngineFactory(settings, executor)) {
+            ExecuteCachedQueryUseCase.Result result = configured.executeLogicalQueryUseCase().query(
+                    "SELECT SUM(bytes) AS total_bytes FROM traffic WHERE event_time >= 0 AND event_time <= 86399");
+            assertThat(result.servedThroughCache()).isTrue();
+        }
     }
 }

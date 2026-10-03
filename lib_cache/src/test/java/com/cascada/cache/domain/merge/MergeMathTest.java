@@ -109,6 +109,24 @@ class MergeMathTest {
         }
 
         @Test
+        void validNaNIsDistinctFromMissingDuringDeduplicationAndAggregation() {
+            AggregationRow missingMeasureRow = new AggregationRow(Map.of("appName", "netflix"), Map.of());
+            AggregationRow nanMeasureRow = new AggregationRow(Map.of("appName", "netflix"),
+                    Map.of("min_latency", Double.NaN, "max_latency", Double.NaN));
+            AggregationRow numericMeasureRow = new AggregationRow(Map.of("appName", "netflix"),
+                    Map.of("min_latency", 2.0, "max_latency", 2.0));
+
+            List<AggregationRow> merged = merger.merge(List.of(missingMeasureRow, nanMeasureRow, numericMeasureRow),
+                    Map.of("min_latency", AggregateFunction.MINIMUM,
+                            "max_latency", AggregateFunction.MAXIMUM), true);
+
+            assertThat(merged).hasSize(1);
+            assertThat(merged.get(0).measure("min_latency")).isEqualTo(2.0);
+            assertThat(merged.get(0).measures()).containsKey("max_latency");
+            assertThat(merged.get(0).measure("max_latency")).isNaN();
+        }
+
+        @Test
         void distinctGroupsAreKeptSeparateAndDeterministicallyOrdered() {
             List<AggregationRow> merged = merger.merge(
                     List.of(row("youtube", 10, 1), row("netflix", 20, 2)),
@@ -144,6 +162,20 @@ class MergeMathTest {
             assertThat(resampled).hasSize(1);
             assertThat(resampled.get(0).bucketStartSeconds()).isZero();
             assertThat(resampled.get(0).measures().get("sum_bytes")).isEqualTo(3.0);
+        }
+
+        @Test
+        void resamplingPreservesAValidNaNMeasure() {
+            List<TimeSeriesRow> rows = List.of(
+                    new TimeSeriesRow(0, Map.of("appName", "netflix"), Map.of()),
+                    new TimeSeriesRow(300, Map.of("appName", "netflix"), Map.of("max_latency", Double.NaN)));
+
+            List<TimeSeriesRow> resampled = resampler.resampleToUserStep(rows, 300, 600,
+                    Map.of("max_latency", AggregateFunction.MAXIMUM));
+
+            assertThat(resampled).hasSize(1);
+            assertThat(resampled.get(0).measures()).containsKey("max_latency");
+            assertThat(resampled.get(0).measures().get("max_latency")).isNaN();
         }
 
         @Test

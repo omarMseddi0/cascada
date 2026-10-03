@@ -5,7 +5,6 @@ import com.cascada.cache.domain.merge.columnar.ColumnarHashAggregator.GroupedRes
 import com.cascada.cache.domain.merge.columnar.DictionaryEncoder;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -76,52 +75,54 @@ public final class TimeSeriesBucketResampler {
         long[] buckets = new long[rowCount];
         int[][] dimensionCodes = new int[dimensions.length][rowCount];
         double[][] measures = new double[measureColumns.length][rowCount];
-        for (double[] column : measures) {
-            Arrays.fill(column, Double.NaN);
-        }
-        for (int r = 0; r < rowCount; r++) {
-            TimeSeriesRow row = rows.get(r);
-            buckets[r] = Math.floorDiv(row.bucketStartSeconds(), userStepSeconds) * (long) userStepSeconds;
-            for (int d = 0; d < dimensions.length; d++) {
-                String value = row.dimensions().get(dimensions[d]);
-                dimensionCodes[d][r] = value == null ? DictionaryEncoder.ABSENT : encoder.encode(value);
+        boolean[][] measurePresent = new boolean[measureColumns.length][rowCount];
+        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+            TimeSeriesRow inputRow = rows.get(rowIndex);
+            buckets[rowIndex] = Math.floorDiv(inputRow.bucketStartSeconds(), userStepSeconds)
+                    * (long) userStepSeconds;
+            for (int dimensionIndex = 0; dimensionIndex < dimensions.length; dimensionIndex++) {
+                String value = inputRow.dimensions().get(dimensions[dimensionIndex]);
+                dimensionCodes[dimensionIndex][rowIndex] = value == null
+                        ? DictionaryEncoder.ABSENT : encoder.encode(value);
             }
-            for (int m = 0; m < measureColumns.length; m++) {
-                Double value = row.measures().get(measureColumns[m]);
+            for (int measureIndex = 0; measureIndex < measureColumns.length; measureIndex++) {
+                Double value = inputRow.measures().get(measureColumns[measureIndex]);
                 if (value != null) {
-                    measures[m][r] = value;
+                    measures[measureIndex][rowIndex] = value;
+                    measurePresent[measureIndex][rowIndex] = true;
                 }
             }
         }
 
         AggregateFunction[] functions = new AggregateFunction[measureColumns.length];
-        for (int m = 0; m < measureColumns.length; m++) {
-            functions[m] = measureAggregations.getOrDefault(measureColumns[m], AggregateFunction.SUM);
+        for (int measureIndex = 0; measureIndex < measureColumns.length; measureIndex++) {
+            functions[measureIndex] = measureAggregations.getOrDefault(measureColumns[measureIndex],
+                    AggregateFunction.SUM);
         }
 
         GroupedResult grouped = aggregator.aggregate(rowCount, buckets, dimensionCodes, measures,
-                functions, null);
+                functions, null, measurePresent);
 
         List<TimeSeriesRow> resampled = new ArrayList<>(grouped.groupCount());
-        for (int g = 0; g < grouped.groupCount(); g++) {
+        for (int groupIndex = 0; groupIndex < grouped.groupCount(); groupIndex++) {
             Map<String, String> groupDimensions = new TreeMap<>();
-            for (int d = 0; d < dimensions.length; d++) {
-                int code = grouped.dimensionCode(g, d);
+            for (int dimensionIndex = 0; dimensionIndex < dimensions.length; dimensionIndex++) {
+                int code = grouped.dimensionCode(groupIndex, dimensionIndex);
                 if (code != DictionaryEncoder.ABSENT) {
-                    groupDimensions.put(dimensions[d], encoder.decode(code));
+                    groupDimensions.put(dimensions[dimensionIndex], encoder.decode(code));
                 }
             }
             Map<String, Double> groupMeasures = new TreeMap<>();
-            for (int m = 0; m < measureColumns.length; m++) {
-                double value = grouped.measureAccumulators()[m][g];
-                if (!Double.isNaN(value)) {
-                    groupMeasures.put(measureColumns[m], value);
+            for (int measureIndex = 0; measureIndex < measureColumns.length; measureIndex++) {
+                double value = grouped.measureAccumulators()[measureIndex][groupIndex];
+                if (grouped.measurePresent()[measureIndex][groupIndex]) {
+                    groupMeasures.put(measureColumns[measureIndex], value);
                 }
             }
-            resampled.add(new TimeSeriesRow(grouped.groupBuckets()[g], groupDimensions, groupMeasures));
+            resampled.add(new TimeSeriesRow(grouped.groupBuckets()[groupIndex], groupDimensions, groupMeasures));
         }
         resampled.sort(Comparator.comparingLong(TimeSeriesRow::bucketStartSeconds)
-                .thenComparing(row -> row.dimensions().toString()));
+                .thenComparing(timeSeriesRow -> timeSeriesRow.dimensions().toString()));
         return resampled;
     }
 

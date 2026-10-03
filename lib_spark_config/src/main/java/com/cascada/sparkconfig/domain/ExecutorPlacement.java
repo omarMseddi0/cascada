@@ -16,7 +16,7 @@ public enum ExecutorPlacement {
     /** Spread across the general pool. */
     SPREAD_ACROSS_NODES(2, 8, "cascada.io/placement", "spread"),
 
-    /** A dedicated pool reserved for this tenant (the golden reference). */
+    /** A dedicated pool reserved for this deployment (the golden reference). */
     DEDICATED_NODE_POOL(2, 3, "cascada.io/node-pool", "dedicated"),
 
     /** Allow preemptible/spot nodes — widest budget, tuned for restarts. */

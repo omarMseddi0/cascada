@@ -8,7 +8,7 @@ import java.util.Optional;
 /**
  * The registry of logical tables, modelling the Python {@code ConfigLoader.get_table_by_path} lookup.
  * The translator consults it to resolve a logical table name to its {@link RegisteredTable} (Delta
- * path + column mapping). Tenant-scoped in production; a plain map here.
+ * path + column mapping). Uses a plain map of registered tables.
  */
 public final class TableCatalog {
 

@@ -1,28 +1,25 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.domain.admin.CacheKeyTenantSegment;
+import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.application.port.out.CacheBackendPort;
-import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
-import com.cascada.cache.domain.cube.CubeShapeCatalog;
-import com.cascada.identity.domain.TenantIdentifier;
+import com.cascada.cache.domain.key.CacheKeyConstants;
+import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.cube.QueryShape;
+import com.cascada.identity.domain.QueryHash;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * Proves the open-source admin features (plan §8.17, system card §10): the "cache size" button reports
- * the real stored blob bytes in megabytes with a correct per-tenant breakdown, and "flush" purges the
- * right scope and only that scope. Runs against the in-memory backend, which stores the same blobs a
- * Valkey tier would, so the measured bytes are representative.
- */
+/** Verifies global cache measurement, full flush, and surgical prefix flush behavior. */
 final class CacheAdministrationTest {
 
     private final CacheBackendPort backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
@@ -38,128 +35,55 @@ final class CacheAdministrationTest {
         return builder.build();
     }
 
-    private String tenantBucketKey(String tenant, long bucketStart) {
-        // mirrors the production key shape: <tenantSegment>:QC:V4:B86400:<hash>:<ts>
-        return tenant + ":QC:V4:B86400:abc123:" + bucketStart;
+    private String bucketKey(String hash, long bucketStart) {
+        return "QC:V4:B86400:" + hash + ":" + bucketStart;
     }
 
     @Test
-    void emptyCacheReportsZeroMegabytes() {
+    void emptyCacheReportsZeroMegabytesAndBuckets() {
         CacheSizeReport report = admin.measureCacheSize();
         assertThat(report.totalBytes()).isZero();
         assertThat(report.totalMegabytes()).isZero();
         assertThat(report.bucketCount()).isZero();
-        assertThat(report.bytesByTenant()).isEmpty();
     }
 
     @Test
-    void sizeReportSumsStoredBlobBytesAndCountsBuckets() {
-        backend.store(tenantBucketKey("acme", 0), frame(100));
-        backend.store(tenantBucketKey("acme", 86_400), frame(100));
+    void sizeReportMeasuresAllStoredBucketBlobsGlobally() {
+        backend.store(bucketKey("abc123", 0), frame(100));
+        backend.store(bucketKey("abc123", 86_400), frame(100));
 
         CacheSizeReport report = admin.measureCacheSize();
 
         assertThat(report.bucketCount()).isEqualTo(2);
         assertThat(report.totalBytes()).isGreaterThan(0);
-        // the headline MB figure is derived from the byte total
         assertThat(report.totalMegabytes())
                 .isEqualTo(Math.round(report.totalBytes() / (1024.0 * 1024.0) * 100.0) / 100.0);
     }
 
     @Test
-    void sizeReportBreaksDownBytesByTenant() {
-        backend.store(tenantBucketKey("acme", 0), frame(200));
-        backend.store(tenantBucketKey("acme", 86_400), frame(200));
-        backend.store(tenantBucketKey("globex", 0), frame(50));
-
-        CacheSizeReport report = admin.measureCacheSize();
-
-        assertThat(report.bytesByTenant()).containsKeys("acme", "globex");
-        // acme stored more rows in more buckets, so it must account for more bytes than globex
-        assertThat(report.bytesByTenant().get("acme")).isGreaterThan(report.bytesByTenant().get("globex"));
-        long sumOfParts = report.bytesByTenant().values().stream().mapToLong(Long::longValue).sum();
-        assertThat(sumOfParts).isEqualTo(report.totalBytes());
-    }
-
-    @Test
-    void perTenantMeasurementReconcilesWithGlobalTotal() {
-        backend.store(tenantBucketKey("acme", 0), frame(120));
-        backend.store(tenantBucketKey("globex", 0), frame(30));
-
-        long acmeBytes = admin.measureCacheSize(TenantIdentifier.of("acme")).totalBytes();
-        long globexBytes = admin.measureCacheSize(TenantIdentifier.of("globex")).totalBytes();
-
-        assertThat(acmeBytes + globexBytes).isEqualTo(admin.measureCacheSize().totalBytes());
-        assertThat(admin.measureCacheSize(TenantIdentifier.of("absent")).totalBytes()).isZero();
-    }
-
-    @Test
-    void defaultTenantScopeAndAccountingIncludeBareAndExplicitDefaultKeys() {
-        backend.store("QC:V4:B86400:barehash:0", frame(10));
-        backend.store(tenantBucketKey("default", 86_400), frame(20));
-        backend.store(tenantBucketKey("acme", 0), frame(30));
-
-        CacheSizeReport defaultSlice = admin.measureCacheSize(TenantIdentifier.of("default"));
-        CacheSizeReport global = admin.measureCacheSize();
-
-        assertThat(defaultSlice.bucketCount()).isEqualTo(2);
-        assertThat(defaultSlice.bucketCountByTenant()).containsEntry("default", 2L);
-        assertThat(defaultSlice.totalBytes()).isEqualTo(defaultSlice.bytesByTenant().get("default"));
-        assertThat(defaultSlice.bucketCount()).isNotEqualTo(global.bucketCount());
-
-        assertThat(admin.flushTenant(TenantIdentifier.of("default"))).isEqualTo(2);
-        assertThat(admin.measureCacheSize().bucketCount()).isEqualTo(1);
-        assertThat(admin.measureCacheSize().bytesByTenant()).containsOnlyKeys("acme");
-    }
-
-    @Test
-    void flushTenantPurgesOnlyThatTenant() {
-        backend.store(tenantBucketKey("acme", 0), frame(10));
-        backend.store(tenantBucketKey("acme", 86_400), frame(10));
-        backend.store(tenantBucketKey("globex", 0), frame(10));
-
-        long purged = admin.flushTenant(TenantIdentifier.of("acme"));
-
-        assertThat(purged).isEqualTo(2);
-        CacheSizeReport after = admin.measureCacheSize();
-        assertThat(after.bucketCount()).isEqualTo(1);
-        assertThat(after.bytesByTenant()).containsOnlyKeys("globex");
-    }
-
-    @Test
-    void flushEverythingEmptiesTheCache() {
-        backend.store(tenantBucketKey("acme", 0), frame(10));
-        backend.store(tenantBucketKey("globex", 0), frame(10));
-
-        long purged = admin.flushEverything();
-
-        assertThat(purged).isEqualTo(2);
-        assertThat(admin.measureCacheSize().totalBytes()).isZero();
-    }
-
-    @Test
-    void flushEverythingLeavesKeysOutsideTheCascadaNamespaceAlone() {
+    void globalMeasurementAndFlushIgnoreKeysOutsideTheBucketNamespace() {
         InMemoryBlobCacheBackendAdapter sharedBackend =
                 new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
         CacheAdministrationService sharedAdmin = new CacheAdministrationService(sharedBackend);
-        sharedBackend.store("QC:V4:B86400:hash:0", frame(10));
+        sharedBackend.store(bucketKey("hash", 0), frame(10));
         sharedBackend.store("application:settings:theme", frame(1));
 
+        assertThat(sharedAdmin.measureCacheSize().bucketCount()).isEqualTo(1);
         assertThat(sharedAdmin.flushEverything()).isEqualTo(1);
 
         assertThat(sharedBackend.storedBucketCount()).isEqualTo(1);
-        assertThat(sharedAdmin.measureCacheSize().bucketCount()).isZero();
+        assertThat(sharedAdmin.measureCacheSize()).isEqualTo(CacheSizeReport.empty());
     }
 
     @Test
-    void flushEverythingAlsoClearsCoverageAndCubeState() {
+    void flushEverythingClearsCoverageAndCubeState() {
         InMemoryCoverageIndexAdapter coverage = new InMemoryCoverageIndexAdapter();
         CubeShapeCatalog cube = new CubeShapeCatalog();
         CacheAdministrationService invalidatingAdmin = new CacheAdministrationService(backend, coverage, cube);
-        com.cascada.identity.domain.QueryHash hash = com.cascada.identity.domain.QueryHash.of("0000000000000000000000000000000a");
+        QueryHash hash = QueryHash.of("0000000000000000000000000000000a");
         coverage.markCached(hash, 86_400, 0);
-        cube.register(new com.cascada.cache.domain.time.TimeRange(0, 86_399),
-                new com.cascada.cache.domain.cube.QueryShape(java.util.Set.of(), java.util.Set.of(), java.util.Set.of("SUM(x)")),
+        cube.register(new TimeRange(0, 86_399),
+                new QueryShape(java.util.Set.of(), java.util.Set.of(), java.util.Set.of("SUM(x)")),
                 ResultFrame.builder().column("SUM(x)", ColumnType.DOUBLE).row(Map.of("SUM(x)", 1.0)).build());
 
         invalidatingAdmin.flushEverything();
@@ -169,29 +93,24 @@ final class CacheAdministrationTest {
     }
 
     @Test
-    void flushKeyPrefixEvictsSurgically() {
-        backend.store("acme:QC:V4:B86400:hashA:0", frame(10));
-        backend.store("acme:QC:V4:B86400:hashB:0", frame(10));
+    void flushKeyPrefixEvictsOnlyTheSelectedQueryFamily() {
+        backend.store(bucketKey("hashA", 0), frame(10));
+        backend.store(bucketKey("hashA", 86_400), frame(10));
+        backend.store(bucketKey("hashB", 0), frame(10));
 
-        long purged = admin.flushKeyPrefix("acme:QC:V4:B86400:hashA:");
+        long purged = admin.flushKeyPrefix("QC:V4:B86400:hashA:");
 
-        assertThat(purged).isEqualTo(1);
+        assertThat(purged).isEqualTo(2);
         assertThat(admin.measureCacheSize().bucketCount()).isEqualTo(1);
     }
 
     @Test
-    void bareBucketKeyWithoutTenantPrefixIsAttributedToDefault() {
-        assertThat(CacheKeyTenantSegment.of("QC:V4:B86400:hash:0"))
-                .isEqualTo(CacheKeyTenantSegment.DEFAULT_TENANT);
-        assertThat(CacheKeyTenantSegment.of("acme:QC:V4:B86400:hash:0")).isEqualTo("acme");
-    }
-
-    @Test
-    void everythingScopeMatchesOnlyCascadaBucketKeys() {
+    void everythingScopeMatchesOnlyWellFormedCacheBucketKeys() {
         assertThat(CacheScope.everything().matches("QC:V4:B86400:hash:0")).isTrue();
-        assertThat(CacheScope.everything().matches("acme:QC:V4:B86400:hash:0")).isTrue();
-        assertThat(CacheScope.everything().matches("anything")).isFalse();
-        assertThat(CacheScope.forKeyPrefix("acme:").matches("acme:QC:V4")).isTrue();
-        assertThat(CacheScope.forKeyPrefix("acme:").matches("globex:QC:V4")).isFalse();
+        assertThat(CacheScope.everything().matches("QC:V4:B86400:hash:0:extra")).isFalse();
+        assertThat(CacheScope.everything().matches("application:settings:theme")).isFalse();
+        assertThat(CacheScope.forKeyPrefix("QC:V4:B86400:hash:").matches("QC:V4:B86400:hash:0")).isTrue();
+        assertThat(CacheScope.forKeyPrefix("QC:V4:B86400:hash:").matches("QC:V4:B86400:other:0")).isFalse();
+        assertThat(CacheKeyConstants.isBucketKey("QC:V4:badBucket:hash:0")).isFalse();
     }
 }

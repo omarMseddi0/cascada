@@ -13,7 +13,7 @@
     <artifactId>cascada-lib-identity</artifactId>
     <name>Cascada Library - Identity</name>
     <description>
-        Framework-free value objects shared across services: tenant, schema version,
+        Framework-free value objects shared across services: schema version,
         lineage hash, query hash, policy version. Zero framework imports (hexagonal domain).
     </description>
 

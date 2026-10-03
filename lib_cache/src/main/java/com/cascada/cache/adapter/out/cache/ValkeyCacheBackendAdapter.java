@@ -1,9 +1,9 @@
 package com.cascada.cache.adapter.out.cache;
 
-import com.cascada.cache.domain.admin.CacheKeyTenantSegment;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.key.CacheKeyConstants;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import io.lettuce.core.KeyScanCursor;
@@ -18,9 +18,7 @@ import io.lettuce.core.codec.ByteArrayCodec;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -116,28 +114,23 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         RedisCommands<byte[], byte[]> sync = connection.sync();
         long totalBytes = 0L;
         long bucketCount = 0L;
-        Map<String, Long> bytesByTenant = new HashMap<>();
-        Map<String, Long> bucketCountByTenant = new HashMap<>();
 
         ScanCursor cursor = ScanCursor.INITIAL;
         do {
             KeyScanCursor<byte[]> page = sync.scan(cursor, ScanArgs.Builder.limit(512));
             for (byte[] keyBytes : page.getKeys()) {
                 String key = new String(keyBytes, StandardCharsets.UTF_8);
-                if (!CacheKeyTenantSegment.isBucketKey(key)) {
+                if (!CacheKeyConstants.isBucketKey(key)) {
                     continue;
                 }
                 long bytes = measureBytes(sync, keyBytes);
                 totalBytes += bytes;
                 bucketCount++;
-                String tenant = CacheKeyTenantSegment.of(key);
-                bytesByTenant.merge(tenant, bytes, Long::sum);
-                bucketCountByTenant.merge(tenant, 1L, Long::sum);
             }
             cursor = page;
         } while (!cursor.isFinished());
 
-        return new CacheSizeReport(totalBytes, bucketCount, bytesByTenant, bucketCountByTenant);
+        return new CacheSizeReport(totalBytes, bucketCount);
     }
 
     private long measureBytes(RedisCommands<byte[], byte[]> sync, byte[] keyBytes) {
@@ -157,7 +150,7 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
 
     /**
      * Purges every key in {@code scope} using a {@code SCAN} + {@code DEL} sweep (never the
-     * O(N)-blocking {@code KEYS}/{@code FLUSHDB}, which would stall the shard and ignore tenant scoping).
+     * O(N)-blocking {@code KEYS}/{@code FLUSHDB}, which would stall the shard and ignore key prefixes).
      * Each scanned key is checked against the requested scope before deletion; a flush-all scope matches
      * only well-formed Cascada bucket keys, so other keys in a shared database are preserved.
      */

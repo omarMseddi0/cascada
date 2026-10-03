@@ -134,7 +134,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
     /**
      * The logical→physical table registry.
      *
-     * <p>TODO(cascada): load every table from deployment configuration and scope the catalog per tenant.
+     * <p>TODO(cascada): load every table from deployment configuration.
      * Registering one table from settings is enough to run, but it means a customer can only query a
      * single table, and the column map below is a placeholder identity mapping rather than the real
      * logical→physical schema.

@@ -15,38 +15,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class IdentityValueObjectTest {
 
     @Nested
-    class TenantIdentifierTest {
-
-        @Test
-        void acceptsLowercaseAlphanumericWithHyphenAndUnderscore() {
-            assertThat(TenantIdentifier.of("acme-corp_01").value()).isEqualTo("acme-corp_01");
-            assertThat(TenantIdentifier.of("a").asKeyPrefixSegment()).isEqualTo("a");
-        }
-
-        @Test
-        void rejectsNullValue() {
-            assertThatThrownBy(() -> TenantIdentifier.of(null))
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("must not be null");
-        }
-
-        @Test
-        void rejectsUppercaseLeadingHyphenAndOverlongValues() {
-            assertThatThrownBy(() -> TenantIdentifier.of("Acme")).isInstanceOf(IllegalArgumentException.class);
-            assertThatThrownBy(() -> TenantIdentifier.of("-acme")).isInstanceOf(IllegalArgumentException.class);
-            assertThatThrownBy(() -> TenantIdentifier.of("a".repeat(64))).isInstanceOf(IllegalArgumentException.class);
-            assertThatThrownBy(() -> TenantIdentifier.of("")).isInstanceOf(IllegalArgumentException.class);
-            assertThatThrownBy(() -> TenantIdentifier.of("has space")).isInstanceOf(IllegalArgumentException.class);
-        }
-
-        @Test
-        void valueEqualityHoldsForSameValue() {
-            assertThat(TenantIdentifier.of("acme")).isEqualTo(TenantIdentifier.of("acme"));
-            assertThat(TenantIdentifier.of("acme")).isNotEqualTo(TenantIdentifier.of("globex"));
-        }
-    }
-
-    @Nested
     class SchemaVersionTest {
 
         @Test

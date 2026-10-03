@@ -73,7 +73,6 @@ public final class CascadaCli {
     private void runCacheSize() {
         CacheSizeReport report = measureCacheSize.measureCacheSize();
         System.out.println(report.totalMegabytes() + " MB across " + report.bucketCount() + " buckets");
-        report.bytesByTenant().forEach((tenant, bytes) -> System.out.println("  " + tenant + ": " + bytes + " B"));
     }
 
     private void runFlush(String[] args) {

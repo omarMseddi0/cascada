@@ -1,14 +1,13 @@
 package com.cascada.cache.adapter.out.cache;
 
-import com.cascada.cache.domain.admin.CacheKeyTenantSegment;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.key.CacheKeyConstants;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -65,20 +64,14 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
     public CacheSizeReport sizeReport() {
         long totalBytes = 0L;
         long bucketCount = 0L;
-        Map<String, Long> bytesByTenant = new HashMap<>();
-        Map<String, Long> bucketCountByTenant = new HashMap<>();
         for (Map.Entry<String, byte[]> entry : blobsByKey.entrySet()) {
-            if (!CacheKeyTenantSegment.isBucketKey(entry.getKey())) {
+            if (!CacheKeyConstants.isBucketKey(entry.getKey())) {
                 continue;
             }
-            long bytes = entry.getValue().length;
-            totalBytes += bytes;
+            totalBytes += entry.getValue().length;
             bucketCount++;
-            String tenant = CacheKeyTenantSegment.of(entry.getKey());
-            bytesByTenant.merge(tenant, bytes, Long::sum);
-            bucketCountByTenant.merge(tenant, 1L, Long::sum);
         }
-        return new CacheSizeReport(totalBytes, bucketCount, bytesByTenant, bucketCountByTenant);
+        return new CacheSizeReport(totalBytes, bucketCount);
     }
 
     @Override

@@ -1,4 +1,4 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.query;
 
 import com.cascada.cache.domain.merge.AggregateFunction;
 

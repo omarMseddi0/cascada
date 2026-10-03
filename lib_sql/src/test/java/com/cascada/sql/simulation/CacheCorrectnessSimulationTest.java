@@ -8,7 +8,7 @@ import com.cascada.cache.domain.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.PostProcessing;
-import com.cascada.cache.domain.QueryMetadata;
+import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.TimeRange;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ColumnType;

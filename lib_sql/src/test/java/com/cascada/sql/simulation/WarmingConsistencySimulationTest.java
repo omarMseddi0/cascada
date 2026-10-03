@@ -10,7 +10,7 @@ import com.cascada.cache.application.service.WarmingOrchestrator;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.PostProcessing;
-import com.cascada.cache.domain.QueryMetadata;
+import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.TimeRange;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;

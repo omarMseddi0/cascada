@@ -5,17 +5,23 @@ import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.sql.domain.TableCatalog;
 import com.cascada.sql.domain.UnsupportedSqlException;
 import org.apache.calcite.sql.SqlBasicCall;
+import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOrderBy;
 import org.apache.calcite.sql.SqlSelect;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.util.SqlShuttle;
 
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Ports the essence of {@code SmartSQLProcessorSqlglot._transform_ast} onto <b>Apache Calcite</b>:
@@ -36,7 +42,7 @@ import java.util.Optional;
  */
 public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslatorPort {
 
-    private static final String DELTA_TABLE_SENTINEL = "CASCADA_DELTA_TABLE_SENTINEL";
+    private static final String DELTA_TABLE_SENTINEL_PREFIX = "CASCADA_DELTA_TABLE_SENTINEL";
 
     private final int bucketStepSeconds;
     private final TableCatalog boundCatalog;
@@ -72,25 +78,35 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
     public String translate(String logicalSql, TableCatalog catalog) {
         SqlNode parsed = CalciteSql.parseQuery(logicalSql);
         SqlSelect select = extractSelect(parsed);
+        rejectNestedSelects(parsed, select);
 
         SqlNode from = select.getFrom();
         SqlNode tableNode = stripAlias(from);
         if (!(tableNode instanceof SqlIdentifier tableIdentifier)) {
             throw new UnsupportedSqlException("only a single-table FROM can be translated to a physical path");
         }
+        if (!tableIdentifier.isSimple()) {
+            throw new UnsupportedSqlException("schema-qualified table names require an explicit catalog mapping");
+        }
         String logicalTableName = lastName(tableIdentifier);
         RegisteredTable registeredTable = catalog.findByLogicalName(logicalTableName)
                 .orElseThrow(() -> new UnsupportedSqlException(
                         "no registered table for logical name '" + logicalTableName + "'"));
 
-        // 1) swap the table for a sentinel (in place), 2) rename columns (shuttle yields a new tree),
+        // 1) swap the table for a collision-free sentinel, 2) rename columns (shuttle yields a new tree),
         // 3) bucket the grouped time column (in place on the new tree).
-        replaceTableWithSentinel(select, from);
-        SqlNode renamedRoot = parsed.accept(renamer(registeredTable));
+        Set<String> projectionAliases = projectionAliases(select);
+        SqlNodeList orderList = parsed instanceof SqlOrderBy orderBy ? orderBy.orderList : select.getOrderList();
+        Set<SqlIdentifier> aliasReferences = aliasReferencesToPreserve(select, orderList,
+                projectionAliases, registeredTable);
+        String sentinel = newTableSentinel(logicalSql);
+        replaceTableWithSentinel(select, from, sentinel);
+        SqlNode renamedRoot = parsed.accept(renamer(registeredTable, aliasReferences));
         applyTimeBucketingIfGrouped(extractSelect(renamedRoot), registeredTable);
 
         String physicalSql = CalciteSql.unparse(renamedRoot);
-        return physicalSql.replace(DELTA_TABLE_SENTINEL, "delta.`" + registeredTable.deltaPath() + "`");
+        String escapedPath = registeredTable.deltaPath().replace("`", "``");
+        return physicalSql.replace(sentinel, "delta.`" + escapedPath + "`");
     }
 
     private SqlSelect extractSelect(SqlNode node) {
@@ -103,8 +119,18 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
 
     // --- table -> delta path (via sentinel) ------------------------------------------------------
 
-    private void replaceTableWithSentinel(SqlSelect select, SqlNode from) {
-        SqlIdentifier sentinel = new SqlIdentifier(DELTA_TABLE_SENTINEL, SqlParserPos.ZERO);
+    private String newTableSentinel(String logicalSql) {
+        String normalizedSql = logicalSql.toLowerCase(Locale.ROOT);
+        String candidate = DELTA_TABLE_SENTINEL_PREFIX;
+        int suffix = 0;
+        while (normalizedSql.contains(candidate.toLowerCase(Locale.ROOT))) {
+            candidate = DELTA_TABLE_SENTINEL_PREFIX + "_" + ++suffix;
+        }
+        return candidate;
+    }
+
+    private void replaceTableWithSentinel(SqlSelect select, SqlNode from, String sentinelName) {
+        SqlIdentifier sentinel = new SqlIdentifier(sentinelName, SqlParserPos.ZERO);
         if (from.getKind() == SqlKind.AS && from instanceof SqlBasicCall asCall) {
             asCall.setOperand(0, sentinel);
         } else {
@@ -114,10 +140,24 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
 
     // --- column renaming -------------------------------------------------------------------------
 
-    private SqlShuttle renamer(RegisteredTable table) {
+    private SqlShuttle renamer(RegisteredTable table, Set<SqlIdentifier> aliasReferences) {
         return new SqlShuttle() {
             @Override
+            public SqlNode visit(SqlCall call) {
+                if (call.getKind() == SqlKind.AS && call instanceof SqlBasicCall asCall) {
+                    SqlNode expression = asCall.operand(0).accept(this);
+                    // AS operand 1 is a result or relation alias. It is output metadata, not a source
+                    // column, so it must keep the spelling the caller requested.
+                    return SqlStdOperatorTable.AS.createCall(call.getParserPosition(), expression, asCall.operand(1));
+                }
+                return super.visit(call);
+            }
+
+            @Override
             public SqlNode visit(SqlIdentifier identifier) {
+                if (aliasReferences.contains(identifier)) {
+                    return identifier;
+                }
                 String simple = lastName(identifier);
                 Optional<String> physical = table.physicalColumnFor(simple);
                 return physical
@@ -127,42 +167,140 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
         };
     }
 
+    private Set<String> projectionAliases(SqlSelect select) {
+        Set<String> aliases = new HashSet<>();
+        for (SqlNode item : select.getSelectList()) {
+            if (item instanceof SqlBasicCall asCall && item.getKind() == SqlKind.AS
+                    && asCall.operand(1) instanceof SqlIdentifier alias) {
+                aliases.add(lastName(alias));
+            }
+        }
+        return aliases;
+    }
+
+    private Set<SqlIdentifier> aliasReferencesToPreserve(SqlSelect select, SqlNodeList orderList,
+                                                         Set<String> aliases, RegisteredTable table) {
+        Set<SqlIdentifier> preserved = Collections.newSetFromMap(new IdentityHashMap<>());
+        if (aliases.isEmpty()) {
+            return preserved;
+        }
+        collectAliasReferences(orderList, aliases, preserved);
+        rejectAmbiguousAliasBindings(select.getGroup(), aliases, table);
+        rejectAmbiguousAliasBindings(select.getHaving(), aliases, table);
+        return preserved;
+    }
+
+    private void collectAliasReferences(SqlNode node, Set<String> aliases, Set<SqlIdentifier> collector) {
+        if (node == null) {
+            return;
+        }
+        if (node instanceof SqlIdentifier identifier) {
+            if (identifier.isSimple() && aliases.contains(lastName(identifier))) {
+                collector.add(identifier);
+            }
+        } else if (node instanceof org.apache.calcite.sql.SqlNodeList nodeList) {
+            for (SqlNode child : nodeList) {
+                collectAliasReferences(child, aliases, collector);
+            }
+        } else if (node instanceof SqlCall call) {
+            for (SqlNode operand : call.getOperandList()) {
+                collectAliasReferences(operand, aliases, collector);
+            }
+        }
+    }
+
+    private void rejectAmbiguousAliasBindings(SqlNode expression, Set<String> aliases, RegisteredTable table) {
+        if (expression == null) {
+            return;
+        }
+        if (expression instanceof SqlIdentifier identifier) {
+            String name = lastName(identifier);
+            if (identifier.isSimple() && aliases.contains(name) && table.physicalColumnFor(name).isPresent()) {
+                throw new UnsupportedSqlException(
+                        "alias reference '" + name + "' collides with a mapped source column in GROUP BY/HAVING");
+            }
+        } else if (expression instanceof org.apache.calcite.sql.SqlNodeList nodeList) {
+            for (SqlNode child : nodeList) {
+                rejectAmbiguousAliasBindings(child, aliases, table);
+            }
+        } else if (expression instanceof SqlCall call) {
+            for (SqlNode operand : call.getOperandList()) {
+                rejectAmbiguousAliasBindings(operand, aliases, table);
+            }
+        }
+    }
+
+    private void rejectNestedSelects(SqlNode root, SqlSelect outerSelect) {
+        if (containsNestedSelect(root, outerSelect)) {
+            throw new UnsupportedSqlException("nested SELECT scopes are not supported by logical table translation");
+        }
+    }
+
+    private boolean containsNestedSelect(SqlNode node, SqlSelect outerSelect) {
+        if (node == null) {
+            return false;
+        }
+        if (node instanceof SqlSelect select && select != outerSelect) {
+            return true;
+        }
+        if (node instanceof org.apache.calcite.sql.SqlNodeList nodeList) {
+            for (SqlNode child : nodeList) {
+                if (containsNestedSelect(child, outerSelect)) {
+                    return true;
+                }
+            }
+        } else if (node instanceof SqlCall call) {
+            for (SqlNode operand : call.getOperandList()) {
+                if (containsNestedSelect(operand, outerSelect)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     // --- time bucketing --------------------------------------------------------------------------
 
     private void applyTimeBucketingIfGrouped(SqlSelect select, RegisteredTable table) {
         SqlNodeList group = select.getGroup();
-        Optional<String> physicalTimeColumn = table.physicalTimeColumn();
-        if (group == null || physicalTimeColumn.isEmpty()) {
+        Set<String> declaredPhysicalTimeColumns = table.physicalTimeColumns();
+        if (group == null || declaredPhysicalTimeColumns.isEmpty()) {
             return;
         }
-        String physicalTime = physicalTimeColumn.get();
 
-        boolean timeColumnGrouped = false;
+        Set<String> groupedTimeColumns = new HashSet<>();
         for (SqlNode expression : group) {
-            if (isColumnNamed(expression, physicalTime)) {
-                timeColumnGrouped = true;
-                break;
+            for (String physicalTime : declaredPhysicalTimeColumns) {
+                if (isColumnNamed(expression, physicalTime)) {
+                    groupedTimeColumns.add(physicalTime);
+                }
             }
         }
-        if (!timeColumnGrouped) {
+        if (groupedTimeColumns.isEmpty()) {
             return;
         }
 
-        // Replace the bare physical time column with the bucket expression in SELECT and GROUP BY.
+        // Bucket only the declared time columns actually present in GROUP BY. Tables can expose
+        // more than one time field (for example, start and stop), and set order is not semantic.
         SqlNodeList selectList = select.getSelectList();
         for (int index = 0; index < selectList.size(); index++) {
             SqlNode item = selectList.get(index);
-            if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall asCall
-                    && isColumnNamed(asCall.operand(0), physicalTime)) {
-                asCall.setOperand(0, bucketExpression(physicalTime));
-            } else if (isColumnNamed(item, physicalTime)) {
-                selectList.set(index, org.apache.calcite.sql.fun.SqlStdOperatorTable.AS.createCall(
-                        SqlParserPos.ZERO, bucketExpression(physicalTime), new SqlIdentifier(physicalTime, SqlParserPos.ZERO)));
+            for (String physicalTime : groupedTimeColumns) {
+                if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall asCall
+                        && isColumnNamed(asCall.operand(0), physicalTime)) {
+                    asCall.setOperand(0, bucketExpression(physicalTime));
+                } else if (isColumnNamed(item, physicalTime)) {
+                    selectList.set(index, org.apache.calcite.sql.fun.SqlStdOperatorTable.AS.createCall(
+                            SqlParserPos.ZERO, bucketExpression(physicalTime),
+                            new SqlIdentifier(physicalTime, SqlParserPos.ZERO)));
+                }
             }
         }
         for (int index = 0; index < group.size(); index++) {
-            if (isColumnNamed(group.get(index), physicalTime)) {
-                group.set(index, bucketExpression(physicalTime));
+            for (String physicalTime : groupedTimeColumns) {
+                if (isColumnNamed(group.get(index), physicalTime)) {
+                    group.set(index, bucketExpression(physicalTime));
+                }
             }
         }
     }

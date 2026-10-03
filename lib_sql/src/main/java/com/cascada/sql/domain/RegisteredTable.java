@@ -42,13 +42,18 @@ public record RegisteredTable(String logicalTableName, String deltaPath,
 
     /** The physical name of the time column (after mapping), if this table has one mapped. */
     public Optional<String> physicalTimeColumn() {
-        for (String logicalTimeColumn : logicalTimeColumns) {
-            Optional<String> physical = physicalColumnFor(logicalTimeColumn);
-            if (physical.isPresent()) {
-                return physical;
-            }
-        }
-        return Optional.empty();
+        return logicalTimeColumns.stream().sorted()
+                .map(this::physicalColumnFor)
+                .flatMap(Optional::stream)
+                .findFirst();
+    }
+
+    /** Physical columns corresponding to every declared logical time column. */
+    public Set<String> physicalTimeColumns() {
+        return logicalTimeColumns.stream()
+                .map(this::physicalColumnFor)
+                .flatMap(Optional::stream)
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     /** Convenience builder for a table whose physical names are given as a simple logical→physical map. */

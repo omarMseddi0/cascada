@@ -55,6 +55,104 @@ class LogicalToPhysicalSqlTranslatorDeepTest {
     }
 
     @Test
+    void preservesOutputAliasesThatMatchMappedColumnNames() {
+        TableCatalog catalog = new TableCatalog().register(RegisteredTable.of(
+                "traffic", "/lakehouse/traffic",
+                Map.of("country", "C5", "ts", "D17", "bytes", "M2", "total", "M8"), "ts"));
+
+        String physical = translator.translate(
+                "SELECT SUM(country) AS total FROM traffic WHERE ts >= 0 AND ts <= 100", catalog);
+
+        assertThat(physical).contains("SUM(C5)").contains("total").doesNotContain("M8");
+    }
+
+    @Test
+    void preservesProjectionAliasReferencesInOrderBy() {
+        TableCatalog catalog = new TableCatalog().register(RegisteredTable.of(
+                "traffic", "/lakehouse/traffic",
+                Map.of("country", "C5", "ts", "D17", "bytes", "M2", "total", "M8"), "ts"));
+
+        String physical = translator.translate(
+                "SELECT SUM(bytes) AS total FROM traffic WHERE ts >= 0 AND ts <= 100 ORDER BY total + 1",
+                catalog);
+
+        assertThat(physical).contains("SUM(M2)").contains("ORDER BY total + 1").doesNotContain("ORDER BY M8");
+    }
+
+    @Test
+    void rejectsAliasReferencesWithAmbiguousSourceColumnPrecedenceInGroupOrHaving() {
+        TableCatalog catalog = new TableCatalog().register(RegisteredTable.of(
+                "traffic", "/lakehouse/traffic",
+                Map.of("ts", "D17", "bytes", "M2", "total", "M8"), "ts"));
+
+        assertThatThrownBy(() -> translator.translate(
+                "SELECT SUM(bytes) AS total FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY total", catalog))
+                .isInstanceOf(UnsupportedSqlException.class)
+                .hasMessageContaining("collides with a mapped source column");
+        assertThatThrownBy(() -> translator.translate(
+                "SELECT SUM(bytes) AS total FROM traffic WHERE ts >= 0 AND ts <= 100 HAVING total > 5", catalog))
+                .isInstanceOf(UnsupportedSqlException.class)
+                .hasMessageContaining("collides with a mapped source column");
+    }
+
+    @Test
+    void doesNotReplaceTheSentinelTextInsideAUserLiteral() {
+        String physical = translator.translate(
+                "SELECT label FROM traffic WHERE label = 'CASCADA_DELTA_TABLE_SENTINEL'", catalog());
+
+        assertThat(physical).contains("'CASCADA_DELTA_TABLE_SENTINEL'")
+                .contains("delta.`/lakehouse/traffic`");
+
+        String mixedCase = translator.translate(
+                "SELECT 'cascada_delta_table_sentinel' AS label FROM traffic WHERE label = 'x'", catalog());
+        assertThat(mixedCase).contains("'cascada_delta_table_sentinel'")
+                .contains("delta.`/lakehouse/traffic`");
+    }
+
+    @Test
+    void rejectsNestedSelectScopesBeforeRewritingOuterColumnNames() {
+        assertThatThrownBy(() -> translator.translate(
+                "SELECT country FROM traffic WHERE id IN "
+                        + "(SELECT id FROM users WHERE country = 'FR')", catalog()))
+                .isInstanceOf(UnsupportedSqlException.class)
+                .hasMessageContaining("nested SELECT scopes");
+    }
+
+    @Test
+    void escapesBackticksInRegisteredDeltaPaths() {
+        TableCatalog riskyPathCatalog = new TableCatalog().register(RegisteredTable.of(
+                "traffic", "/lake` WHERE true OR `x`=`y` --",
+                Map.of("country", "C5", "ts", "D17"), "ts"));
+
+        String physical = translator.translate(
+                "SELECT country FROM traffic WHERE ts >= 0 AND ts <= 100", riskyPathCatalog);
+
+        assertThat(physical).contains("delta.`/lake`` WHERE true OR ``x``=``y`` --`");
+        assertThatCode(() -> CalciteSql.parseQuery(physical)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejectsSchemaQualifiedTablesInsteadOfDiscardingTheirSchema() {
+        assertThatThrownBy(() -> translator.translate(
+                "SELECT country FROM analytics.traffic WHERE ts >= 0 AND ts <= 100", catalog()))
+                .isInstanceOf(UnsupportedSqlException.class)
+                .hasMessageContaining("schema-qualified");
+    }
+
+    @Test
+    void bucketsTheDeclaredTimeColumnThatIsActuallyGrouped() {
+        TableCatalog multiTimeTable = new TableCatalog().register(RegisteredTable.of(
+                "traffic", "/lake/traffic", Map.of("start", "D1", "stop", "D2", "bytes", "M2"),
+                "start", "stop"));
+
+        String physical = translator.translate(
+                "SELECT `start`, `stop`, SUM(bytes) FROM traffic WHERE `start` >= 0 AND `start` <= 100 "
+                        + "GROUP BY `start`, `stop`", multiTimeTable);
+
+        assertThat(physical).contains("FLOOR(D1 / 300) * 300", "FLOOR(D2 / 300) * 300");
+    }
+
+    @Test
     void bucketsTheTimeColumnOnlyWhenItIsGrouped() {
         String grouped = translator.translate(
                 "SELECT ts, country, SUM(bytes) AS b FROM traffic "

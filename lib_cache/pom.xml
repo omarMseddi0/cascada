@@ -68,11 +68,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!--
-                      Apache DataSketches memory and Arrow off-heap need java.nio opened, and
-                      datasketches-memory 3.0.2 hard-checks the JDK major version (<=21). We build with
-                      JDK 22 targeting release 21, so present a 21 version string to that check.
-                    -->
+                    <!-- Arrow and DataSketches tests access JDK internals on the Java 17 target. -->
                     <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED</argLine>
                 </configuration>
             </plugin>

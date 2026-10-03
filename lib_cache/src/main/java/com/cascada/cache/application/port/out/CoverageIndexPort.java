@@ -11,7 +11,7 @@ import java.util.Optional;
  * in a single fetch, replacing the per-bucket pipelined EXISTS phase.
  *
  * <p>The index is advisory: when {@link #load} returns empty the engine falls back to the
- * authoritative {@link CacheBackendPort#existsForKeys} path, and a stale bit is corrected by the
+ * authoritative {@link BucketCachePort#existsForKeys} path, and a stale bit is corrected by the
  * engine's vanished-bucket guard. Writers ({@code store}/eviction paths) call
  * {@link #markCached}/{@link #markEvicted} to keep the bitmap warm.
  */

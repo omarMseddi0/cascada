@@ -1,7 +1,6 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
-
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;

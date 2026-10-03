@@ -1,29 +1,29 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
-
-import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.application.port.out.BucketCachePort;
+import com.cascada.cache.application.port.out.CoverageIndexPort;
+import com.cascada.cache.application.port.out.GapQueryRewriterPort;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
-import com.cascada.cache.application.port.out.CacheBackendPort;
-import com.cascada.cache.application.port.out.CoverageIndexPort;
-import com.cascada.cache.application.port.out.GapQueryRewriterPort;
-import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.time.BucketEnumerationLimitExceededException;
 import com.cascada.cache.domain.time.DailyBuckets;
+import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.time.TimeBucketCalculator;
 import com.cascada.identity.domain.QueryHash;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 
 /**
  * The workhorse of the cache, ported from {@code cache_execution_engine.py}: gap analysis, a two-phase
@@ -36,12 +36,12 @@ import java.util.concurrent.Executors;
  *   <li>partial hit → fetch cached buckets and the Spark gap in parallel, then merge.</li>
  * </ol>
  *
- * <p>Parallelism uses virtual threads ({@code asyncio} in the Python becomes
- * {@link CompletableFuture} on a per-task virtual-thread executor).
+ * <p>Cache reads and gap queries run on the injected executor. The composition root owns its
+ * capacity and lifecycle; convenience constructors use the shared JDK common pool.
  */
 public final class CacheExecutionEngine {
 
-    private final CacheBackendPort cacheBackend;
+    private final BucketCachePort cacheBackend;
     private final QueryExecutorPort sparkExecutor;
     private final GapQueryRewriterPort gapQueryRewriter;
     private final CoverageIndexPort coverageIndex;
@@ -49,8 +49,9 @@ public final class CacheExecutionEngine {
     private final FrameMergeService frameMergeService;
     private final TimeBucketCalculator timeBucketCalculator;
     private final CacheExecutionConfiguration configuration;
+    private final Executor executor;
 
-    public CacheExecutionEngine(CacheBackendPort cacheBackend, QueryExecutorPort sparkExecutor,
+    public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration) {
         this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, null);
     }
@@ -61,7 +62,7 @@ public final class CacheExecutionEngine {
      * family the engine falls back to EXISTS, and a stale present-bit is corrected by the
      * vanished-bucket guard below, so the index can cost latency but never data.
      */
-    public CacheExecutionEngine(CacheBackendPort cacheBackend, QueryExecutorPort sparkExecutor,
+    public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
                                 CoverageIndexPort coverageIndex) {
         this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, coverageIndex, null);
@@ -73,15 +74,27 @@ public final class CacheExecutionEngine {
      * catalog is advisory — when {@code null} or when it has no verified subsumer, behaviour is
      * byte-identical to the reference engine.
      */
-    public CacheExecutionEngine(CacheBackendPort cacheBackend, QueryExecutorPort sparkExecutor,
+    public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
                                 CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog) {
-        this.cacheBackend = cacheBackend;
-        this.sparkExecutor = sparkExecutor;
-        this.gapQueryRewriter = gapQueryRewriter;
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, coverageIndex, cubeCatalog,
+                ForkJoinPool.commonPool());
+    }
+
+    /**
+     * The full constructor accepts the executor owned by the composition root so concurrent requests share
+     * one bounded work queue. Existing overloads retain their behavior through the JDK common pool.
+     */
+    public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
+                                GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
+                                CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor) {
+        this.cacheBackend = Objects.requireNonNull(cacheBackend, "cacheBackend");
+        this.sparkExecutor = Objects.requireNonNull(sparkExecutor, "sparkExecutor");
+        this.gapQueryRewriter = Objects.requireNonNull(gapQueryRewriter, "gapQueryRewriter");
         this.coverageIndex = coverageIndex;
         this.cubeCatalog = cubeCatalog;
-        this.configuration = configuration;
+        this.configuration = Objects.requireNonNull(configuration, "configuration");
+        this.executor = Objects.requireNonNull(executor, "executor");
         this.timeBucketCalculator = new TimeBucketCalculator(configuration.bucketSeconds());
         this.frameMergeService =
                 new FrameMergeService(configuration.fixedStepSeconds(), configuration.timeColumnName());
@@ -108,7 +121,14 @@ public final class CacheExecutionEngine {
         long startTimestamp = canonicalObject.timeRange().startTimestampSeconds();
         long endTimestamp = canonicalObject.timeRange().endTimestampSeconds();
 
-        DailyBuckets buckets = timeBucketCalculator.getDailyBuckets(startTimestamp, endTimestamp);
+        DailyBuckets buckets;
+        try {
+            buckets = timeBucketCalculator.getDailyBuckets(startTimestamp, endTimestamp);
+        } catch (BucketEnumerationLimitExceededException excessiveWindow) {
+            // A large query is still valid SQL; bypass the cache plan before any bucket list or keys
+            // are allocated and let the authoritative executor handle the requested window.
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+        }
         List<Long> bodyDays = buckets.body();
 
         List<String> requiredKeys = new ArrayList<>(bodyDays.size());
@@ -122,7 +142,12 @@ public final class CacheExecutionEngine {
                     sparkExecutor.execute(canonicalObject.physicalSql()));
         }
 
-        List<Boolean> presenceMask = resolvePresence(queryHash, bodyDays, requiredKeys);
+        List<Boolean> presenceMask;
+        try {
+            presenceMask = resolvePresence(queryHash, bodyDays, requiredKeys);
+        } catch (RuntimeException cacheFailure) {
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+        }
         List<String> cachedKeys = new ArrayList<>();
         List<Long> cachedDays = new ArrayList<>();
         List<Long> missingDays = new ArrayList<>();
@@ -145,61 +170,76 @@ public final class CacheExecutionEngine {
                     computeAndStoreColdBuckets(canonicalObject, queryHash, buckets, requiredKeys));
         }
 
-        GapPlan gapPlan = computeGapPlan(startTimestamp, endTimestamp, bodyDays, missingDays);
+        GapPlan gapPlan = new GapPlan(buckets.head(), missingDays, buckets.tail());
 
-        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CompletableFuture<List<Optional<ResultFrame>>> cacheFuture =
+                CompletableFuture.supplyAsync(() -> cacheBackend.multiGet(cachedKeys), executor);
+
+        CompletableFuture<ResultFrame> sparkFuture = gapPlan.hasGaps()
+                ? CompletableFuture.supplyAsync(
+                        () -> sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
+                                canonicalObject.physicalSql(), gapPlan)), executor)
+                : CompletableFuture.completedFuture(ResultFrame.empty());
+
+        List<Optional<ResultFrame>> cachedFrames;
         try {
-            CompletableFuture<List<Optional<ResultFrame>>> cacheFuture =
-                    CompletableFuture.supplyAsync(() -> cacheBackend.multiGet(cachedKeys), executor);
-
-            CompletableFuture<ResultFrame> sparkFuture = gapPlan.hasGaps()
-                    ? CompletableFuture.supplyAsync(
-                            () -> sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
-                                    canonicalObject.physicalSql(), gapPlan)), executor)
-                    : CompletableFuture.completedFuture(ResultFrame.empty());
-
-            List<Optional<ResultFrame>> cachedFrames = cacheFuture.join();
-
-            // EXISTS->MGET race guard: a bucket present at the EXISTS check can be evicted/expired
-            // before the MGET lands, and its day is NOT in the gap plan — silently skipping it
-            // would merge an answer missing that day's data. Buckets are independent mergeable
-            // ingredients, so the recovery is surgical: re-fetch ONLY the vanished days with one
-            // supplemental gap query, never recompute the whole window.
-            List<ResultFrame> allFrames = new ArrayList<>();
-            List<Long> vanishedDays = new ArrayList<>();
-            for (int index = 0; index < cachedFrames.size(); index++) {
-                Optional<ResultFrame> maybeFrame = cachedFrames.get(index);
-                if (maybeFrame.isPresent()) {
-                    allFrames.add(maybeFrame.get());
-                } else {
-                    vanishedDays.add(cachedDays.get(index));
-                }
+            cachedFrames = cacheFuture.join();
+            if (cachedFrames == null || cachedFrames.size() != cachedKeys.size()) {
+                throw new IllegalStateException("cache returned an invalid number of frames");
             }
-
-            // Submit the vanished-day recovery BEFORE joining the main gap query: it depends only on
-            // the cache fetch, so running it after sparkFuture.join() would serialize two Spark
-            // round-trips where one wall-clock wait suffices.
-            CompletableFuture<ResultFrame> vanishedFuture = vanishedDays.isEmpty()
-                    ? CompletableFuture.completedFuture(ResultFrame.empty())
-                    : CompletableFuture.supplyAsync(
-                            () -> sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
-                                    canonicalObject.physicalSql(),
-                                    new GapPlan(Optional.empty(), vanishedDays, Optional.empty()))), executor);
-
-            ResultFrame sparkFrame = sparkFuture.join();
-            if (!sparkFrame.isEmpty()) {
-                allFrames.add(sparkFrame);
+            if (cachedFrames.stream().anyMatch(Objects::isNull)) {
+                throw new IllegalStateException("cache returned a null frame entry");
             }
+        } catch (RuntimeException cacheFailure) {
+            // Prevent a queued gap task from starting after the authoritative fallback begins.
+            // A running query is left untouched because the executor port has no cancellation contract.
+            sparkFuture.cancel(false);
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+        }
 
-            ResultFrame vanishedFrame = vanishedFuture.join();
-            if (!vanishedFrame.isEmpty()) {
-                allFrames.add(vanishedFrame);
+        // EXISTS->MGET race guard: a bucket present at the EXISTS check can be evicted/expired
+        // before the MGET lands, and its day is NOT in the gap plan — silently skipping it
+        // would merge an answer missing that day's data. Buckets are independent mergeable
+        // ingredients, so the recovery is surgical: re-fetch ONLY the vanished days with one
+        // supplemental gap query, never recompute the whole window.
+        List<ResultFrame> allFrames = new ArrayList<>();
+        List<Long> vanishedDays = new ArrayList<>();
+        for (int index = 0; index < cachedFrames.size(); index++) {
+            Optional<ResultFrame> maybeFrame = cachedFrames.get(index);
+            if (maybeFrame.isPresent()) {
+                allFrames.add(maybeFrame.get());
+            } else {
+                vanishedDays.add(cachedDays.get(index));
             }
+        }
 
+        // Submit the vanished-day recovery BEFORE joining the main gap query: it depends only on
+        // the cache fetch, so running it after sparkFuture.join() would serialize two Spark
+        // round-trips where one wall-clock wait suffices.
+        CompletableFuture<ResultFrame> vanishedFuture = vanishedDays.isEmpty()
+                ? CompletableFuture.completedFuture(ResultFrame.empty())
+                : CompletableFuture.supplyAsync(
+                        () -> sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
+                                canonicalObject.physicalSql(),
+                                new GapPlan(Optional.empty(), vanishedDays, Optional.empty()))), executor);
+
+        ResultFrame sparkFrame = sparkFuture.join();
+        if (gapPlan.hasGaps()) {
+            allFrames.add(sparkFrame);
+        }
+
+        ResultFrame vanishedFrame = vanishedFuture.join();
+        if (!vanishedDays.isEmpty()) {
+            allFrames.add(vanishedFrame);
+        }
+
+        try {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
                     frameMergeService.mergeAndReconstruct(allFrames, canonicalObject));
-        } finally {
-            executor.shutdown();
+        } catch (RuntimeException cacheOrMergeFailure) {
+            // A decoded but corrupt/incompatible cache frame must not make the query unavailable.
+            // The full physical query is authoritative and avoids trusting any cache-derived data.
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
         }
     }
 
@@ -207,7 +247,11 @@ public final class CacheExecutionEngine {
     private ResultFrame catalogFullWindowAnswer(boolean cubeEligible, CanonicalQueryObject canonicalObject,
                                                 QueryShape queryShape, ResultFrame answer) {
         if (cubeEligible) {
-            cubeCatalog.register(canonicalObject.timeRange(), queryShape, answer);
+            try {
+                cubeCatalog.register(canonicalObject.timeRange(), queryShape, answer);
+            } catch (RuntimeException ignored) {
+                // The cube is an optional accelerator; a catalog failure cannot invalidate a query result.
+            }
         }
         return answer;
     }
@@ -224,17 +268,29 @@ public final class CacheExecutionEngine {
             long bucketStart = buckets.body().get(index);
             ResultFrame frame = sparkExecutor.execute(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
                     new GapPlan(Optional.empty(), List.of(bucketStart), Optional.empty())));
-            cacheBackend.store(keys.get(index), frame);
-            if (coverageIndex != null) coverageIndex.markCached(queryHash, configuration.bucketSeconds(), bucketStart);
-            if (!frame.isEmpty()) frames.add(frame);
+            try {
+                cacheBackend.store(keys.get(index), frame);
+                if (coverageIndex != null) {
+                    coverageIndex.markCached(queryHash, configuration.bucketSeconds(), bucketStart);
+                }
+            } catch (RuntimeException ignored) {
+                // Cache storage is best-effort. Keep the freshly computed authoritative frame below.
+            }
+            frames.add(frame);
         }
         GapPlan boundaries = new GapPlan(buckets.head(), List.of(), buckets.tail());
         if (boundaries.hasGaps()) {
             ResultFrame boundaryFrame = sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
                     canonicalObject.physicalSql(), boundaries));
-            if (!boundaryFrame.isEmpty()) frames.add(boundaryFrame);
+            frames.add(boundaryFrame);
         }
-        return frameMergeService.mergeAndReconstruct(frames, canonicalObject);
+        try {
+            return frameMergeService.mergeAndReconstruct(frames, canonicalObject);
+        } catch (RuntimeException mergeFailure) {
+            // Only the cache-derived merge is retried. Spark failures above propagate directly, while
+            // an incompatible/corrupt cache ingredient falls back to one authoritative full query.
+            return sparkExecutor.execute(canonicalObject.physicalSql());
+        }
     }
 
     /**
@@ -244,33 +300,30 @@ public final class CacheExecutionEngine {
      */
     private List<Boolean> resolvePresence(QueryHash queryHash, List<Long> bodyDays, List<String> requiredKeys) {
         if (coverageIndex != null) {
-            java.util.Optional<BucketCoverageBitmap> bitmap =
-                    coverageIndex.load(queryHash, configuration.bucketSeconds());
-            if (bitmap.isPresent()) {
-                return bitmap.get().presenceMask(bodyDays);
+            try {
+                Optional<BucketCoverageBitmap> bitmap = coverageIndex.load(queryHash, configuration.bucketSeconds());
+                if (bitmap.isPresent()) {
+                    List<Boolean> mask = bitmap.get().presenceMask(bodyDays);
+                    if (mask != null && mask.size() == bodyDays.size()
+                            && mask.stream().noneMatch(Objects::isNull)) {
+                        return mask;
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                // The index is advisory. A failed/corrupt index falls through to backend EXISTS.
             }
         }
-        return cacheBackend.existsForKeys(requiredKeys);
+        List<Boolean> mask = cacheBackend.existsForKeys(requiredKeys);
+        if (mask == null || mask.size() != requiredKeys.size() || mask.stream().anyMatch(Objects::isNull)) {
+            throw new IllegalStateException("cache returned an invalid presence mask");
+        }
+        return mask;
     }
 
-    /**
-     * Ports the engine's own head/tail computation (relative to the body days), distinct from the
-     * pure bucket split: head covers {@code [start, firstFullDay-1]} and tail
-     * {@code [endOfLastFullDay, end]} when the request spills past the cached whole days.
-     */
-    private GapPlan computeGapPlan(long startTimestamp, long endTimestamp, List<Long> bodyDays,
-                                   List<Long> missingDays) {
-        long firstFullDay = bodyDays.get(0);
-        long lastFullDay = bodyDays.get(bodyDays.size() - 1);
-        long endOfLastFullDay = lastFullDay + configuration.bucketSeconds();
-
-        Optional<TimeRange> head = startTimestamp < firstFullDay
-                ? Optional.of(new TimeRange(startTimestamp, Math.min(endTimestamp, firstFullDay - 1)))
-                : Optional.empty();
-        Optional<TimeRange> tail = endTimestamp >= endOfLastFullDay
-                ? Optional.of(new TimeRange(Math.max(startTimestamp, endOfLastFullDay), endTimestamp))
-                : Optional.empty();
-
-        return new GapPlan(head, missingDays, tail);
+    private ResultFrame executeAuthoritatively(boolean cubeEligible, CanonicalQueryObject canonicalObject,
+                                               QueryShape queryShape) {
+        return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
+                sparkExecutor.execute(canonicalObject.physicalSql()));
     }
+
 }

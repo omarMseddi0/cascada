@@ -1,6 +1,6 @@
 package com.cascada.cache.application.port.out;
 
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 
 /**
  * Outbound (driven) port for turning a physical SQL string into a {@link CanonicalQueryObject} — the

@@ -1,7 +1,7 @@
 package com.cascada.cache.domain.hashing;
 
 import com.cascada.cache.domain.CacheConstants;
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.identity.domain.QueryHash;
 
 import java.nio.charset.StandardCharsets;

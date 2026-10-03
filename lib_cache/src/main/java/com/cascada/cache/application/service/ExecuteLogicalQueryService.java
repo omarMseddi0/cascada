@@ -4,7 +4,7 @@ import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 
 import java.util.Objects;
 

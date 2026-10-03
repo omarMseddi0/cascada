@@ -2,7 +2,7 @@ package com.cascada.cache.domain.safety;
 
 import com.cascada.cache.domain.BypassReason;
 import com.cascada.cache.domain.CacheDecision;
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 
 import java.util.List;
 import java.util.Optional;

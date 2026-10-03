@@ -1,7 +1,7 @@
 package com.cascada.cache.domain.safety;
 
 import com.cascada.cache.domain.BypassReason;
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.TimeRange;
 
 import java.util.Optional;

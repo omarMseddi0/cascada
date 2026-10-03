@@ -1,6 +1,6 @@
 package com.cascada.sql.adapter.calcite;
 
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.identity.domain.QueryHash;

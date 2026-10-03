@@ -1,4 +1,10 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.query;
+
+import com.cascada.cache.domain.TimeRange;
+
+import com.cascada.cache.domain.PostProcessing;
+
+import com.cascada.cache.domain.QueryMetadata;
 
 import com.cascada.cache.domain.hashing.HashComponents;
 

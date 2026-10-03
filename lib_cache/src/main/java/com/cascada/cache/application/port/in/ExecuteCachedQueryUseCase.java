@@ -1,6 +1,6 @@
 package com.cascada.cache.application.port.in;
 
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.frame.ResultFrame;
 
 /**

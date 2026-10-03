@@ -7,7 +7,7 @@ import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
 import com.cascada.cache.application.service.CacheExecutionConfiguration;
 import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.application.service.WarmingOrchestrator;
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.PostProcessing;
 import com.cascada.cache.domain.QueryMetadata;

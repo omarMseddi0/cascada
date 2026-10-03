@@ -3,7 +3,7 @@ package com.cascada.sql.adapter.calcite;
 import com.cascada.sql.domain.AggregateNormalizer;
 import com.cascada.sql.domain.TimeDimensionMap;
 import com.cascada.sql.domain.UnsupportedSqlException;
-import com.cascada.cache.domain.CanonicalQueryObject;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.OrderByClause;
 import com.cascada.cache.domain.PostProcessing;

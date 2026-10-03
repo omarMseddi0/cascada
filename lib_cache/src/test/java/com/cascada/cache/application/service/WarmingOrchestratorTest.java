@@ -1,6 +1,7 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
+import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
@@ -11,6 +12,7 @@ import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.domain.warming.WarmingQueue;
 import com.cascada.identity.domain.QueryHash;
@@ -18,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -152,6 +155,18 @@ class WarmingOrchestratorTest {
     }
 
     @Test
+    void reversedWarmWindowDoesNoWork() {
+        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), new QueryPopularityTracker());
+
+        WarmingOrchestrator.PatternWarmingResult result = orchestrator.warmSinglePattern(
+                A, canonical("SELECT SUM(bytes) FROM traffic"), DAY, 0, false);
+
+        assertThat(result.bucketsWarmed()).isZero();
+        assertThat(result.bucketsSkipped()).isZero();
+        assertThat(sparkCalls.get()).isZero();
+    }
+
+    @Test
     void warmsTheLastBucketWhenTheWindowEndsExactlyOnItsBoundary() {
         WarmingOrchestrator orchestrator =
                 orchestrator(new WarmingQueue(), new QueryPopularityTracker());
@@ -220,5 +235,42 @@ class WarmingOrchestratorTest {
                 orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, true);
         assertThat(forced.bucketsWarmed()).isEqualTo(3); // data-change signal recomputes everything
         assertThat(sparkCalls.get()).isEqualTo(3);
+    }
+
+    @Test
+    void onePatternFailureDoesNotDiscardLaterWorkAndIsRequeued() {
+        QueryPopularityTracker tracker = new QueryPopularityTracker();
+        java.util.concurrent.atomic.AtomicBoolean failAOnce = new java.util.concurrent.atomic.AtomicBoolean(true);
+        CacheBackendPort backendThatFailsAOnce = new CacheBackendPort() {
+            @Override public List<Boolean> existsForKeys(List<String> keys) {
+                if (keys.get(0).contains(A.value()) && failAOnce.compareAndSet(true, false)) {
+                    throw new IllegalStateException("temporary cache outage");
+                }
+                return backend.existsForKeys(keys);
+            }
+            @Override public List<Optional<ResultFrame>> multiGet(List<String> keys) {
+                return backend.multiGet(keys);
+            }
+            @Override public void store(String key, ResultFrame frame) { backend.store(key, frame); }
+            @Override public CacheSizeReport sizeReport() { return backend.sizeReport(); }
+            @Override public long flush(com.cascada.cache.domain.admin.CacheScope scope) {
+                return backend.flush(scope);
+            }
+        };
+        WarmingQueue queue = new WarmingQueue();
+        WarmingOrchestrator orchestrator = new WarmingOrchestrator(backendThatFailsAOnce,
+                sql -> fakeResult(), passthroughGap, queue, tracker, DAY, 10);
+        orchestrator.recordQuery(A, canonical("SELECT SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100"));
+        orchestrator.recordQuery(B, canonical("SELECT SUM(bytes) FROM other WHERE ts >= 0 AND ts <= 100"));
+
+        WarmCacheUseCase.Report first = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+
+        assertThat(first.patternsWarmed()).isEqualTo(1);
+        assertThat(first.bucketsWarmed()).isEqualTo(3);
+        assertThat(queue.size()).isEqualTo(1);
+
+        WarmCacheUseCase.Report retry = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        assertThat(retry.bucketsWarmed()).isEqualTo(3);
+        assertThat(queue.size()).isZero();
     }
 }

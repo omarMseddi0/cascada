@@ -1,26 +1,31 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
-import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.index.BucketCoverageBitmap;
-import com.cascada.cache.application.port.out.CacheBackendPort;
+import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
-import com.cascada.cache.application.port.out.QueryPopularityPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.port.out.QueryPopularityPort;
+import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.index.BucketCoverageBitmap;
+import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.time.BucketEnumerationLimitExceededException;
+import com.cascada.cache.domain.time.GapPlan;
+import com.cascada.cache.domain.time.TimeBucketCalculator;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.warming.WarmingQueue;
 import com.cascada.identity.domain.QueryHash;
 
+import java.math.BigInteger;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
 
 /**
  * The Java heir to {@code auto_warmer.py}: the application service that pre-computes likely-to-be-hit
@@ -47,7 +52,9 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class WarmingOrchestrator implements WarmCacheUseCase {
 
-    private final CacheBackendPort cacheBackend;
+    private static final Logger LOGGER = Logger.getLogger(WarmingOrchestrator.class.getName());
+
+    private final BucketCachePort cacheBackend;
     private final QueryExecutorPort sparkExecutor;
     private final GapQueryRewriterPort gapQueryRewriter;
     private final WarmingQueue warmingQueue;
@@ -58,7 +65,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
 
     private final Map<QueryHash, CanonicalQueryObject> canonicalRegistry = new ConcurrentHashMap<>();
 
-    public WarmingOrchestrator(CacheBackendPort cacheBackend, QueryExecutorPort sparkExecutor,
+    public WarmingOrchestrator(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
                                QueryPopularityPort popularityTracker,
                                long bucketSeconds, int topNQueries) {
@@ -67,7 +74,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     }
 
     /** With a coverage-bitmap index (Appendix J.1): every warmed bucket also sets its coverage bit. */
-    public WarmingOrchestrator(CacheBackendPort cacheBackend, QueryExecutorPort sparkExecutor,
+    public WarmingOrchestrator(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
                                QueryPopularityPort popularityTracker,
                                CoverageIndexPort coverageIndex,
@@ -100,42 +107,74 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                                    boolean forceOverwrite) {
         // LAYER 1: recent patterns voted by the read path.
         List<QueryHash> layer1 = warmingQueue.consumeAll();
-        Map<QueryHash, CanonicalQueryObject> toWarm = new LinkedHashMap<>();
-        for (QueryHash hash : layer1) {
-            CanonicalQueryObject canonical = canonicalRegistry.get(hash);
-            if (canonical != null) {
-                toWarm.put(hash, canonical);
+        try {
+            Map<QueryHash, CanonicalQueryObject> toWarm = new LinkedHashMap<>();
+            for (QueryHash hash : layer1) {
+                CanonicalQueryObject canonical = canonicalRegistry.get(hash);
+                if (canonical != null) {
+                    toWarm.put(hash, canonical);
+                }
             }
-        }
 
-        // LAYER 2: persistent top-N popular queries, skipping anything Layer 1 already covered.
-        for (QueryHash hash : popularityTracker.topByPopularity(topNQueries)) {
-            if (toWarm.containsKey(hash)) {
-                continue;
+            // LAYER 2: persistent top-N popular queries, skipping anything Layer 1 already covered.
+            for (QueryHash hash : popularityTracker.topByPopularity(topNQueries)) {
+                if (toWarm.containsKey(hash)) {
+                    continue;
+                }
+                CanonicalQueryObject canonical = canonicalRegistry.get(hash);
+                if (canonical != null) {
+                    toWarm.put(hash, canonical);
+                }
             }
-            CanonicalQueryObject canonical = canonicalRegistry.get(hash);
-            if (canonical != null) {
-                toWarm.put(hash, canonical);
-            }
-        }
 
-        int patternsWarmed = 0;
-        int bucketsWarmed = 0;
-        int bucketsSkipped = 0;
-        for (Map.Entry<QueryHash, CanonicalQueryObject> entry : toWarm.entrySet()) {
-            PatternWarmingResult result = warmSinglePattern(entry.getKey(), entry.getValue(),
-                    warmStartTimestampSeconds, warmEndTimestampSeconds, forceOverwrite);
-            patternsWarmed++;
-            bucketsWarmed += result.bucketsWarmed();
-            bucketsSkipped += result.bucketsSkipped();
+            int patternsWarmed = 0;
+            int bucketsWarmed = 0;
+            int bucketsSkipped = 0;
+            for (Map.Entry<QueryHash, CanonicalQueryObject> entry : toWarm.entrySet()) {
+                try {
+                    PatternWarmingResult result = warmSinglePattern(entry.getKey(), entry.getValue(),
+                            warmStartTimestampSeconds, warmEndTimestampSeconds, forceOverwrite);
+                    patternsWarmed++;
+                    bucketsWarmed += result.bucketsWarmed();
+                    bucketsSkipped += result.bucketsSkipped();
+                } catch (RuntimeException failure) {
+                    // A bad pattern must not discard itself or prevent later patterns from warming.
+                    warmingQueue.vote(entry.getKey());
+                    LOGGER.warning("warming failed for query hash " + entry.getKey() + " ("
+                            + failure.getClass().getSimpleName() + "); it was returned to the queue");
+                }
+            }
+            return new Report(patternsWarmed, bucketsWarmed, bucketsSkipped);
+        } catch (RuntimeException setupFailure) {
+            // Failures while constructing the work set happen after consumeAll drained Layer 1.
+            layer1.forEach(warmingQueue::vote);
+            throw setupFailure;
         }
-        return new Report(patternsWarmed, bucketsWarmed, bucketsSkipped);
     }
 
     /** Warm a single pattern's buckets, ported from {@code _warm_single_pattern_sequential}. */
     public PatternWarmingResult warmSinglePattern(QueryHash queryHash, CanonicalQueryObject canonicalObject,
                                                   long warmStartTimestampSeconds, long warmEndTimestampSeconds,
                                                   boolean forceOverwrite) {
+        if (warmEndTimestampSeconds < warmStartTimestampSeconds) {
+            return new PatternWarmingResult(0, 0);
+        }
+        BigInteger width = BigInteger.valueOf(bucketSeconds);
+        BigInteger minimumTimestamp = BigInteger.valueOf(Long.MIN_VALUE);
+        BigInteger maximumTimestamp = BigInteger.valueOf(Long.MAX_VALUE);
+        BigInteger firstBucketStart = floorBucketStart(BigInteger.valueOf(warmStartTimestampSeconds), width);
+        BigInteger firstBucketEnd = firstBucketStart.add(width).subtract(BigInteger.ONE);
+        if (firstBucketEnd.compareTo(BigInteger.valueOf(warmEndTimestampSeconds)) > 0) {
+            return new PatternWarmingResult(0, 0);
+        }
+        if (firstBucketStart.compareTo(minimumTimestamp) < 0) {
+            firstBucketStart = firstBucketStart.add(width); // the unrepresentable edge can never be keyed
+        }
+        if (firstBucketStart.compareTo(maximumTimestamp) > 0) {
+            return new PatternWarmingResult(0, 0);
+        }
+        long firstRepresentableBucketStart = firstBucketStart.longValueExact();
+        ensureWarmWindowWithinLimit(firstRepresentableBucketStart, warmEndTimestampSeconds);
         int bucketsWarmed = 0;
         int bucketsSkipped = 0;
 
@@ -154,9 +193,17 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         // that key would permanently undercount — the EXISTS-skip then sees the bucket as present and
         // never recomputes it, so the hole can never self-heal. The trailing partial bucket is simply
         // not warmed; the read path computes it live as a gap, exactly as on any miss.
-        long currentBucketStart = Math.floorDiv(warmStartTimestampSeconds, bucketSeconds) * bucketSeconds;
-        while (currentBucketStart + bucketSeconds - 1 <= warmEndTimestampSeconds) {
-            long bucketEnd = currentBucketStart + bucketSeconds - 1;
+        long currentBucketStart = firstRepresentableBucketStart;
+        while (true) {
+            long bucketEnd;
+            try {
+                bucketEnd = Math.addExact(currentBucketStart, bucketSeconds - 1);
+            } catch (ArithmeticException outsideLongDomain) {
+                break; // This bucket extends beyond the representable timestamp domain.
+            }
+            if (bucketEnd > warmEndTimestampSeconds) {
+                break;
+            }
             String key = CacheKeyFactory.buildBucketKey(queryHash, currentBucketStart, bucketSeconds);
 
             boolean alreadyWarmed;
@@ -172,7 +219,11 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             }
             if (alreadyWarmed) {
                 bucketsSkipped++;
-                currentBucketStart += bucketSeconds;
+                try {
+                    currentBucketStart = Math.addExact(currentBucketStart, bucketSeconds);
+                } catch (ArithmeticException outsideLongDomain) {
+                    break;
+                }
                 continue;
             }
 
@@ -187,7 +238,11 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             }
             bucketsWarmed++;
 
-            currentBucketStart += bucketSeconds;
+            try {
+                currentBucketStart = Math.addExact(currentBucketStart, bucketSeconds);
+            } catch (ArithmeticException outsideLongDomain) {
+                break;
+            }
         }
         return new PatternWarmingResult(bucketsWarmed, bucketsSkipped);
     }
@@ -197,11 +252,35 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         return !presence.isEmpty() && Boolean.TRUE.equals(presence.get(0));
     }
 
-    /** Diagnostic: the hashes currently known to the warmer (registered via {@link #recordQuery}). */
-    public java.util.Set<QueryHash> knownQueryHashes() {
-        return new LinkedHashSet<>(canonicalRegistry.keySet());
+    private void ensureWarmWindowWithinLimit(long startSeconds, long endSeconds) {
+        BigInteger width = BigInteger.valueOf(bucketSeconds);
+        BigInteger start = BigInteger.valueOf(startSeconds);
+        BigInteger end = BigInteger.valueOf(endSeconds);
+        BigInteger firstBucketStart = floorBucketStart(start, width);
+        BigInteger firstBucketEnd = firstBucketStart.add(width).subtract(BigInteger.ONE);
+        if (firstBucketEnd.compareTo(end) > 0) {
+            return;
+        }
+        BigInteger bucketCount = end.subtract(firstBucketEnd).divide(width).add(BigInteger.ONE);
+        if (bucketCount.compareTo(BigInteger.valueOf(TimeBucketCalculator.MAX_BUCKETS_PER_PLAN)) > 0) {
+            throw new BucketEnumerationLimitExceededException(
+                    TimeBucketCalculator.MAX_BUCKETS_PER_PLAN);
+        }
     }
 
+    private BigInteger floorBucketStart(BigInteger timestamp, BigInteger width) {
+        BigInteger[] division = timestamp.divideAndRemainder(width);
+        BigInteger quotient = division[0];
+        if (division[1].signum() < 0) {
+            quotient = quotient.subtract(BigInteger.ONE);
+        }
+        return quotient.multiply(width);
+    }
+
+    /** Diagnostic: the hashes currently known to the warmer (registered via {@link #recordQuery}). */
+    public Set<QueryHash> knownQueryHashes() {
+        return new LinkedHashSet<>(canonicalRegistry.keySet());
+    }
 
     /** Per-pattern totals. */
     public record PatternWarmingResult(int bucketsWarmed, int bucketsSkipped) {

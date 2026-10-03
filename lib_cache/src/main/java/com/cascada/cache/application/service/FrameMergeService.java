@@ -1,7 +1,7 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.OrderByClause;
+import com.cascada.cache.domain.query.OrderByClause;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.merge.AggregateFunction;

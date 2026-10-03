@@ -1,4 +1,4 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.query;
 
 import java.util.Optional;
 

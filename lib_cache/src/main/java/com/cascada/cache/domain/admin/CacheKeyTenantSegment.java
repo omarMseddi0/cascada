@@ -1,6 +1,7 @@
 package com.cascada.cache.domain.admin;
 
-import com.cascada.cache.domain.CacheConstants;
+import com.cascada.cache.domain.key.CacheKeyConstants;
+
 
 /**
  * Derives the tenant bucket a stored key belongs to, for the per-tenant size breakdown. Production keys
@@ -18,7 +19,7 @@ public final class CacheKeyTenantSegment {
     }
 
     public static String of(String key) {
-        int marker = key.indexOf(CacheConstants.CACHE_KEY_PREFIX);
+        int marker = key.indexOf(CacheKeyConstants.CACHE_KEY_PREFIX);
         if (marker <= 0) {
             // marker == 0 → key starts with QC:V4 (no tenant prefix); marker < 0 → no marker at all
             return DEFAULT_TENANT;

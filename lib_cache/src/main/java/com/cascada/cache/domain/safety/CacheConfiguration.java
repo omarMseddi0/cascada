@@ -1,6 +1,7 @@
 package com.cascada.cache.domain.safety;
 
-import com.cascada.cache.domain.CacheConstants;
+import com.cascada.cache.domain.time.CacheTimeConstants;
+
 
 import java.util.Optional;
 import java.util.Set;
@@ -42,7 +43,7 @@ public record CacheConfiguration(Set<String> impossibleAggregates, Set<String> h
                 Set.of("DISTINCT", "MEDIAN", "PERCENTILE"),
                 Set.of(),
                 Set.of(),
-                CacheConstants.DEFAULT_CACHE_STEP_SECONDS,
+                CacheTimeConstants.DEFAULT_CACHE_STEP_SECONDS,
                 24,
                 Optional.empty());
     }

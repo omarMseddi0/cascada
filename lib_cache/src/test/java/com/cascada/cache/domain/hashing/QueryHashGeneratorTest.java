@@ -1,6 +1,7 @@
 package com.cascada.cache.domain.hashing;
 
-import com.cascada.cache.domain.CacheConstants;
+import com.cascada.cache.domain.time.CacheTimeConstants;
+
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
@@ -72,7 +73,7 @@ class QueryHashGeneratorTest {
         CanonicalQueryObject global = CanonicalQueryObject.of(components, new TimeRange(0, 86_399),
                 PostProcessing.none(), QueryMetadata.globalAggregate());
 
-        assertThat(generator.buildCanonicalString(series, CacheConstants.DEFAULT_CACHE_STEP_SECONDS))
+        assertThat(generator.buildCanonicalString(series, CacheTimeConstants.DEFAULT_CACHE_STEP_SECONDS))
                 .contains("\"step\":300");
         assertThat(generator.buildCanonicalString(global, 0)).contains("\"step\":0");
         assertThat(generator.generateQueryHash(series)).isNotEqualTo(generator.generateQueryHash(global));

@@ -11,7 +11,6 @@ import com.cascada.cache.domain.safety.BypassReason;
 import com.cascada.cache.domain.safety.CacheDecision;
 import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.CacheConstants;
 import com.cascada.cache.domain.frame.*;
 import com.cascada.cache.adapter.out.serialization.*;
 import org.junit.jupiter.api.Test;

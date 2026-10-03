@@ -1,6 +1,5 @@
 package com.cascada.cache.domain.time;
 
-import com.cascada.cache.domain.CacheConstants;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -21,12 +20,12 @@ public final class TimeBucketCalculator {
     private final long secondsPerBucket;
 
     public TimeBucketCalculator() {
-        this(CacheConstants.SECONDS_PER_DAY);
+        this(CacheTimeConstants.SECONDS_PER_DAY);
     }
 
     public TimeBucketCalculator(long secondsPerBucket) {
         // Mirrors the Python guard: a non-positive value falls back to one day.
-        this.secondsPerBucket = secondsPerBucket > 0 ? secondsPerBucket : CacheConstants.SECONDS_PER_DAY;
+        this.secondsPerBucket = secondsPerBucket > 0 ? secondsPerBucket : CacheTimeConstants.SECONDS_PER_DAY;
     }
 
     /** Ported from {@code _get_daily_buckets(start_ts, end_ts)}. */

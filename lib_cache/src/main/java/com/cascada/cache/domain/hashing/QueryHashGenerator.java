@@ -1,6 +1,7 @@
 package com.cascada.cache.domain.hashing;
 
-import com.cascada.cache.domain.CacheConstants;
+import com.cascada.cache.domain.time.CacheTimeConstants;
+
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.identity.domain.QueryHash;
 
@@ -31,7 +32,7 @@ public final class QueryHashGenerator {
 
     /** Builds the logic hash for a canonical object using the platform default fixed step. */
     public QueryHash generateQueryHash(CanonicalQueryObject canonicalObject) {
-        return generateQueryHash(canonicalObject, CacheConstants.DEFAULT_CACHE_STEP_SECONDS);
+        return generateQueryHash(canonicalObject, CacheTimeConstants.DEFAULT_CACHE_STEP_SECONDS);
     }
 
     public QueryHash generateQueryHash(CanonicalQueryObject canonicalObject, int fixedStepSeconds) {

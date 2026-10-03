@@ -1,6 +1,5 @@
 package com.cascada.cache.domain.key;
 
-import com.cascada.cache.domain.CacheConstants;
 
 import com.cascada.identity.domain.LineageHash;
 import com.cascada.identity.domain.PolicyVersion;
@@ -27,7 +26,7 @@ public final class CacheKeyFactory {
 
     /** Ported from {@code build_cache_key(query_hash, bucket_start_ts, bucket_seconds)}. */
     public static String buildBucketKey(QueryHash queryHash, long bucketStartTimestampSeconds, long bucketSeconds) {
-        return CacheConstants.CACHE_KEY_PREFIX
+        return CacheKeyConstants.CACHE_KEY_PREFIX
                 + ":B" + bucketSeconds
                 + ":" + queryHash.value()
                 + ":" + bucketStartTimestampSeconds;

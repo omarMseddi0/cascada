@@ -1,6 +1,7 @@
 package com.cascada.cache.application.config;
 
-import com.cascada.cache.domain.CacheConstants;
+import com.cascada.cache.domain.time.CacheTimeConstants;
+
 
 /**
  * The few knobs the execution engine needs: the cache bucket width, the fixed internal storage step,
@@ -19,7 +20,7 @@ public record CacheExecutionConfiguration(long bucketSeconds, int fixedStepSecon
     }
 
     public static CacheExecutionConfiguration defaults() {
-        return new CacheExecutionConfiguration(CacheConstants.SECONDS_PER_DAY,
-                CacheConstants.DEFAULT_CACHE_STEP_SECONDS, "ts");
+        return new CacheExecutionConfiguration(CacheTimeConstants.SECONDS_PER_DAY,
+                CacheTimeConstants.DEFAULT_CACHE_STEP_SECONDS, "ts");
     }
 }

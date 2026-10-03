@@ -4,7 +4,7 @@ import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.GapPlan;
-import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.application.port.out.CacheBackendPort;

@@ -3,7 +3,7 @@ package com.cascada.cache.application.service;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.GapPlan;
-import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;

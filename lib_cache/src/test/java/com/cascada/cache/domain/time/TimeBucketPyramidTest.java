@@ -56,7 +56,7 @@ class TimeBucketPyramidTest {
 
         assertThat(plan.completeDayBucketStarts()).isEmpty();
         assertThat(plan.completeHourBucketStartsToday()).containsExactly(2 * DAY + 2 * HOUR);
-        assertThat(plan.livePartialRange()).contains(new com.cascada.cache.domain.TimeRange(2 * DAY + 3 * HOUR, now));
+        assertThat(plan.livePartialRange()).contains(new com.cascada.cache.domain.time.TimeRange(2 * DAY + 3 * HOUR, now));
     }
 
     @Test
@@ -66,7 +66,7 @@ class TimeBucketPyramidTest {
 
         HierarchicalPlan plan = pyramid.assemble(start, now);
 
-        assertThat(plan.leadingPartialRange()).contains(new com.cascada.cache.domain.TimeRange(HOUR, DAY - 1));
+        assertThat(plan.leadingPartialRange()).contains(new com.cascada.cache.domain.time.TimeRange(HOUR, DAY - 1));
         assertThat(plan.completeDayBucketStarts()).containsExactly(DAY);
     }
 

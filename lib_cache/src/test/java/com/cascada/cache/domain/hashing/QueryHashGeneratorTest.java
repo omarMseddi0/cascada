@@ -4,7 +4,7 @@ import com.cascada.cache.domain.CacheConstants;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.identity.domain.QueryHash;
 import org.junit.jupiter.api.Test;
 

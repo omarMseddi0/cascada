@@ -8,7 +8,7 @@ import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.query.OrderByClause;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import org.apache.calcite.sql.SqlBasicCall;

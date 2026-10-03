@@ -126,7 +126,7 @@ final class CacheAdministrationTest {
         CacheAdministrationService invalidatingAdmin = new CacheAdministrationService(backend, coverage, cube);
         com.cascada.identity.domain.QueryHash hash = com.cascada.identity.domain.QueryHash.of("0000000000000000000000000000000a");
         coverage.markCached(hash, 86_400, 0);
-        cube.register(new com.cascada.cache.domain.TimeRange(0, 86_399),
+        cube.register(new com.cascada.cache.domain.time.TimeRange(0, 86_399),
                 new com.cascada.cache.domain.cube.QueryShape(java.util.Set.of(), java.util.Set.of(), java.util.Set.of("SUM(x)")),
                 ResultFrame.builder().column("SUM(x)", ColumnType.DOUBLE).row(Map.of("SUM(x)", 1.0)).build());
 

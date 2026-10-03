@@ -1,6 +1,6 @@
 package com.cascada.cache.domain.query;
 
-import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.time.TimeRange;
 
 
 

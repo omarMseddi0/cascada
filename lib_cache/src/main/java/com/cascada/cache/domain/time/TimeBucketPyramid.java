@@ -1,6 +1,5 @@
 package com.cascada.cache.domain.time;
 
-import com.cascada.cache.domain.TimeRange;
 
 import java.util.ArrayList;
 import java.util.List;

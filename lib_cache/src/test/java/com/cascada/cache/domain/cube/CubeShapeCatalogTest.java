@@ -1,7 +1,7 @@
 package com.cascada.cache.domain.cube;
 
 import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.TimeRange;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import org.junit.jupiter.api.Test;

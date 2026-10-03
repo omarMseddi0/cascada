@@ -1,7 +1,5 @@
 package com.cascada.cache.adapter.out.cache;
 
-import com.cascada.cache.domain.key.CacheKeyFactory;
-
 import com.cascada.cache.domain.admin.CacheKeyTenantSegment;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
@@ -31,10 +29,8 @@ import java.util.Optional;
  * ({@code QC:V4:...} rendered by {@code CacheKeyFactory}) and the same two-phase pattern — a pipelined
  * {@code EXISTS} for sub-millisecond gap analysis, then a bulk {@code MGET} of the present buckets.
  *
- * <p>Binary blobs are stored under a {@link ByteArrayCodec}; tenant isolation is structural because the
- * tenant segment is inside the signed key material, so one tenant's key can never address another's.
- * Frames are (de)serialized through the injected {@link CacheValueSerializerPort}, so this adapter is a
- * true substitute for {@link InMemoryBlobCacheBackendAdapter} (it stores the same blobs).
+ * <p>Binary blobs are stored under a {@link ByteArrayCodec}. Frames are serialized through the injected
+ * {@link CacheValueSerializerPort}, as they are in {@link InMemoryBlobCacheBackendAdapter}.
  */
 public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCloseable {
 
@@ -43,8 +39,20 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     private final CacheValueSerializerPort serializer;
 
     public ValkeyCacheBackendAdapter(String redisUniformResourceIdentifier, CacheValueSerializerPort serializer) {
-        this.redisClient = RedisClient.create(redisUniformResourceIdentifier);
-        this.connection = redisClient.connect(ByteArrayCodec.INSTANCE);
+        RedisClient client = RedisClient.create(redisUniformResourceIdentifier);
+        StatefulRedisConnection<byte[], byte[]> connected;
+        try {
+            connected = client.connect(ByteArrayCodec.INSTANCE);
+        } catch (RuntimeException | Error connectionFailure) {
+            try {
+                client.shutdown();
+            } catch (RuntimeException cleanupFailure) {
+                connectionFailure.addSuppressed(cleanupFailure);
+            }
+            throw connectionFailure;
+        }
+        this.redisClient = client;
+        this.connection = connected;
         this.serializer = serializer;
     }
 
@@ -109,27 +117,37 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         long totalBytes = 0L;
         long bucketCount = 0L;
         Map<String, Long> bytesByTenant = new HashMap<>();
+        Map<String, Long> bucketCountByTenant = new HashMap<>();
 
         ScanCursor cursor = ScanCursor.INITIAL;
         do {
             KeyScanCursor<byte[]> page = sync.scan(cursor, ScanArgs.Builder.limit(512));
             for (byte[] keyBytes : page.getKeys()) {
                 String key = new String(keyBytes, StandardCharsets.UTF_8);
+                if (!CacheKeyTenantSegment.isBucketKey(key)) {
+                    continue;
+                }
                 long bytes = measureBytes(sync, keyBytes);
                 totalBytes += bytes;
                 bucketCount++;
-                bytesByTenant.merge(CacheKeyTenantSegment.of(key), bytes, Long::sum);
+                String tenant = CacheKeyTenantSegment.of(key);
+                bytesByTenant.merge(tenant, bytes, Long::sum);
+                bucketCountByTenant.merge(tenant, 1L, Long::sum);
             }
             cursor = page;
         } while (!cursor.isFinished());
 
-        return new CacheSizeReport(totalBytes, bucketCount, bytesByTenant);
+        return new CacheSizeReport(totalBytes, bucketCount, bytesByTenant, bucketCountByTenant);
     }
 
     private long measureBytes(RedisCommands<byte[], byte[]> sync, byte[] keyBytes) {
-        Long memoryUsage = sync.memoryUsage(keyBytes);
-        if (memoryUsage != null) {
-            return memoryUsage;
+        try {
+            Long memoryUsage = sync.memoryUsage(keyBytes);
+            if (memoryUsage != null) {
+                return memoryUsage;
+            }
+        } catch (RuntimeException unsupportedOrDenied) {
+            // ACL-restricted and older servers can reject MEMORY USAGE; STRLEN is a safe value-byte floor.
         }
         // STRLEN, not GET: the fallback only needs the value's size, and GET would drag the whole
         // blob over the network once per key during a keyspace walk.
@@ -140,8 +158,8 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     /**
      * Purges every key in {@code scope} using a {@code SCAN} + {@code DEL} sweep (never the
      * O(N)-blocking {@code KEYS}/{@code FLUSHDB}, which would stall the shard and ignore tenant scoping).
-     * The scope's key-prefix becomes a {@code MATCH} glob, so a tenant flush physically cannot touch
-     * another tenant's buckets.
+     * Each scanned key is checked against the requested scope before deletion; a flush-all scope matches
+     * only well-formed Cascada bucket keys, so other keys in a shared database are preserved.
      */
     @Override
     public long flush(CacheScope scope) {

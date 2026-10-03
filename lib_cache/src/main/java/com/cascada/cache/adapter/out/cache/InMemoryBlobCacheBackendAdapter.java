@@ -66,13 +66,19 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
         long totalBytes = 0L;
         long bucketCount = 0L;
         Map<String, Long> bytesByTenant = new HashMap<>();
+        Map<String, Long> bucketCountByTenant = new HashMap<>();
         for (Map.Entry<String, byte[]> entry : blobsByKey.entrySet()) {
+            if (!CacheKeyTenantSegment.isBucketKey(entry.getKey())) {
+                continue;
+            }
             long bytes = entry.getValue().length;
             totalBytes += bytes;
             bucketCount++;
-            bytesByTenant.merge(CacheKeyTenantSegment.of(entry.getKey()), bytes, Long::sum);
+            String tenant = CacheKeyTenantSegment.of(entry.getKey());
+            bytesByTenant.merge(tenant, bytes, Long::sum);
+            bucketCountByTenant.merge(tenant, 1L, Long::sum);
         }
-        return new CacheSizeReport(totalBytes, bucketCount, bytesByTenant);
+        return new CacheSizeReport(totalBytes, bucketCount, bytesByTenant, bucketCountByTenant);
     }
 
     @Override

@@ -2,13 +2,14 @@ package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
 import com.cascada.cache.application.port.in.MeasureCacheSizeUseCase;
+import com.cascada.cache.application.port.out.CacheAdministrationPort;
+import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
-import com.cascada.cache.application.port.out.CacheBackendPort;
-import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.identity.domain.TenantIdentifier;
 
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -23,22 +24,22 @@ import java.util.Objects;
  *       {@link #flushKeyPrefix(String)}, each returning how many buckets were purged.</li>
  * </ul>
  *
- * <p>It delegates the bytes/keyspace work to the {@link CacheBackendPort} so it stays framework-free and
+ * <p>It delegates the bytes/keyspace work to the {@link CacheAdministrationPort} so it stays framework-free and
  * works identically over the in-memory backend (dev), Valkey/Redis (hot), or a Delta-backed cold tier.
  * View creation (the third console action) belongs to the Materialization Studio service, not here —
  * the cache never invents views; the operator defines them (boundary rule, plan §9.6).
  */
 public final class CacheAdministrationService implements MeasureCacheSizeUseCase, FlushCacheUseCase {
 
-    private final CacheBackendPort cacheBackend;
+    private final CacheAdministrationPort cacheBackend;
     private final CoverageIndexPort coverageIndex;
     private final CubeShapeCatalog cubeCatalog;
 
-    public CacheAdministrationService(CacheBackendPort cacheBackend) {
+    public CacheAdministrationService(CacheAdministrationPort cacheBackend) {
         this(cacheBackend, null, null);
     }
 
-    public CacheAdministrationService(CacheBackendPort cacheBackend, CoverageIndexPort coverageIndex,
+    public CacheAdministrationService(CacheAdministrationPort cacheBackend, CoverageIndexPort coverageIndex,
                                       CubeShapeCatalog cubeCatalog) {
         this.cacheBackend = Objects.requireNonNull(cacheBackend, "cacheBackend");
         this.coverageIndex = coverageIndex;
@@ -61,13 +62,13 @@ public final class CacheAdministrationService implements MeasureCacheSizeUseCase
         Objects.requireNonNull(tenant, "tenant");
         CacheSizeReport full = cacheBackend.sizeReport();
         long tenantBytes = full.bytesByTenant().getOrDefault(tenant.asKeyPrefixSegment(), 0L);
-        // bucketCount for the tenant is unknown from the aggregate map alone; report 0 buckets only
-        // when the tenant holds nothing, otherwise leave the global bucket count out of the slice.
-        if (tenantBytes == 0L) {
+        long tenantBucketCount = full.bucketCountByTenant().getOrDefault(tenant.asKeyPrefixSegment(), 0L);
+        if (tenantBytes == 0L && tenantBucketCount == 0L) {
             return CacheSizeReport.empty();
         }
-        return new CacheSizeReport(tenantBytes, full.bucketCount(),
-                java.util.Map.of(tenant.asKeyPrefixSegment(), tenantBytes));
+        return new CacheSizeReport(tenantBytes, tenantBucketCount,
+                Map.of(tenant.asKeyPrefixSegment(), tenantBytes),
+                Map.of(tenant.asKeyPrefixSegment(), tenantBucketCount));
     }
 
     /** Purge the entire cache; returns the number of buckets removed. */

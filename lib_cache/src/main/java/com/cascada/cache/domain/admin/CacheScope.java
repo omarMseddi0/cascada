@@ -5,12 +5,12 @@ import com.cascada.identity.domain.TenantIdentifier;
 import java.util.Objects;
 
 /**
- * What a flush/size operation applies to (plan §8.17). Because every key embeds the tenant segment
- * inside its signed material ({@link com.cascada.cache.domain.key.CacheKeyFactory}), scoping is purely a
- * key-prefix match — there is no way for a tenant-scoped flush to reach another tenant's buckets.
+ * What a flush operation applies to (plan §8.17). The current bucket-key format supports either a
+ * tenant-prefixed key or the bare {@code QC:V4:...} form attributed to the default tenant. Tenant
+ * scopes use that attribution rule; prefix scopes remain explicit operator-selected string prefixes.
  *
  * <ul>
- *   <li>{@link #everything()} — the whole cache (admin "Flush all").</li>
+ *   <li>{@link #everything()} — every Cascada bucket key (admin "Flush all"), leaving unrelated keys alone.</li>
  *   <li>{@link #forTenant(TenantIdentifier)} — only one tenant's buckets.</li>
  *   <li>{@link #forKeyPrefix(String)} — any explicit prefix (e.g. one query-hash family, or
  *       {@code QC:V4:B86400:} to drop only day-buckets) for surgical eviction from the console.</li>
@@ -20,36 +20,48 @@ public final class CacheScope {
 
     private final String keyPrefix;
     private final String description;
+    private final boolean everything;
+    private final String tenantSegment;
 
-    private CacheScope(String keyPrefix, String description) {
+    private CacheScope(String keyPrefix, String description, boolean everything, String tenantSegment) {
         this.keyPrefix = keyPrefix;
         this.description = description;
+        this.everything = everything;
+        this.tenantSegment = tenantSegment;
     }
 
     public static CacheScope everything() {
-        return new CacheScope("", "all tenants");
+        return new CacheScope("", "all Cascada buckets", true, null);
     }
 
     public static CacheScope forTenant(TenantIdentifier tenant) {
         Objects.requireNonNull(tenant, "tenant");
-        // The trailing ':' pins the match to the full tenant segment — without it, flushing
-        // tenant "abc" would also sweep "abcd"'s buckets ("abcd:QC:..." startsWith "abc").
-        return new CacheScope(tenant.asKeyPrefixSegment() + ":", "tenant " + tenant.asKeyPrefixSegment());
+        String segment = tenant.asKeyPrefixSegment();
+        // A bare QC:V4 key is attributed to the default tenant, so its tenant scope must include
+        // both bare and explicitly prefixed default keys.
+        return new CacheScope(segment + ":", "tenant " + segment, false, segment);
     }
 
     public static CacheScope forKeyPrefix(String keyPrefix) {
         Objects.requireNonNull(keyPrefix, "keyPrefix");
-        return new CacheScope(keyPrefix, "prefix '" + keyPrefix + "'");
+        return new CacheScope(keyPrefix, "prefix '" + keyPrefix + "'", false, null);
     }
 
     /** True when this scope covers the entire cache (no prefix filter). */
     public boolean isEverything() {
-        return keyPrefix.isEmpty();
+        return everything;
     }
 
-    /** True iff {@code key} belongs to this scope. The empty prefix matches everything. */
+    /** True iff {@code key} belongs to this scope. Flush-all is limited to Cascada bucket keys. */
     public boolean matches(String key) {
-        return keyPrefix.isEmpty() || key.startsWith(keyPrefix);
+        if (everything) {
+            return CacheKeyTenantSegment.isBucketKey(key);
+        }
+        if (tenantSegment != null) {
+            return CacheKeyTenantSegment.isBucketKey(key)
+                    && tenantSegment.equals(CacheKeyTenantSegment.of(key));
+        }
+        return key.startsWith(keyPrefix);
     }
 
     public String keyPrefix() {

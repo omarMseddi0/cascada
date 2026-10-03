@@ -1,8 +1,7 @@
-package com.cascada.cache.admin;
+package com.cascada.cache.application.service;
 
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.service.CacheAdministrationService;
 import com.cascada.cache.domain.admin.CacheKeyTenantSegment;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
@@ -95,6 +94,25 @@ final class CacheAdministrationTest {
     }
 
     @Test
+    void defaultTenantScopeAndAccountingIncludeBareAndExplicitDefaultKeys() {
+        backend.store("QC:V4:B86400:barehash:0", frame(10));
+        backend.store(tenantBucketKey("default", 86_400), frame(20));
+        backend.store(tenantBucketKey("acme", 0), frame(30));
+
+        CacheSizeReport defaultSlice = admin.measureCacheSize(TenantIdentifier.of("default"));
+        CacheSizeReport global = admin.measureCacheSize();
+
+        assertThat(defaultSlice.bucketCount()).isEqualTo(2);
+        assertThat(defaultSlice.bucketCountByTenant()).containsEntry("default", 2L);
+        assertThat(defaultSlice.totalBytes()).isEqualTo(defaultSlice.bytesByTenant().get("default"));
+        assertThat(defaultSlice.bucketCount()).isNotEqualTo(global.bucketCount());
+
+        assertThat(admin.flushTenant(TenantIdentifier.of("default"))).isEqualTo(2);
+        assertThat(admin.measureCacheSize().bucketCount()).isEqualTo(1);
+        assertThat(admin.measureCacheSize().bytesByTenant()).containsOnlyKeys("acme");
+    }
+
+    @Test
     void flushTenantPurgesOnlyThatTenant() {
         backend.store(tenantBucketKey("acme", 0), frame(10));
         backend.store(tenantBucketKey("acme", 86_400), frame(10));
@@ -117,6 +135,20 @@ final class CacheAdministrationTest {
 
         assertThat(purged).isEqualTo(2);
         assertThat(admin.measureCacheSize().totalBytes()).isZero();
+    }
+
+    @Test
+    void flushEverythingLeavesKeysOutsideTheCascadaNamespaceAlone() {
+        InMemoryBlobCacheBackendAdapter sharedBackend =
+                new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        CacheAdministrationService sharedAdmin = new CacheAdministrationService(sharedBackend);
+        sharedBackend.store("QC:V4:B86400:hash:0", frame(10));
+        sharedBackend.store("application:settings:theme", frame(1));
+
+        assertThat(sharedAdmin.flushEverything()).isEqualTo(1);
+
+        assertThat(sharedBackend.storedBucketCount()).isEqualTo(1);
+        assertThat(sharedAdmin.measureCacheSize().bucketCount()).isZero();
     }
 
     @Test
@@ -155,8 +187,10 @@ final class CacheAdministrationTest {
     }
 
     @Test
-    void everythingScopeMatchesAnyKey() {
-        assertThat(CacheScope.everything().matches("anything")).isTrue();
+    void everythingScopeMatchesOnlyCascadaBucketKeys() {
+        assertThat(CacheScope.everything().matches("QC:V4:B86400:hash:0")).isTrue();
+        assertThat(CacheScope.everything().matches("acme:QC:V4:B86400:hash:0")).isTrue();
+        assertThat(CacheScope.everything().matches("anything")).isFalse();
         assertThat(CacheScope.forKeyPrefix("acme:").matches("acme:QC:V4")).isTrue();
         assertThat(CacheScope.forKeyPrefix("acme:").matches("globex:QC:V4")).isFalse();
     }

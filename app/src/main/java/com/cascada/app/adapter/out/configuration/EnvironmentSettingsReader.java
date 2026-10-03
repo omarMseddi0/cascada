@@ -1,4 +1,4 @@
-package com.cascada.app.bootstrap;
+package com.cascada.app.adapter.out.configuration;
 
 import com.cascada.app.config.EngineSettings;
 

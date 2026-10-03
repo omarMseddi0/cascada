@@ -1,6 +1,6 @@
 package com.cascada.app.config;
 
-import com.cascada.app.bootstrap.EnvironmentSettingsReader;
+import com.cascada.app.adapter.out.configuration.EnvironmentSettingsReader;
 
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
 

@@ -1,5 +1,7 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.app.adapter.out.configuration.EnvironmentSettingsReader;
+
 import com.cascada.app.config.EngineSettings;
 
 import com.cascada.spark.adapter.out.environment.SystemEnvironmentAdapter;

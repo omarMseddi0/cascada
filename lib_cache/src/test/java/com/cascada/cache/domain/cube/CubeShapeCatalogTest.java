@@ -107,9 +107,9 @@ class CubeShapeCatalogTest {
 
     @Test
     void preservesAnAliasedMaximumDuringRollUp() {
-        QueryShape fine = new QueryShape(Set.of("country"), Set.of(), Set.of("MAX(x)"), Set.of("traffic"),
+        QueryShape fine = new QueryShape(Set.of("country"), Set.of(), Set.of("MAX(x)"), Set.of(),
                 Map.of("peak", AggregateFunction.MAXIMUM));
-        QueryShape coarse = new QueryShape(Set.of(), Set.of(), Set.of("MAX(x)"), Set.of("traffic"),
+        QueryShape coarse = new QueryShape(Set.of(), Set.of(), Set.of("MAX(x)"), Set.of(),
                 Map.of("peak", AggregateFunction.MAXIMUM));
         ResultFrame frame = ResultFrame.builder().column("country", ColumnType.STRING).column("peak", ColumnType.LONG)
                 .row("FR", 10L).row("US", 20L).build();
@@ -118,16 +118,157 @@ class CubeShapeCatalogTest {
         Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, coarse);
 
         assertThat(answer).isPresent();
-        assertThat(answer.get().rows().get(0).get("peak")).isEqualTo(20.0);
+        assertThat(answer.get().columnType("peak")).isEqualTo(ColumnType.LONG);
+        assertThat(answer.get().rows().get(0).get("peak")).isEqualTo(20L);
     }
 
     @Test
-    void refusesNullMeasuresInsteadOfThrowing() {
+    void preservesAnAllNullMeasureInsteadOfTreatingNullAsMissingState() {
         QueryShape shape = new QueryShape(Set.of(), Set.of(), Set.of("SUM(x)"));
         ResultFrame nullSum = ResultFrame.builder().column("SUM(x)", ColumnType.LONG).appendNull().build();
         catalog.register(WINDOW, shape, nullSum);
 
-        assertThat(catalog.tryAnswer(WINDOW, shape)).isEmpty();
+        Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, shape);
+
+        assertThat(answer).isPresent();
+        assertThat(answer.get().columnType("SUM(x)")).isEqualTo(ColumnType.LONG);
+        assertThat(answer.get().rows().get(0).get("SUM(x)")).isNull();
+    }
+
+    @Test
+    void bypassesCubeWhenLongSumOverflowsWithoutKnownSparkAnsiMode() {
+        ResultFrame overflowFrame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.LONG)
+                .row("Paris", "north", Long.MAX_VALUE)
+                .row("Paris", "south", 1L)
+                .build();
+        QueryShape finer = new QueryShape(Set.of("city", "region"), Set.of(), Set.of("SUM(x)"));
+        QueryShape coarser = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x)"));
+        catalog.register(WINDOW, finer, overflowFrame);
+
+        assertThat(catalog.tryAnswer(WINDOW, coarser)).isEmpty();
+    }
+
+    @Test
+    void preservesNanAsAValidMinAndMaxValue() {
+        ResultFrame nanFrame = ResultFrame.builder()
+                .column("app", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("MIN(x)", ColumnType.DOUBLE)
+                .column("MAX(x)", ColumnType.DOUBLE)
+                .row("video", "north", Double.NaN, Double.NaN)
+                .row("video", "south", Double.NaN, Double.NaN)
+                .row("audio", "north", 7.0, 7.0)
+                .row("audio", "south", Double.NaN, Double.NaN)
+                .build();
+        QueryShape finer = new QueryShape(Set.of("app", "region"), Set.of(), Set.of("MIN(x)", "MAX(x)"));
+        QueryShape coarser = new QueryShape(Set.of("app"), Set.of(), Set.of("MIN(x)", "MAX(x)"));
+        catalog.register(WINDOW, finer, nanFrame);
+
+        Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, coarser);
+
+        assertThat(answer).isPresent();
+        Map<String, Map<String, Object>> rowsByApp = new java.util.HashMap<>();
+        answer.get().rows().forEach(row -> rowsByApp.put((String) row.get("app"), row));
+        assertThat((Double) rowsByApp.get("video").get("MIN(x)")).isNaN();
+        assertThat((Double) rowsByApp.get("video").get("MAX(x)")).isNaN();
+        assertThat(rowsByApp.get("audio").get("MIN(x)")).isEqualTo(7.0);
+        assertThat((Double) rowsByApp.get("audio").get("MAX(x)")).isNaN();
+    }
+
+    @Test
+    void filtersLongDimensionsExactlyAboveDoublePrecisionThroughCatalog() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("id", ColumnType.LONG)
+                .column("city", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.DOUBLE)
+                .row(9_007_199_254_740_993L, "wrong", 10.0)
+                .row(9_007_199_254_740_992L, "right", 20.0)
+                .build();
+        QueryShape finer = new QueryShape(Set.of("id", "city"), Set.of(), Set.of("SUM(x)"));
+        QueryShape filtered = new QueryShape(Set.of("city"), Set.of("id = 9007199254740992"),
+                Set.of("SUM(x)"));
+        catalog.register(WINDOW, finer, frame);
+
+        Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, filtered);
+
+        assertThat(answer).isPresent();
+        assertThat(answer.get().rowCount()).isEqualTo(1);
+        assertThat(answer.get().rows().get(0).get("city")).isEqualTo("right");
+    }
+
+    @Test
+    void keepsNullCitySeparateFromTheStringNullThroughCatalog() {
+        Map<String, Object> nullCity = new java.util.HashMap<>();
+        nullCity.put("city", null);
+        nullCity.put("device", "phone");
+        nullCity.put("SUM(x)", 10.0);
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("device", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.DOUBLE)
+                .row(nullCity)
+                .row(Map.of("city", "null", "device", "tablet", "SUM(x)", 20.0))
+                .build();
+        QueryShape finer = new QueryShape(Set.of("city", "device"), Set.of(), Set.of("SUM(x)"));
+        QueryShape coarser = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x)"));
+        catalog.register(WINDOW, finer, frame);
+
+        Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, coarser);
+
+        assertThat(answer).isPresent();
+        assertThat(answer.get().rowCount()).isEqualTo(2);
+        assertThat(answer.get().rows()).anySatisfy(row -> {
+            assertThat(row.get("city")).isNull();
+            assertThat(row.get("SUM(x)")).isEqualTo(10.0);
+        });
+        assertThat(answer.get().rows()).anySatisfy(row -> {
+            assertThat(row.get("city")).isEqualTo("null");
+            assertThat(row.get("SUM(x)")).isEqualTo(20.0);
+        });
+    }
+
+    @Test
+    void preservesLongMeasurePrecisionThroughCatalog() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.LONG)
+                .row("Paris", "north", 9_007_199_254_740_992L)
+                .row("Paris", "south", 1L)
+                .build();
+        QueryShape finer = new QueryShape(Set.of("city", "region"), Set.of(), Set.of("SUM(x)"));
+        QueryShape coarser = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x)"));
+        catalog.register(WINDOW, finer, frame);
+
+        Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, coarser);
+
+        assertThat(answer).isPresent();
+        assertThat(answer.get().columnType("SUM(x)")).isEqualTo(ColumnType.LONG);
+        assertThat(answer.get().rows().get(0).get("SUM(x)")).isEqualTo(9_007_199_254_740_993L);
+    }
+
+    @Test
+    void returnsProjectedColumnsInTheCanonicalOrder() {
+        List<String> projection = List.of("SUM(x) AS total", "city");
+        ResultFrame frame = ResultFrame.builder()
+                .column("total", ColumnType.LONG)
+                .column("city", ColumnType.STRING)
+                .row(15L, "Paris")
+                .build();
+        QueryShape finer = new QueryShape(Set.of("city", "region"), Set.of(), Set.of("SUM(x) AS total"),
+                Set.of("traffic"), Map.of("total", AggregateFunction.SUM), projection);
+        QueryShape coarser = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x) AS total"),
+                Set.of("traffic"), Map.of("total", AggregateFunction.SUM), projection);
+        catalog.register(WINDOW, finer, frame);
+
+        Optional<ResultFrame> answer = catalog.tryAnswer(WINDOW, coarser);
+
+        assertThat(answer).isPresent();
+        assertThat(answer.get().columnNames()).containsExactly("total", "city");
+        assertThat(answer.get().columnType("total")).isEqualTo(ColumnType.LONG);
     }
 
     @Test

@@ -9,7 +9,6 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 /**
  * The in-memory cube catalog that connects the subsumption algebra to the execution engine
@@ -38,7 +37,7 @@ public final class CubeShapeCatalog {
     private final CubeConsistencyVerifier verifier = new CubeConsistencyVerifier();
     private final int maxWindows;
     private final int maxShapesPerWindow;
-    private final Map<TimeRange, WindowShapes> windows;
+    private final Map<TimeRange, CubeWindowShapes> windows;
 
     public CubeShapeCatalog() {
         this(DEFAULT_MAX_WINDOWS, DEFAULT_MAX_SHAPES_PER_WINDOW);
@@ -56,7 +55,7 @@ public final class CubeShapeCatalog {
         this.maxShapesPerWindow = maxShapesPerWindow;
         this.windows = new LinkedHashMap<>(16, 0.75f, true) {
             @Override
-            protected boolean removeEldestEntry(Map.Entry<TimeRange, WindowShapes> eldest) {
+            protected boolean removeEldestEntry(Map.Entry<TimeRange, CubeWindowShapes> eldest) {
                 return size() > CubeShapeCatalog.this.maxWindows;
             }
         };
@@ -73,7 +72,7 @@ public final class CubeShapeCatalog {
         HashComponents components = query.hashComponents();
         return new QueryShape(new HashSet<>(components.groupBy()), new HashSet<>(components.filters()),
                 new HashSet<>(components.aggregates()), new HashSet<>(query.sourceSignature()),
-                query.metadata().measureAggregates());
+                query.metadata().measureAggregates(), query.projectionSignature());
     }
 
     /**
@@ -85,9 +84,9 @@ public final class CubeShapeCatalog {
         if (frame.isEmpty()) {
             return;
         }
-        WindowShapes window = windows.computeIfAbsent(timeRange, ignored -> new WindowShapes());
-        if (window.shapes.size() < maxShapesPerWindow && window.shapes.add(shape)) {
-            window.index.register(new CachedShapeEntry(shape, frame));
+        CubeWindowShapes window = windows.computeIfAbsent(timeRange, ignored -> new CubeWindowShapes());
+        if (window.shapes().size() < maxShapesPerWindow && window.shapes().add(shape)) {
+            window.index().register(new CachedShapeEntry(shape, frame));
         }
     }
 
@@ -96,24 +95,25 @@ public final class CubeShapeCatalog {
      * no candidate subsumes it or the verifier refuses the roll-up.
      */
     public synchronized Optional<ResultFrame> tryAnswer(TimeRange timeRange, QueryShape query) {
-        WindowShapes window = windows.get(timeRange);
+        CubeWindowShapes window = windows.get(timeRange);
         if (window == null) {
             return Optional.empty();
         }
-        Optional<CachedShapeEntry> best = window.index.findBestSubsumer(query, planner);
-        if (best.isEmpty()) {
-            return Optional.empty();
+        for (CachedShapeEntry candidate : window.index().candidatesFor(query)) {
+            if (!planner.subsumes(candidate.shape(), query)) {
+                continue;
+            }
+            try {
+                ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+                if (verifier.verifyRollUp(candidate, query, answer).isConsistent()) {
+                    return Optional.of(answer);
+                }
+            } catch (RuntimeException unverifiableCandidate) {
+                // Cube reuse is optional. A malformed frame or an arithmetic edge case must fall
+                // through to the ordinary cache/Spark path instead of escaping the catalog.
+            }
         }
-        ResultFrame answer;
-        try {
-            answer = planner.rollUpAndFilterDown(best.get(), query);
-        } catch (RuntimeException malformedCandidate) {
-            return Optional.empty();
-        }
-        if (!verifier.verifyRollUp(best.get(), query, answer).isConsistent()) {
-            return Optional.empty();
-        }
-        return Optional.of(answer);
+        return Optional.empty();
     }
 
     /** Drop every catalogued window — the flush hook for invalidation / admin cache-flush (§8.17). */
@@ -126,11 +126,11 @@ public final class CubeShapeCatalog {
     }
 
     public synchronized int entryCount() {
-        return windows.values().stream().mapToInt(window -> window.shapes.size()).sum();
+        int total = 0;
+        for (CubeWindowShapes window : windows.values()) {
+            total += window.shapes().size();
+        }
+        return total;
     }
 
-    private static final class WindowShapes {
-        private final ShapeLatticeIndex index = new ShapeLatticeIndex();
-        private final Set<QueryShape> shapes = new HashSet<>();
-    }
 }

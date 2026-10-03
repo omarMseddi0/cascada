@@ -17,6 +17,9 @@ public final class SparkConfigurationFileReader {
         if (path == null || path.isBlank()) return Map.of();
         try {
             Map<String, Object> raw = JSON.readValue(Files.readString(Path.of(path)), new TypeReference<>() { });
+            if (raw == null) {
+                throw new IllegalArgumentException("Spark configuration must be a flat map of spark.* strings");
+            }
             Map<String, String> properties = new LinkedHashMap<>();
             raw.forEach((key, value) -> {
                 if (!key.startsWith("spark.") || !(value instanceof String)) {

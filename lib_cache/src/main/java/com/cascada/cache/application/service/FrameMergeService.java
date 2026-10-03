@@ -1,15 +1,13 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.OrderByClause;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.AggregateFunctionResolver;
 import com.cascada.cache.domain.merge.AverageReconstructionService;
-import com.cascada.cache.domain.merge.columnar.ColumnarHashAggregator;
-import com.cascada.cache.domain.merge.columnar.ColumnarHashAggregator.GroupedResult;
-import com.cascada.cache.domain.merge.columnar.DictionaryEncoder;
+import com.cascada.cache.domain.merge.TypedFrameAggregator;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.query.OrderByClause;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -20,17 +18,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Bridges {@link ResultFrame}s to the framework-free merge math, reproducing the merge step of
- * {@code cache_execution_engine.py} / {@code merging.py}: pick the time-series vs global-aggregate
- * strategy, drop exact-duplicate rows (RC3), combine measures additively (COUNT included),
- * resample/roll-up, then reconstruct {@code AVG} from {@code SUM}/{@code COUNT} (RC4) and apply the
- * deferred {@code ORDER BY}/{@code LIMIT}.
- *
- * <p>Both merge strategies extract each frame straight into columnar primitive arrays (dictionary
- * codes + {@code double[]}) and run {@link ColumnarHashAggregator}, the shared vectorized group-by —
- * no per-row map objects exist anywhere on the hot path.
- */
+/** Coordinates typed frame aggregation, AVG/composite reconstruction, and deferred post-processing. */
 public final class FrameMergeService {
 
     private static final Pattern AVG_SPEC =
@@ -46,9 +34,17 @@ public final class FrameMergeService {
     }
 
     public ResultFrame mergeAndReconstruct(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
+        if (frames.isEmpty()) {
+            return ResultFrame.empty();
+        }
+        // Validate even zero-row partials. A schema mismatch must not be hidden just because the
+        // mismatching cached frame happened to contain no rows for this particular bucket.
+        TypedFrameAggregator.validateCompatibleSchemas(frames);
         List<ResultFrame> nonEmpty = frames.stream().filter(frame -> !frame.isEmpty()).toList();
         if (nonEmpty.isEmpty()) {
-            return ResultFrame.empty();
+            // Empty Spark results still carry their projected schema. Keep it intact so callers
+            // receive the same columns and types as they would from a non-empty merge.
+            return frames.get(0);
         }
 
         ResultFrame merged = canonicalObject.metadata().isTimeSeries()
@@ -179,8 +175,7 @@ public final class FrameMergeService {
                 AggregateFunctionResolver.fromAggregateSpecs(canonicalObject.metadata().aggregateSpecs()));
         canonicalObject.metadata().measureAggregates().forEach((column, function) ->
                 functions.put(column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT), function));
-        return com.cascada.cache.domain.merge.TypedFrameAggregator.aggregate(
-                frames, dimensions, functions, timeColumnName, step);
+        return TypedFrameAggregator.aggregate(frames, dimensions, functions, timeColumnName, step);
     }
 
     // --- AVG reconstruction (RC4) ----------------------------------------------------------------
@@ -205,11 +200,6 @@ public final class FrameMergeService {
         }
 
         List<String> sumCountColumnsToDrop = new ArrayList<>();
-        ResultFrame.Builder builder = ResultFrame.builder();
-        for (String column : frame.columnNames()) {
-            builder.column(column, frame.columnType(column));
-        }
-        averageAliasToColumn.keySet().forEach(alias -> builder.column(alias, ColumnType.DOUBLE));
 
         List<Map<String, Object>> rebuiltRows = new ArrayList<>();
         for (Map<String, Object> row : frame.rows()) {
@@ -272,7 +262,7 @@ public final class FrameMergeService {
                     if (a == b) return 0;
                     return (a == null ? -1 : 1) * (clause.nullsFirst() ? 1 : -1);
                 }
-                int compared = com.cascada.cache.domain.merge.TypedFrameAggregator.compare(a, b);
+                int compared = TypedFrameAggregator.compare(a, b);
                 return clause.ascending() ? compared : -compared;
             };
             rows.sort(comparator);
@@ -307,52 +297,7 @@ public final class FrameMergeService {
         return dimensions;
     }
 
-    private List<String> measureColumns(ResultFrame frame, CanonicalQueryObject canonicalObject,
-                                        List<String> dimensionColumns, boolean isTimeSeries) {
-        List<String> measures = new ArrayList<>();
-        for (String column : frame.columnNames()) {
-            if (column.equals(timeColumnName) && isTimeSeries) {
-                continue;
-            }
-            if (dimensionColumns.contains(column)) {
-                continue;
-            }
-            ColumnType type = frame.columnType(column);
-            if (type == ColumnType.LONG || type == ColumnType.DOUBLE) {
-                measures.add(column);
-            }
-        }
-        return measures;
-    }
-
-    private long asLong(Object value) {
-        if (!(value instanceof Number number)) {
-            throw new IllegalStateException(
-                    "expected a numeric time-bucket value but got "
-                            + (value == null ? "null" : value.getClass().getSimpleName())
-                            + " — a frame is missing or corrupting its time column");
-        }
-        return number.longValue();
-    }
-
     private double asDouble(Object value) {
         return ((Number) value).doubleValue();
-    }
-
-    /**
-     * A measure cell for the columnar hot loop: {@code null} (a NULL aggregate from Spark or a
-     * serializer round-trip) maps to {@link Double#NaN}, the aggregator's "absent in this row"
-     * marker — the same semantics {@code GlobalAggregateMerger} gives missing cells, instead of an
-     * NPE that would fail the whole merge.
-     */
-    private double asMeasure(Object value) {
-        return value == null ? Double.NaN : ((Number) value).doubleValue();
-    }
-
-    private Object toComparable(Object value) {
-        if (value instanceof Number number) {
-            return number.doubleValue();
-        }
-        return value == null ? null : value.toString();
     }
 }

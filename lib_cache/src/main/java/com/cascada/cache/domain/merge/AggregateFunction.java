@@ -28,6 +28,10 @@ public enum AggregateFunction {
     MINIMUM {
         @Override
         public double combine(double left, double right) {
+            // Spark orders NaN after all ordinary numeric values for MIN/MAX. Java's Math.min
+            // propagates NaN, which would turn MIN(2.0, NaN) into NaN instead of 2.0.
+            if (Double.isNaN(left)) return right;
+            if (Double.isNaN(right)) return left;
             return Math.min(left, right);
         }
     },
@@ -35,6 +39,8 @@ public enum AggregateFunction {
     MAXIMUM {
         @Override
         public double combine(double left, double right) {
+            // NaN sorts after every numeric value in Spark, so it wins MAX and loses MIN.
+            if (Double.isNaN(left) || Double.isNaN(right)) return Double.NaN;
             return Math.max(left, right);
         }
     };

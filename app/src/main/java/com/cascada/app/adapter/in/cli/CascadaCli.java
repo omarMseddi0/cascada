@@ -10,36 +10,14 @@ import com.cascada.cache.domain.frame.ResultFrame;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
-/**
- * <b>Primary (driving) adapter</b> — a command-line front end over the inbound ports.
- *
- * <p>It is the smallest possible demonstration of the hexagon's central promise: this class holds four
- * interfaces and translates {@code String[] args} into calls on them. It knows nothing about Valkey,
- * Spark, Calcite, bucket arithmetic, or safety rules. A REST controller would be the same shape with
- * different plumbing, which is exactly why swapping one for the other changes no application code.
- *
- * <p>Being an adapter, it is also the correct place for presentation concerns — parsing arguments,
- * formatting a frame as text, choosing an exit code. None of that belongs any further in.
- *
- * <h2>Deliberate limitations</h2>
- * This is a thin operational tool, not a product surface:
- * <ul>
- *   <li>TODO(cascada): argument parsing is positional and unvalidated beyond arity. A real CLI wants a
- *       parser (picocli or equivalent), {@code --help}, and typed options.</li>
- *   <li>TODO(cascada): results print as plain text. Add {@code --format=csv|json} for scripting.</li>
- *   <li>TODO(cascada): {@code warm} uses a hard-coded 7-day lookback ending now. It should accept an
- *       explicit window, and {@code now} should come from an injected clock rather than
- *       {@link System#currentTimeMillis()} — an untestable time source at the edge is tolerable, one in
- *       the core would not be.</li>
- *   <li>TODO(cascada): {@code flush} performs no confirmation and takes no tenant, so only the
- *       flush-everything and flush-by-prefix scopes are reachable from here.</li>
- * </ul>
- */
+/** Command-line adapter that translates arguments into inbound use-case calls. */
 public final class CascadaCli {
 
     private static final long SECONDS_PER_DAY = 86_400L;
     private static final int DEFAULT_WARM_LOOKBACK_DAYS = 7;
+    private static final Set<String> COMMAND_NAMES = Set.of("query", "cache-size", "flush", "warm");
 
     private final ExecuteLogicalQueryUseCase executeLogicalQuery;
     private final MeasureCacheSizeUseCase measureCacheSize;
@@ -58,30 +36,36 @@ public final class CascadaCli {
 
     /** Dispatch one command. Unknown or missing commands print usage rather than throwing. */
     public void run(String[] args) {
-        if (args.length == 0) {
-            printUsage();
-            return;
-        }
+        if (!validateCommand(args)) return;
         switch (args[0]) {
             case "query" -> runQuery(args);
             case "cache-size" -> runCacheSize();
             case "flush" -> runFlush(args);
             case "warm" -> runWarm();
-            default -> {
-                System.out.println("unknown command: " + args[0]);
-                printUsage();
-            }
         }
     }
 
-    private void runQuery(String[] args) {
-        if (args.length < 2) {
-            System.out.println("usage: query \"<logical SQL>\"");
-            return;
+    /** Validate CLI input before starting cache or Spark infrastructure. */
+    public static boolean validateCommand(String[] arguments) {
+        if (arguments.length == 0) {
+            printUsage();
+            return false;
         }
+        if (!COMMAND_NAMES.contains(arguments[0])) {
+            System.out.println("unknown command: " + arguments[0]);
+            printUsage();
+            return false;
+        }
+        if (arguments[0].equals("query") && arguments.length < 2) {
+            System.out.println("usage: query \"<logical SQL>\"");
+            return false;
+        }
+        return true;
+    }
+
+    private void runQuery(String[] args) {
         ExecuteCachedQueryUseCase.Result result = executeLogicalQuery.query(args[1]);
-        // Whether the cache served it is the single most useful diagnostic: false means a safety rule
-        // forced a bypass, so the answer is correct but was paid for in full.
+        // Report whether this result used the cache execution path.
         System.out.println("served through cache: " + result.servedThroughCache());
         printFrame(result.frame());
     }
@@ -120,7 +104,7 @@ public final class CascadaCli {
         System.out.println("(" + frame.rowCount() + " rows)");
     }
 
-    private void printUsage() {
+    private static void printUsage() {
         System.out.println("""
                 cascada <command>
 

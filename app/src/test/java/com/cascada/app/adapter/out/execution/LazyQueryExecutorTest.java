@@ -112,4 +112,9 @@ class LazyQueryExecutorTest {
         assertThat(stops).hasValue(1);
     }
 
+    @Test
+    void usageDoesNotInitializeConfiguredRuntime() throws Exception {
+        CascadaLauncher.main(new String[0]);
+        CascadaLauncher.main(new String[]{"query"});
+    }
 }

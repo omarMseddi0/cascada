@@ -1,61 +1,35 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.app.adapter.out.configuration.SparkConfigurationFileReader;
-
-import com.cascada.app.adapter.out.configuration.EnvironmentSettingsReader;
-
 import com.cascada.app.config.EngineSettings;
+import com.cascada.app.adapter.out.configuration.EnvironmentSettingsReader;
+import com.cascada.app.adapter.out.configuration.SparkConfigurationFileReader;
+import com.cascada.app.adapter.out.execution.LazyQueryExecutor;
+import com.cascada.app.adapter.in.cli.CascadaCli;
 
 import com.cascada.spark.adapter.out.environment.SystemEnvironmentAdapter;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import com.cascada.spark.domain.SparkSessionConfig;
 import com.cascada.spark.application.configuration.SparkSessionConfigBuilder;
 
-/**
- * The process entry point: read the environment, build the execution tier, hand both to
- * {@link CascadaEngineFactory}, and start a driving adapter.
- *
- * <p>It does exactly three things and nothing else — no query text, no printing of results, no business
- * decisions. The previous entry point in this module hard-coded a demo SQL string and printed rows to
- * standard output, which meant the only way to run Cascada was to run that one query; there was no seam
- * for a real caller to attach to. Everything a caller might actually want now lives behind an inbound
- * port, and this class merely opens the door.
- *
- * <p>Local versus cluster is decided in one place here — {@code CASCADA_RUN_MODE} picks the Spark master —
- * and nothing downstream is aware of the difference.
- *
- * <h2>Not yet implemented</h2>
- * <ul>
- *   <li>TODO(cascada): serve the inbound ports over the network. A REST adapter under
- *       {@code adapter/in/rest} (one controller per use case, per the reference architecture) and/or a
- *       JDBC/Arrow Flight SQL endpoint so BI tools can connect. Until one exists, Cascada is a library
- *       with a CLI, not a service.</li>
- *   <li>TODO(cascada): a scheduler adapter under {@code adapter/in/scheduler} that periodically calls
- *       {@code WarmCacheUseCase.warmCycle(...)}. Warming is fully implemented and tested but nothing ever
- *       triggers it, so in practice the cache only ever fills on demand.</li>
- *   <li>TODO(cascada): graceful shutdown. The Spark session and the Valkey connection are closed on the
- *       happy path below, but there is no shutdown hook, so a SIGTERM (what Kubernetes sends) leaks both.</li>
- *   <li>TODO(cascada): authentication and tenant resolution at the inbound edge. Every cache key is
- *       already tenant-scoped by construction, so this is the missing half of multi-tenancy.</li>
- *   <li>TODO(cascada): structured logging and metrics. There is no logging framework wired at all, which
- *       is survivable for a library and not for a service.</li>
- * </ul>
- */
+/** Process entry point. Validates the command and owns cache and executor resources. */
 public final class CascadaLauncher {
 
     private CascadaLauncher() {
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
+        if (!CascadaCli.validateCommand(args)) {
+            return;
+        }
         EngineSettings settings = new EnvironmentSettingsReader(SystemEnvironmentAdapter.INSTANCE::get).read();
 
-        try (SparkDeltaQueryExecutor executor = sparkExecutor(settings);
+        try (LazyQueryExecutor executor = new LazyQueryExecutor(() -> sparkExecutor(settings));
              CascadaEngineFactory factory = new CascadaEngineFactory(settings, executor)) {
 
             // TODO(cascada): replace this with a real driving adapter (REST server / JDBC listener) that
             // stays up. Handing the ports to the CLI is a placeholder so the wiring is exercised and the
             // engine is reachable, not a production front end.
-            new com.cascada.app.adapter.in.cli.CascadaCli(
+            new CascadaCli(
                     factory.executeLogicalQueryUseCase(),
                     factory.measureCacheSizeUseCase(),
                     factory.flushCacheUseCase(),
@@ -63,11 +37,7 @@ public final class CascadaLauncher {
         }
     }
 
-    /**
-     * Build the Spark/Delta execution adapter. The only difference between a laptop and the production
-     * data plane is the master string chosen here; the Delta extensions, the executor code, and the cache
-     * are identical.
-     */
+    /** Builds Spark with deployment properties followed by explicit environment overrides. */
     private static SparkDeltaQueryExecutor sparkExecutor(EngineSettings settings) {
         SparkSessionConfig config = (settings.useLocalSpark()
                 ? SparkSessionConfigBuilder.forLocal()

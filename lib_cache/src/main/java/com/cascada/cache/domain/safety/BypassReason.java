@@ -1,4 +1,6 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.safety;
+
+import com.cascada.cache.domain.CacheDecision;
 
 /**
  * The specific guardrail that forced a {@link CacheDecision#BYPASS_V4}.

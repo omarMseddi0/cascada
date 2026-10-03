@@ -1,10 +1,9 @@
 package com.cascada.cache.domain.hashing;
 
-import com.cascada.cache.domain.time.CacheTimeConstants;
-
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.cache.domain.time.CacheTimeConstants;
 import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.identity.domain.QueryHash;
 import org.junit.jupiter.api.Test;
@@ -16,9 +15,9 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Pins the two correctness properties of the logic hash (ported from {@code cache_hashing.py}):
- * it is independent of the time range, and independent of clause ordering, but sensitive to the
- * actual intent (group-by, aggregates, filters, step, composite aliases).
+ * Pins the logic hash contract (ported from {@code cache_hashing.py}): it is independent of the
+ * time range and order of commutative clauses, but preserves ordinal projection order and changes
+ * when query intent changes.
  */
 class QueryHashGeneratorTest {
 
@@ -74,6 +73,7 @@ class QueryHashGeneratorTest {
                 PostProcessing.none(), QueryMetadata.globalAggregate());
 
         assertThat(generator.buildCanonicalString(series, CacheTimeConstants.DEFAULT_CACHE_STEP_SECONDS))
+                .contains("\"canonical_semantics_version\":2")
                 .contains("\"step\":300");
         assertThat(generator.buildCanonicalString(global, 0)).contains("\"step\":0");
         assertThat(generator.generateQueryHash(series)).isNotEqualTo(generator.generateQueryHash(global));
@@ -107,5 +107,19 @@ class QueryHashGeneratorTest {
         CanonicalQueryObject tableB = new CanonicalQueryObject(components, new TimeRange(0, 86_399),
                 PostProcessing.none(), QueryMetadata.timeSeries(600), "", List.of("traffic_b"), List.of());
         assertThat(generator.generateQueryHash(tableA)).isNotEqualTo(generator.generateQueryHash(tableB));
+    }
+
+    @Test
+    void projectionOrderContributesToTheHash() {
+        HashComponents components = HashComponents.of(List.of("city"), List.of("SUM(x)"), List.of());
+        CanonicalQueryObject cityThenTotal = new CanonicalQueryObject(components, new TimeRange(0, 86_399),
+                PostProcessing.none(), QueryMetadata.timeSeries(300), "", List.of("traffic"),
+                List.of("city", "SUM(x) AS total"));
+        CanonicalQueryObject totalThenCity = new CanonicalQueryObject(components, new TimeRange(0, 86_399),
+                PostProcessing.none(), QueryMetadata.timeSeries(300), "", List.of("traffic"),
+                List.of("SUM(x) AS total", "city"));
+
+        assertThat(generator.generateQueryHash(cityThenTotal))
+                .isNotEqualTo(generator.generateQueryHash(totalThenCity));
     }
 }

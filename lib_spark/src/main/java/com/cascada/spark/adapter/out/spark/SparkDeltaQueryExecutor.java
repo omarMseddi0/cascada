@@ -9,6 +9,8 @@ import org.apache.spark.sql.SparkSession;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * The production {@link QueryExecutorPort}: runs a physical SQL string on a Spark 3.5.x session
@@ -28,6 +30,8 @@ import java.util.Objects;
  * well-typed bridge.
  */
 public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoCloseable {
+
+    private static final Logger LOGGER = Logger.getLogger(SparkDeltaQueryExecutor.class.getName());
 
     /**
      * Hard ceiling on rows materialised into the engine's JVM per query. The cache path only ever
@@ -76,8 +80,18 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
 
     @Override
     public ResultFrame execute(String physicalSql) {
+        boolean monitor = LOGGER.isLoggable(Level.FINE);
+        long started = monitor ? System.nanoTime() : 0L;
         Dataset<Row> dataset = sparkSession.sql(physicalSql);
-        return toResultFrame(dataset);
+        long planned = monitor ? System.nanoTime() : 0L;
+        ResultFrame result = toResultFrame(dataset);
+        if (monitor) {
+            long finished = System.nanoTime();
+            LOGGER.fine(() -> "Spark query: setup_ms=" + (planned - started) / 1_000_000.0
+                    + " execute_and_map_ms=" + (finished - planned) / 1_000_000.0
+                    + " result_rows=" + result.rowCount() + " result_columns=" + result.columnNames().size());
+        }
+        return result;
     }
 
     /** Map a Spark result into a {@link ResultFrame}; visible for the cluster integration test. */

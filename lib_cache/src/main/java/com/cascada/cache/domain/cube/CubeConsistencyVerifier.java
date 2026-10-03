@@ -76,34 +76,49 @@ public final class CubeConsistencyVerifier {
         Map<String, AggregateFunction> declared = declaredAggregateFunctions(candidate.shape(), query);
         validateMeasureCombiners(measures, declared);
 
+        int[] dimensionIndexes = new int[dimensions.size()];
+        ColumnType[] dimensionTypes = new ColumnType[dimensions.size()];
+        for (int index = 0; index < dimensions.size(); index++) {
+            dimensionIndexes[index] = frame.columnIndex(dimensions.get(index));
+            dimensionTypes[index] = frame.columnTypeAt(dimensionIndexes[index]);
+        }
+        int[] measureIndexes = new int[measures.size()];
+        ColumnType[] measureTypes = new ColumnType[measures.size()];
+        AggregateFunction[] measureFunctions = new AggregateFunction[measures.size()];
+        for (int index = 0; index < measures.size(); index++) {
+            String measure = measures.get(index);
+            measureIndexes[index] = frame.columnIndex(measure);
+            measureTypes[index] = frame.columnTypeAt(measureIndexes[index]);
+            AggregateFunction function = declared.get(normalize(measure));
+            measureFunctions[index] = function == null
+                    ? AggregateFunctionResolver.resolve(measure, declared) : function;
+        }
+
         Map<List<Object>, CubeVerifierGroup> oracle = new LinkedHashMap<>();
-        for (Map<String, Object> row : frame.rows()) {
-            if (!matchesAll(frame, row, extraFilters)) {
+        for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
+            if (!extraFilters.isEmpty() && !matchesAll(frame, frame.rows().get(rowIndex), extraFilters)) {
                 continue;
             }
             List<Object> parts = new ArrayList<>(dimensions.size());
-            for (String dimension : dimensions) {
-                parts.add(canonicalDimension(frame.columnType(dimension), row.get(dimension)));
+            for (int index = 0; index < dimensions.size(); index++) {
+                Object value = frame.valueAt(rowIndex, dimensionIndexes[index]);
+                parts.add(canonicalDimension(dimensionTypes[index], value));
             }
             List<Object> key = Collections.unmodifiableList(parts);
             CubeVerifierGroup group = oracle.computeIfAbsent(key, ignored -> new CubeVerifierGroup(measures.size()));
             for (int index = 0; index < measures.size(); index++) {
-                String measure = measures.get(index);
-                Object value = row.get(measure);
+                Object value = frame.valueAt(rowIndex, measureIndexes[index]);
                 if (value == null) {
                     continue;
                 }
-                ColumnType type = frame.columnType(measure);
+                ColumnType type = measureTypes[index];
                 validateDecimal(type, value);
                 if (!group.measurePresent()[index]) {
                     group.measureValues()[index] = value;
                     group.measurePresent()[index] = true;
                 } else {
-                    AggregateFunction function = declared.get(normalize(measure));
-                    if (function == null) {
-                        function = AggregateFunctionResolver.resolve(measure, declared);
-                    }
-                    group.measureValues()[index] = combineIndependently(group.measureValues()[index], value, type, function);
+                    group.measureValues()[index] = combineIndependently(group.measureValues()[index], value, type,
+                            measureFunctions[index]);
                 }
             }
         }

@@ -49,6 +49,14 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- Spark's Scala Jackson module must use the same minor version as databind. -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <!-- Test stack (pinned once for every module) -->
             <dependency>
                 <groupId>org.junit</groupId>

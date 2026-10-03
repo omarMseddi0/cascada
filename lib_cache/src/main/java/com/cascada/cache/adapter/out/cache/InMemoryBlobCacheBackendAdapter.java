@@ -51,6 +51,14 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
     }
 
     @Override
+    public void visitKeys(List<String> keys, java.util.function.BiConsumer<Integer, Optional<ResultFrame>> visitor) {
+        for (int index = 0; index < keys.size(); index++) {
+            byte[] blob = blobsByKey.get(keys.get(index));
+            visitor.accept(index, blob == null ? Optional.empty() : Optional.of(serializer.deserialize(blob)));
+        }
+    }
+
+    @Override
     public void store(String key, ResultFrame frame) {
         blobsByKey.put(key, serializer.serialize(frame));
     }

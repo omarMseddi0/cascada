@@ -5,7 +5,7 @@ import com.cascada.cache.domain.merge.AggregateFunction;
 import java.util.Arrays;
 
 /**
- * The vectorized hash-aggregation operator every merge path routes through — the in-process
+ * Primitive double hash aggregation for the legacy row-object merge adapters — the in-process
  * equivalent of Spark's {@code HashAggregateExec} / Presto's {@code GroupByHash}. Inputs are
  * columnar primitive arrays (dictionary codes for dimensions, {@code double[]} for measures,
  * an optional {@code long[]} time-bucket column); grouping runs over an open-addressing linear-probe

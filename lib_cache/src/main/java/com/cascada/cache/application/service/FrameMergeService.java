@@ -10,16 +10,20 @@ import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.OrderByClause;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.IntBinaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /** Coordinates typed frame aggregation, AVG/composite reconstruction, and deferred post-processing. */
 public final class FrameMergeService {
+
+    private static final Logger LOGGER = Logger.getLogger(FrameMergeService.class.getName());
 
     private static final Pattern AVG_SPEC =
             Pattern.compile("(?i)AVG\\s*\\(\\s*([^)]+?)\\s*\\)(?:\\s+AS\\s+([A-Za-z_][A-Za-z0-9_]*))?");
@@ -31,6 +35,63 @@ public final class FrameMergeService {
     public FrameMergeService(int fixedStepSeconds, String timeColumnName) {
         this.fixedStepSeconds = fixedStepSeconds;
         this.timeColumnName = timeColumnName;
+    }
+
+    /** Same ordered merge and final reconstruction, without retaining each completed input frame. */
+    public IncrementalMerge incremental(CanonicalQueryObject canonicalObject) {
+        return new IncrementalMerge(canonicalObject);
+    }
+
+    public final class IncrementalMerge {
+        private final CanonicalQueryObject canonical;
+        private ResultFrame schema;
+        private ResultFrame firstEmpty;
+        private TypedFrameAggregator.Accumulator accumulator;
+        private RuntimeException failure;
+        private long inputRows;
+
+        private IncrementalMerge(CanonicalQueryObject canonical) { this.canonical = canonical; }
+
+        /** Deferred merge errors preserve authoritative fallback after the original fetch/query phases. */
+        public void add(ResultFrame frame) {
+            if (failure != null) return;
+            try {
+                java.util.Objects.requireNonNull(frame, "frame");
+                if (schema == null) {
+                    ResultFrame.Builder descriptor = ResultFrame.builder();
+                    for (String column : frame.columnNames()) descriptor.column(column, frame.columnType(column));
+                    schema = descriptor.build();
+                    if (frame.isEmpty()) firstEmpty = frame;
+                } else TypedFrameAggregator.validateCompatibleSchemas(List.of(schema, frame));
+                inputRows += frame.rowCount();
+                if (frame.isEmpty()) return;
+                if (accumulator == null) {
+                    List<String> dimensions = new ArrayList<>();
+                    boolean timeSeries = canonical.metadata().isTimeSeries();
+                    if (timeSeries) dimensions.add(timeColumnName);
+                    dimensions.addAll(dimensionColumns(schema, canonical, timeSeries));
+                    int step = timeSeries ? canonical.userStepSeconds().orElse(fixedStepSeconds) : fixedStepSeconds;
+                    accumulator = new TypedFrameAggregator.Accumulator(schema, dimensions,
+                            resolvedFunctions(canonical), timeColumnName, step);
+                }
+                accumulator.accept(frame);
+            } catch (RuntimeException invalidMerge) { failure = invalidMerge; }
+        }
+
+        public ResultFrame finish() {
+            if (failure != null) throw failure;
+            if (schema == null) return ResultFrame.empty();
+            if (accumulator == null) return firstEmpty == null ? schema : firstEmpty;
+            boolean monitor = LOGGER.isLoggable(Level.FINE);
+            long started = monitor ? System.nanoTime() : 0L;
+            ResultFrame merged = accumulator.finish();
+            ResultFrame reconstructed = reconstructAverages(merged, canonical);
+            ResultFrame composites = reconstructCompositeAliases(reconstructed, canonical);
+            ResultFrame answer = applyPostProcessing(composites, canonical);
+            if (monitor) LOGGER.fine("Incremental cache merge: input_rows=" + inputRows
+                    + " output_rows=" + answer.rowCount() + " finish_ms=" + (System.nanoTime() - started) / 1_000_000.0);
+            return answer;
+        }
     }
 
     public ResultFrame mergeAndReconstruct(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
@@ -47,13 +108,25 @@ public final class FrameMergeService {
             return frames.get(0);
         }
 
+        boolean monitor = LOGGER.isLoggable(Level.FINE);
+        long started = monitor ? System.nanoTime() : 0L;
         ResultFrame merged = canonicalObject.metadata().isTimeSeries()
                 ? mergeTimeSeries(nonEmpty, canonicalObject)
                 : mergeGlobalAggregate(nonEmpty, canonicalObject);
 
+        long aggregated = monitor ? System.nanoTime() : 0L;
         ResultFrame reconstructed = reconstructAverages(merged, canonicalObject);
         ResultFrame withComposites = reconstructCompositeAliases(reconstructed, canonicalObject);
-        return applyPostProcessing(withComposites, canonicalObject);
+        ResultFrame result = applyPostProcessing(withComposites, canonicalObject);
+        if (monitor) {
+            long finished = System.nanoTime();
+            long inputRows = 0;
+            for (ResultFrame frame : frames) inputRows += frame.rowCount();
+            LOGGER.fine("Cache merge: input_rows=" + inputRows + " output_rows=" + result.rowCount()
+                    + " aggregate_ms=" + (aggregated - started) / 1_000_000.0
+                    + " reconstruct_and_sort_ms=" + (finished - aggregated) / 1_000_000.0);
+        }
+        return result;
     }
 
     // --- composite aliases (e.g. SUM(a) + SUM(b) AS total_bytes) ---------------------------------
@@ -97,23 +170,27 @@ public final class FrameMergeService {
             return frame;
         }
 
-        ResultFrame.Builder builder = ResultFrame.builder();
+        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(frame.rowCount());
         for (String column : frame.columnNames()) {
             builder.column(column, frame.columnType(column));
         }
         resolved.keySet().forEach(alias -> builder.column(alias, ColumnType.DOUBLE));
 
-        for (Map<String, Object> row : frame.rows()) {
-            Map<String, Object> rebuilt = new LinkedHashMap<>(row);
-            resolved.forEach((alias, terms) -> {
+        List<List<CompositeTerm>> formulas = new ArrayList<>(resolved.values());
+        int[][] termColumns = formulas.stream().map(terms -> terms.stream()
+                .mapToInt(term -> frame.columnIndex(term.columnReference())).toArray()).toArray(int[][]::new);
+        for (int row = 0; row < frame.rowCount(); row++) {
+            for (int column = 0; column < frame.columnNames().size(); column++) builder.appendCell(frame, row, column);
+            for (int formula = 0; formula < formulas.size(); formula++) {
                 double value = 0.0;
-                for (CompositeTerm term : terms) {
-                    double termValue = asDouble(row.get(term.columnReference()));
+                List<CompositeTerm> terms = formulas.get(formula);
+                for (int termIndex = 0; termIndex < terms.size(); termIndex++) {
+                    CompositeTerm term = terms.get(termIndex);
+                    double termValue = asDouble(frame.valueAt(row, termColumns[formula][termIndex]));
                     value += term.add() ? termValue : -termValue;
                 }
-                rebuilt.put(alias, value);
-            });
-            builder.row(rebuilt);
+                builder.appendDouble(value);
+            }
         }
         return builder.build();
     }
@@ -171,11 +248,15 @@ public final class FrameMergeService {
 
     private ResultFrame typedMerge(List<ResultFrame> frames, CanonicalQueryObject canonicalObject,
                                    List<String> dimensions, int step) {
+        return TypedFrameAggregator.aggregate(frames, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step);
+    }
+
+    private Map<String, AggregateFunction> resolvedFunctions(CanonicalQueryObject canonicalObject) {
         Map<String, AggregateFunction> functions = new LinkedHashMap<>(
                 AggregateFunctionResolver.fromAggregateSpecs(canonicalObject.metadata().aggregateSpecs()));
         canonicalObject.metadata().measureAggregates().forEach((column, function) ->
                 functions.put(column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT), function));
-        return TypedFrameAggregator.aggregate(frames, dimensions, functions, timeColumnName, step);
+        return functions;
     }
 
     // --- AVG reconstruction (RC4) ----------------------------------------------------------------
@@ -199,24 +280,15 @@ public final class FrameMergeService {
             return frame;
         }
 
-        List<String> sumCountColumnsToDrop = new ArrayList<>();
-
-        List<Map<String, Object>> rebuiltRows = new ArrayList<>();
-        for (Map<String, Object> row : frame.rows()) {
-            Map<String, Object> rebuilt = new LinkedHashMap<>(row);
-            averageAliasToColumn.forEach((alias, column) -> {
-                String sumColumn = "SUM(" + column + ")";
-                String countColumn = "COUNT(" + column + ")";
-                if (row.containsKey(sumColumn) && row.containsKey(countColumn)) {
-                    double sum = asDouble(row.get(sumColumn));
-                    long count = Math.round(asDouble(row.get(countColumn)));
-                    rebuilt.put(alias, averageReconstructionService
-                            .reconstructAverageFromStoredSumAndCount(sum, count));
-                    sumCountColumnsToDrop.add(sumColumn);
-                    sumCountColumnsToDrop.add(countColumn);
-                }
-            });
-            rebuiltRows.add(rebuilt);
+        java.util.Set<String> sumCountColumnsToDrop = new java.util.HashSet<>();
+        Map<String, int[]> ingredients = new LinkedHashMap<>();
+        for (var entry : averageAliasToColumn.entrySet()) {
+            String sum = "SUM(" + entry.getValue() + ")", count = "COUNT(" + entry.getValue() + ")";
+            if (frame.columnNames().contains(sum) && frame.columnNames().contains(count)) {
+                ingredients.put(entry.getKey(), new int[]{frame.columnIndex(sum), frame.columnIndex(count)});
+                sumCountColumnsToDrop.add(sum);
+                sumCountColumnsToDrop.add(count);
+            }
         }
 
         // Re-project, dropping the SUM/COUNT ingredients now folded into the AVG alias.
@@ -224,13 +296,24 @@ public final class FrameMergeService {
         finalColumns.addAll(averageAliasToColumn.keySet());
         finalColumns.removeIf(sumCountColumnsToDrop::contains);
 
-        ResultFrame.Builder finalBuilder = ResultFrame.builder();
+        ResultFrame.Builder finalBuilder = ResultFrame.builder().expectedRows(frame.rowCount());
         for (String column : finalColumns) {
             ColumnType type = averageAliasToColumn.containsKey(column) ? ColumnType.DOUBLE : frame.columnType(column);
             finalBuilder.column(column, type);
         }
-        for (Map<String, Object> row : rebuiltRows) {
-            finalBuilder.row(row);
+        int[] sourceColumns = finalColumns.stream().mapToInt(column ->
+                frame.columnNames().contains(column) ? frame.columnIndex(column) : -1).toArray();
+        for (int row = 0; row < frame.rowCount(); row++) {
+            for (int column = 0; column < finalColumns.size(); column++) {
+                int[] pair = ingredients.get(finalColumns.get(column));
+                if (pair != null) {
+                    double sum = asDouble(frame.valueAt(row, pair[0]));
+                    long count = Math.round(asDouble(frame.valueAt(row, pair[1])));
+                    finalBuilder.appendDouble(averageReconstructionService.reconstructAverageFromStoredSumAndCount(sum, count));
+                } else if (sourceColumns[column] >= 0) {
+                    finalBuilder.appendCell(frame, row, sourceColumns[column]);
+                } else finalBuilder.appendNull();
+            }
         }
         return finalBuilder.build();
     }
@@ -247,40 +330,98 @@ public final class FrameMergeService {
             // there is no deferred SQL clause only adds map allocations and a second frame copy.
             return frame;
         }
-        List<Map<String, Object>> rows = new ArrayList<>(frame.rows());
-
-        // Apply stable sorts from lowest priority to highest (mirrors merging.apply_post_processing).
-        for (int index = orderBy.size() - 1; index >= 0; index--) {
+        int limit = Math.min(frame.rowCount(), canonicalObject.postProcessing().limit().orElse(frame.rowCount()));
+        int[] sortColumns = new int[orderBy.size()];
+        for (int index = 0; index < orderBy.size(); index++) {
             OrderByClause clause = orderBy.get(index);
             if (clause.column().isEmpty()) {
                 throw new IllegalArgumentException("expression ordering requires direct execution");
             }
             String column = clause.column().get();
-            Comparator<Map<String, Object>> comparator = (left, right) -> {
-                Object a = left.get(column), b = right.get(column);
-                if (a == null || b == null) {
-                    if (a == b) return 0;
-                    return (a == null ? -1 : 1) * (clause.nullsFirst() ? 1 : -1);
+            sortColumns[index] = frame.columnNames().contains(column) ? frame.columnIndex(column) : -1;
+        }
+        IntBinaryOperator comparator = (left, right) -> {
+            for (int index = 0; index < orderBy.size(); index++) {
+                OrderByClause clause = orderBy.get(index);
+                int column = sortColumns[index];
+                boolean aNull = column < 0 || frame.isNullAt(left, column);
+                boolean bNull = column < 0 || frame.isNullAt(right, column);
+                int compared;
+                if (aNull || bNull) {
+                    compared = aNull == bNull ? 0 : (aNull ? -1 : 1) * (clause.nullsFirst() ? 1 : -1);
+                } else {
+                    compared = switch (frame.columnTypeAt(column)) {
+                        case LONG -> Long.compare(frame.longAt(left, column), frame.longAt(right, column));
+                        case DOUBLE -> Double.compare(frame.doubleAt(left, column), frame.doubleAt(right, column));
+                        case STRING -> frame.stringAt(left, column).compareTo(frame.stringAt(right, column));
+                        case DECIMAL -> ((java.math.BigDecimal) frame.valueAt(left, column))
+                                .compareTo((java.math.BigDecimal) frame.valueAt(right, column));
+                    };
+                    if (!clause.ascending()) compared = -compared;
                 }
-                int compared = TypedFrameAggregator.compare(a, b);
-                return clause.ascending() ? compared : -compared;
-            };
-            rows.sort(comparator);
+                if (compared != 0) return compared;
+            }
+            return Integer.compare(left, right); // Stable SQL ties retain merge group order.
+        };
+        int[] rows = new int[limit];
+        if (limit > 0 && !orderBy.isEmpty() && limit < frame.rowCount()) {
+            // ORDER BY LIMIT needs only the best K rows, rather than sorting the entire result.
+            int size = 0;
+            for (int row = 0; row < frame.rowCount(); row++) {
+                if (size < limit) {
+                    int slot = size++;
+                    while (slot > 0) {
+                        int parent = (slot - 1) >>> 1;
+                        if (comparator.applyAsInt(row, rows[parent]) <= 0) break;
+                        rows[slot] = rows[parent];
+                        slot = parent;
+                    }
+                    rows[slot] = row;
+                } else if (comparator.applyAsInt(row, rows[0]) < 0) {
+                    int slot = 0;
+                    while (slot < size / 2) {
+                        int child = slot * 2 + 1;
+                        if (child + 1 < size && comparator.applyAsInt(rows[child + 1], rows[child]) > 0) child++;
+                        if (comparator.applyAsInt(row, rows[child]) >= 0) break;
+                        rows[slot] = rows[child];
+                        slot = child;
+                    }
+                    rows[slot] = row;
+                }
+            }
+            sortRows(rows, comparator);
+        } else if (limit > 0) {
+            for (int row = 0; row < limit; row++) rows[row] = row;
+            if (!orderBy.isEmpty()) sortRows(rows, comparator);
         }
 
-        canonicalObject.postProcessing().limit().ifPresent(limit -> {
-            // O(1) truncation instead of removing tail rows one-by-one (O(n*k)); mirrors df.head(limit).
-            if (rows.size() > limit) {
-                rows.subList(limit, rows.size()).clear();
-            }
-        });
-
-        ResultFrame.Builder builder = ResultFrame.builder();
+        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(limit);
         for (String column : frame.columnNames()) {
             builder.column(column, frame.columnType(column));
         }
-        rows.forEach(builder::row);
+        for (int row : rows) {
+            for (int column = 0; column < frame.columnNames().size(); column++) builder.appendCell(frame, row, column);
+        }
         return builder.build();
+    }
+
+    /** Stable primitive-index merge sort; avoids one boxed index or row adapter per output row. */
+    private static void sortRows(int[] rows, IntBinaryOperator comparator) {
+        if (rows.length < 2) return;
+        int[] source = rows, target = new int[rows.length];
+        for (long width = 1; width < rows.length; width *= 2) {
+            for (long start = 0; start < rows.length; start += width * 2) {
+                int left = (int) start, middle = (int) Math.min(start + width, rows.length);
+                int right = middle, end = (int) Math.min(start + width * 2, rows.length), out = left;
+                while (left < middle && right < end) {
+                    target[out++] = comparator.applyAsInt(source[left], source[right]) <= 0 ? source[left++] : source[right++];
+                }
+                while (left < middle) target[out++] = source[left++];
+                while (right < end) target[out++] = source[right++];
+            }
+            int[] swap = source; source = target; target = swap;
+        }
+        if (source != rows) System.arraycopy(source, 0, rows, 0, rows.length);
     }
 
     // --- helpers ---------------------------------------------------------------------------------

@@ -12,7 +12,7 @@ import java.util.Set;
  * A compact, immutable, typed result table used by the cache.
  *
  * <p>Data is stored column-by-column in primitive {@code long[]} and {@code double[]} arrays (and
- * {@code String[]} for dimensions), with a separate null bitmap per column. This is deliberately
+ * {@code String[]} for dimensions), with a packed null bitmap only for columns containing nulls. This is deliberately
  * unlike a {@code List<Map<String, Object>>}: a large cache merge can scan its input without
  * allocating a map per row, boxing a numeric cell, or hashing a column name for every access.
  * {@link #rows()} remains as a lazy compatibility view for API callers and tests; it is not the
@@ -23,8 +23,9 @@ public final class ResultFrame {
     private final List<String> columnNames;
     private final Map<String, ColumnType> columnTypes;
     private final Map<String, Integer> columnIndexes;
+    private final ColumnType[] indexedTypes;
     private final Object[] columns;
-    private final boolean[][] present;
+    private final long[][] present;
     private final int rowCount;
     private final List<Map<String, Object>> rowsView;
 
@@ -38,6 +39,7 @@ public final class ResultFrame {
         this.columnNames = frame.columnNames;
         this.columnTypes = frame.columnTypes;
         this.columnIndexes = frame.columnIndexes;
+        this.indexedTypes = frame.indexedTypes;
         this.columns = frame.columns;
         this.present = frame.present;
         this.rowCount = frame.rowCount;
@@ -45,7 +47,7 @@ public final class ResultFrame {
     }
 
     private ResultFrame(List<String> names, Map<String, ColumnType> types, Object[] columns,
-                        boolean[][] present, int rowCount) {
+                        long[][] present, int rowCount) {
         this.columnNames = List.copyOf(names);
         this.columnTypes = Map.copyOf(new LinkedHashMap<>(types));
         Map<String, Integer> indexes = new LinkedHashMap<>();
@@ -53,6 +55,10 @@ public final class ResultFrame {
             indexes.put(this.columnNames.get(index), index);
         }
         this.columnIndexes = Map.copyOf(indexes);
+        this.indexedTypes = new ColumnType[this.columnNames.size()];
+        for (int index = 0; index < indexedTypes.length; index++) {
+            indexedTypes[index] = types.get(this.columnNames.get(index));
+        }
         this.columns = columns;
         this.present = present;
         this.rowCount = rowCount;
@@ -92,13 +98,55 @@ public final class ResultFrame {
         return rowCount;
     }
 
+    /** Declared type at a resolved physical column index. */
+    public ColumnType columnTypeAt(int column) {
+        return indexedTypes[column];
+    }
+
+    /** Resolves a read-only column once for an internal typed scan. No backing array is exposed. */
+    public ColumnReader columnReader(int column) {
+        if (column < 0 || column >= columns.length) throw new IndexOutOfBoundsException(column);
+        return new ColumnReader(indexedTypes[column], columns[column], present[column], rowCount);
+    }
+
+    public static final class ColumnReader {
+        private final ColumnType type;
+        private final long[] longs;
+        private final double[] doubles;
+        private final String[] strings;
+        private final java.math.BigDecimal[] decimals;
+        private final long[] validity;
+        private final int length;
+
+        private ColumnReader(ColumnType type, Object values, long[] validity, int length) {
+            this.type = type;
+            longs = type == ColumnType.LONG ? (long[]) values : null;
+            doubles = type == ColumnType.DOUBLE ? (double[]) values : null;
+            strings = type == ColumnType.STRING ? (String[]) values : null;
+            decimals = type == ColumnType.DECIMAL ? (java.math.BigDecimal[]) values : null;
+            this.validity = validity;
+            this.length = length;
+        }
+
+        public ColumnType type() { return type; }
+        public boolean isNullAt(int row) {
+            if (row < 0 || row >= length) throw new IndexOutOfBoundsException(row);
+            return validity != null && (validity[row >>> 6] & (1L << (row & 63))) == 0;
+        }
+        // The scan checks kind and nullness before reading. Array access still checks row bounds.
+        public long longValue(int row) { return longs[row]; }
+        public double doubleValue(int row) { return doubles[row]; }
+        public String stringValue(int row) { return strings[row]; }
+        public java.math.BigDecimal decimalValue(int row) { return decimals[row]; }
+    }
+
     public boolean isEmpty() {
         return rowCount == 0;
     }
 
     public boolean isNullAt(int row, int column) {
         checkCell(row, column);
-        return !present[column][row];
+        return !isPresent(row, column);
     }
 
     public long longAt(int row, int column) {
@@ -122,10 +170,10 @@ public final class ResultFrame {
     /** String form without boxing; used when a numeric value is a grouping dimension. */
     public String stringValueAt(int row, int column) {
         checkCell(row, column);
-        if (!present[column][row]) {
+        if (!isPresent(row, column)) {
             return null;
         }
-        return switch (columnTypes.get(columnNames.get(column))) {
+        return switch (indexedTypes[column]) {
             case STRING -> ((String[]) columns[column])[row];
             case DECIMAL -> ((java.math.BigDecimal[]) columns[column])[row].toPlainString();
             case LONG -> Long.toString(((long[]) columns[column])[row]);
@@ -137,7 +185,7 @@ public final class ResultFrame {
     public double measureAt(int row, int column) {
         checkType(column, ColumnType.DOUBLE);
         checkCell(row, column);
-        return present[column][row] ? ((double[]) columns[column])[row] : Double.NaN;
+        return isPresent(row, column) ? ((double[]) columns[column])[row] : Double.NaN;
     }
 
     /**
@@ -150,15 +198,24 @@ public final class ResultFrame {
 
     public Object valueAt(int row, int column) {
         checkCell(row, column);
-        if (!present[column][row]) {
+        if (!isPresent(row, column)) {
             return null;
         }
-        return switch (columnTypes.get(columnNames.get(column))) {
+        return switch (indexedTypes[column]) {
             case LONG -> ((long[]) columns[column])[row];
             case DOUBLE -> ((double[]) columns[column])[row];
             case STRING -> ((String[]) columns[column])[row];
             case DECIMAL -> ((java.math.BigDecimal[]) columns[column])[row];
         };
+    }
+
+    private boolean isPresent(int row, int column) {
+        long[] bitmap = present[column];
+        return bitmap == null || (bitmap[row >>> 6] & (1L << (row & 63))) != 0;
+    }
+
+    private static int bitmapWords(int rows) {
+        return (int) (((long) rows + 63L) >>> 6);
     }
 
     private void checkCell(int row, int column) {
@@ -168,7 +225,7 @@ public final class ResultFrame {
     }
 
     private void checkType(int column, ColumnType expected) {
-        ColumnType actual = columnTypes.get(columnNames.get(column));
+        ColumnType actual = indexedTypes[column];
         if (actual != expected) {
             throw new IllegalArgumentException("column '" + columnNames.get(column) + "' is " + actual
                     + ", not " + expected);
@@ -177,7 +234,7 @@ public final class ResultFrame {
 
     private void checkPresent(int row, int column) {
         checkCell(row, column);
-        if (!present[column][row]) {
+        if (!isPresent(row, column)) {
             throw new IllegalStateException("column '" + columnNames.get(column) + "' is null at row " + row);
         }
     }
@@ -242,10 +299,21 @@ public final class ResultFrame {
         private final List<String> names = new ArrayList<>();
         private final Map<String, ColumnType> types = new LinkedHashMap<>();
         private Object[] columns;
-        private boolean[][] present;
+        private long[][] present;
         private int capacity;
         private int rowCount;
         private int nextColumn;
+        private int expectedRows = 16;
+        private ColumnType[] indexedTypes;
+        private boolean sharedSnapshot;
+
+        /** Allocation hint; does not change the number of rows or limit subsequent growth. */
+        public Builder expectedRows(int rows) {
+            if (rows < 0) throw new IllegalArgumentException("expected rows must not be negative");
+            if (columns != null) throw new IllegalStateException("set expected rows before appending cells");
+            expectedRows = Math.max(16, rows);
+            return this;
+        }
 
         public Builder column(String name, ColumnType type) {
             if (columns != null) {
@@ -281,7 +349,6 @@ public final class ResultFrame {
             requireType(ColumnType.LONG);
             ensureCapacityForCell();
             ((long[]) columns[nextColumn])[rowCount] = value;
-            present[nextColumn][rowCount] = true;
             advance();
             return this;
         }
@@ -290,7 +357,6 @@ public final class ResultFrame {
             requireType(ColumnType.DOUBLE);
             ensureCapacityForCell();
             ((double[]) columns[nextColumn])[rowCount] = value;
-            present[nextColumn][rowCount] = true;
             advance();
             return this;
         }
@@ -299,7 +365,7 @@ public final class ResultFrame {
             requireType(ColumnType.STRING);
             ensureCapacityForCell();
             ((String[]) columns[nextColumn])[rowCount] = value;
-            present[nextColumn][rowCount] = value != null;
+            if (value == null) markNull();
             advance();
             return this;
         }
@@ -308,15 +374,27 @@ public final class ResultFrame {
             requireType(ColumnType.DECIMAL);
             ensureCapacityForCell();
             ((java.math.BigDecimal[]) columns[nextColumn])[rowCount] = value;
-            present[nextColumn][rowCount] = value != null;
+            if (value == null) markNull();
             advance();
             return this;
         }
 
         public Builder appendNull() {
             ensureCapacityForCell();
+            markNull();
             advance();
             return this;
+        }
+
+        /** Copies a typed cell without creating a row map or boxing primitive numeric values. */
+        public Builder appendCell(ResultFrame source, int row, int column) {
+            if (source.isNullAt(row, column)) return appendNull();
+            return switch (source.columnTypeAt(column)) {
+                case LONG -> appendLong(source.longAt(row, column));
+                case DOUBLE -> appendDouble(source.doubleAt(row, column));
+                case STRING -> appendString(source.stringAt(row, column));
+                case DECIMAL -> appendDecimal((java.math.BigDecimal) source.valueAt(row, column));
+            };
         }
 
         public ResultFrame build() {
@@ -324,11 +402,18 @@ public final class ResultFrame {
                 throw new IllegalStateException("a partial row is pending");
             }
             initialize();
+            if (capacity == rowCount) {
+                // A precisely sized frame can retain these arrays. Further builder writes detach
+                // them first, preserving the immutable snapshot without a full-frame build copy.
+                sharedSnapshot = true;
+                return new ResultFrame(names, types, columns.clone(), present.clone(), rowCount);
+            }
             Object[] trimmedColumns = new Object[names.size()];
-            boolean[][] trimmedPresent = new boolean[names.size()][];
+            long[][] trimmedPresent = new long[names.size()][];
             for (int column = 0; column < names.size(); column++) {
                 trimmedColumns[column] = copyColumn(columns[column], types.get(names.get(column)), rowCount);
-                trimmedPresent[column] = java.util.Arrays.copyOf(present[column], rowCount);
+                trimmedPresent[column] = present[column] == null ? null
+                        : java.util.Arrays.copyOf(present[column], bitmapWords(rowCount));
             }
             return new ResultFrame(names, types, trimmedColumns, trimmedPresent, rowCount);
         }
@@ -338,7 +423,8 @@ public final class ResultFrame {
                 appendNull();
                 return;
             }
-            switch (types.get(names.get(nextColumn))) {
+            initialize();
+            switch (indexedTypes[nextColumn]) {
                 case LONG -> appendLong(((Number) value).longValue());
                 case DOUBLE -> appendDouble(((Number) value).doubleValue());
                 case STRING -> appendString(value.toString());
@@ -347,36 +433,44 @@ public final class ResultFrame {
         }
 
         private void requireType(ColumnType expected) {
-            if (nextColumn >= names.size() || types.get(names.get(nextColumn)) != expected) {
-                String actual = nextColumn >= names.size() ? "no column" : types.get(names.get(nextColumn)).toString();
+            initialize();
+            if (nextColumn >= names.size() || indexedTypes[nextColumn] != expected) {
+                String actual = nextColumn >= names.size() ? "no column" : indexedTypes[nextColumn].toString();
                 throw new IllegalStateException("expected next column to be " + expected + " but was " + actual);
             }
         }
 
         private void ensureCapacityForCell() {
             initialize();
-            if (rowCount < capacity) {
+            if (rowCount < capacity && !sharedSnapshot) {
                 return;
             }
-            int grown = Math.max(16, capacity * 2);
+            int grown = rowCount < capacity ? capacity : Math.max(16, Math.multiplyExact(capacity, 2));
             for (int column = 0; column < names.size(); column++) {
-                ColumnType type = types.get(names.get(column));
+                ColumnType type = indexedTypes[column];
                 columns[column] = growColumn(columns[column], type, grown);
-                present[column] = java.util.Arrays.copyOf(present[column], grown);
+                if (present[column] != null) {
+                    int oldWords = present[column].length;
+                    present[column] = java.util.Arrays.copyOf(present[column], bitmapWords(grown));
+                    java.util.Arrays.fill(present[column], oldWords, present[column].length, -1L);
+                }
             }
             capacity = grown;
+            sharedSnapshot = false;
         }
 
         private void initialize() {
             if (columns != null) {
                 return;
             }
-            capacity = 16;
+            capacity = expectedRows;
             columns = new Object[names.size()];
-            present = new boolean[names.size()][];
+            present = new long[names.size()][];
+            indexedTypes = new ColumnType[names.size()];
             for (int column = 0; column < names.size(); column++) {
-                columns[column] = newColumn(types.get(names.get(column)), capacity);
-                present[column] = new boolean[capacity];
+                indexedTypes[column] = types.get(names.get(column));
+                columns[column] = newColumn(indexedTypes[column], capacity);
+
             }
         }
 
@@ -386,6 +480,18 @@ public final class ResultFrame {
                 nextColumn = 0;
                 rowCount++;
             }
+        }
+
+        private void markNull() {
+            long[] bitmap = present[nextColumn];
+            if (bitmap == null) {
+                bitmap = new long[bitmapWords(capacity)];
+                java.util.Arrays.fill(bitmap, -1L);
+                present[nextColumn] = bitmap;
+            }
+            // Append-only rows are valid by default, including future rows after a growth.
+            // Only nulls need a bit write; non-null cells never re-mark already-set validity bits.
+            bitmap[rowCount >>> 6] &= ~(1L << (rowCount & 63));
         }
 
         private static Object newColumn(ColumnType type, int length) {

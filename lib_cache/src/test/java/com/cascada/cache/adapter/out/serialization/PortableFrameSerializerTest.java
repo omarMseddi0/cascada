@@ -39,6 +39,19 @@ class PortableFrameSerializerTest {
     }
 
     @Test
+    void blobsRemainReadableAcrossConfiguredCompressionLevels() {
+        ResultFrame original = sampleFrame();
+        PortableFrameSerializer[] writers = {
+                new PortableFrameSerializer(1), new PortableFrameSerializer(3), new PortableFrameSerializer(9)
+        };
+        PortableFrameSerializer reader = new PortableFrameSerializer(9);
+
+        for (PortableFrameSerializer writer : writers) {
+            assertThat(reader.deserialize(writer.serialize(original)).rows()).isEqualTo(original.rows());
+        }
+    }
+
+    @Test
     void compressionActuallyShrinksARepetitiveFrame() {
         ResultFrame.Builder builder = ResultFrame.builder()
                 .column("appName", ColumnType.STRING)

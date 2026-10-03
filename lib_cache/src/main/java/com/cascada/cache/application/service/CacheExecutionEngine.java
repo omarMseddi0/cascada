@@ -172,8 +172,20 @@ public final class CacheExecutionEngine {
 
         GapPlan gapPlan = new GapPlan(buckets.head(), missingDays, buckets.tail());
 
-        CompletableFuture<List<Optional<ResultFrame>>> cacheFuture =
-                CompletableFuture.supplyAsync(() -> cacheBackend.multiGet(cachedKeys), executor);
+        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
+        List<Long> vanishedDays = new ArrayList<>();
+        CompletableFuture<Void> cacheFuture = CompletableFuture.runAsync(() -> {
+                int[] delivered = {0};
+                cacheBackend.visitKeys(cachedKeys, (index, frame) -> {
+                    if (index == null || index != delivered[0] || index >= cachedKeys.size() || frame == null) {
+                        throw new IllegalStateException("cache returned an invalid frame index or null frame entry");
+                    }
+                    delivered[0]++;
+                    if (frame.isPresent()) merge.add(frame.get());
+                    else vanishedDays.add(cachedDays.get(index));
+                });
+                if (delivered[0] != cachedKeys.size()) throw new IllegalStateException("cache returned an invalid number of frames");
+            }, executor);
 
         CompletableFuture<ResultFrame> sparkFuture = gapPlan.hasGaps()
                 ? CompletableFuture.supplyAsync(
@@ -181,15 +193,8 @@ public final class CacheExecutionEngine {
                                 canonicalObject.physicalSql(), gapPlan)), executor)
                 : CompletableFuture.completedFuture(ResultFrame.empty());
 
-        List<Optional<ResultFrame>> cachedFrames;
         try {
-            cachedFrames = cacheFuture.join();
-            if (cachedFrames == null || cachedFrames.size() != cachedKeys.size()) {
-                throw new IllegalStateException("cache returned an invalid number of frames");
-            }
-            if (cachedFrames.stream().anyMatch(Objects::isNull)) {
-                throw new IllegalStateException("cache returned a null frame entry");
-            }
+            cacheFuture.join();
         } catch (RuntimeException cacheFailure) {
             // Prevent a queued gap task from starting after the authoritative fallback begins.
             // A running query is left untouched because the executor port has no cancellation contract.
@@ -202,16 +207,6 @@ public final class CacheExecutionEngine {
         // would merge an answer missing that day's data. Buckets are independent mergeable
         // ingredients, so the recovery is surgical: re-fetch ONLY the vanished days with one
         // supplemental gap query, never recompute the whole window.
-        List<ResultFrame> allFrames = new ArrayList<>();
-        List<Long> vanishedDays = new ArrayList<>();
-        for (int index = 0; index < cachedFrames.size(); index++) {
-            Optional<ResultFrame> maybeFrame = cachedFrames.get(index);
-            if (maybeFrame.isPresent()) {
-                allFrames.add(maybeFrame.get());
-            } else {
-                vanishedDays.add(cachedDays.get(index));
-            }
-        }
 
         // Submit the vanished-day recovery BEFORE joining the main gap query: it depends only on
         // the cache fetch, so running it after sparkFuture.join() would serialize two Spark
@@ -225,17 +220,17 @@ public final class CacheExecutionEngine {
 
         ResultFrame sparkFrame = sparkFuture.join();
         if (gapPlan.hasGaps()) {
-            allFrames.add(sparkFrame);
+            merge.add(sparkFrame);
         }
 
         ResultFrame vanishedFrame = vanishedFuture.join();
         if (!vanishedDays.isEmpty()) {
-            allFrames.add(vanishedFrame);
+            merge.add(vanishedFrame);
         }
 
         try {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    frameMergeService.mergeAndReconstruct(allFrames, canonicalObject));
+                    merge.finish());
         } catch (RuntimeException cacheOrMergeFailure) {
             // A decoded but corrupt/incompatible cache frame must not make the query unavailable.
             // The full physical query is authoritative and avoids trusting any cache-derived data.
@@ -263,7 +258,7 @@ public final class CacheExecutionEngine {
      */
     private ResultFrame computeAndStoreColdBuckets(CanonicalQueryObject canonicalObject, QueryHash queryHash,
                                                     DailyBuckets buckets, List<String> keys) {
-        List<ResultFrame> frames = new ArrayList<>();
+        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
         for (int index = 0; index < buckets.body().size(); index++) {
             long bucketStart = buckets.body().get(index);
             ResultFrame frame = sparkExecutor.execute(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
@@ -276,16 +271,16 @@ public final class CacheExecutionEngine {
             } catch (RuntimeException ignored) {
                 // Cache storage is best-effort. Keep the freshly computed authoritative frame below.
             }
-            frames.add(frame);
+            merge.add(frame);
         }
         GapPlan boundaries = new GapPlan(buckets.head(), List.of(), buckets.tail());
         if (boundaries.hasGaps()) {
             ResultFrame boundaryFrame = sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
                     canonicalObject.physicalSql(), boundaries));
-            frames.add(boundaryFrame);
+            merge.add(boundaryFrame);
         }
         try {
-            return frameMergeService.mergeAndReconstruct(frames, canonicalObject);
+            return merge.finish();
         } catch (RuntimeException mergeFailure) {
             // Only the cache-derived merge is retried. Spark failures above propagate directly, while
             // an incompatible/corrupt cache ingredient falls back to one authoritative full query.

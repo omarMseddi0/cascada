@@ -14,6 +14,18 @@ import java.util.Iterator;
 /** Converts Spark's external rows into the cache's framework-free frame contract. */
 final class SparkResultFrameMapper {
 
+    private static final int INITIAL_ROW_CAPACITY = 1_024;
+    private static final byte READ_BYTE = 0;
+    private static final byte READ_SHORT = 1;
+    private static final byte READ_INT = 2;
+    private static final byte READ_LONG = 3;
+    private static final byte READ_FLOAT = 4;
+    private static final byte READ_DOUBLE = 5;
+    private static final byte READ_DECIMAL = 6;
+    private static final byte READ_STRING = 7;
+    private static final byte READ_BOOLEAN = 8;
+    private static final byte READ_EXTERNAL_STRING = 9;
+
     private final int maxResultRows;
 
     SparkResultFrameMapper(int maxResultRows) {
@@ -26,9 +38,13 @@ final class SparkResultFrameMapper {
     ResultFrame map(StructType schema, Iterator<Row> rows) {
         StructField[] fields = schema.fields();
         ColumnType[] columnTypes = new ColumnType[fields.length];
-        ResultFrame.Builder builder = ResultFrame.builder();
+        byte[] getters = new byte[fields.length];
+        ResultFrame.Builder builder = ResultFrame.builder()
+                .expectedRows(Math.min(maxResultRows, INITIAL_ROW_CAPACITY));
         for (int index = 0; index < fields.length; index++) {
-            columnTypes[index] = mapSparkType(fields[index].dataType());
+            ColumnPlan column = columnPlan(fields[index].dataType());
+            columnTypes[index] = column.type();
+            getters[index] = column.getter();
             builder.column(fields[index].name(), columnTypes[index]);
         }
 
@@ -39,44 +55,66 @@ final class SparkResultFrameMapper {
                         + "-row driver ceiling; add a LIMIT or aggregate further");
             }
             Row row = rows.next();
-            for (int index = 0; index < fields.length; index++) {
-                appendCell(builder, row, index, columnTypes[index]);
+            for (int index = 0; index < getters.length; index++) {
+                if (row.isNullAt(index)) {
+                    builder.appendNull();
+                } else {
+                    switch (getters[index]) {
+                        case READ_BYTE -> builder.appendLong(row.getByte(index));
+                        case READ_SHORT -> builder.appendLong(row.getShort(index));
+                        case READ_INT -> builder.appendLong(row.getInt(index));
+                        case READ_LONG -> builder.appendLong(row.getLong(index));
+                        case READ_FLOAT -> builder.appendDouble(row.getFloat(index));
+                        case READ_DOUBLE -> builder.appendDouble(row.getDouble(index));
+                        case READ_DECIMAL -> builder.appendDecimal(row.getDecimal(index));
+                        case READ_STRING -> builder.appendString(row.getString(index));
+                        case READ_BOOLEAN -> builder.appendString(Boolean.toString(row.getBoolean(index)));
+                        case READ_EXTERNAL_STRING -> builder.appendString(String.valueOf(row.get(index)));
+                        default -> throw new AssertionError("unknown Spark result getter " + getters[index]);
+                    }
+                }
             }
             rowCount++;
         }
         return builder.build();
     }
 
-    private void appendCell(ResultFrame.Builder builder, Row row, int index, ColumnType type) {
-        if (row.isNullAt(index)) {
-            builder.appendNull();
-            return;
+    private ColumnPlan columnPlan(DataType dataType) {
+        if (dataType.equals(DataTypes.ByteType)) {
+            return new ColumnPlan(ColumnType.LONG, READ_BYTE);
         }
-        switch (type) {
-            case DECIMAL -> builder.appendDecimal(row.getDecimal(index));
-            case LONG -> builder.appendLong(((Number) row.get(index)).longValue());
-            case DOUBLE -> builder.appendDouble(((Number) row.get(index)).doubleValue());
-            case STRING -> builder.appendString(String.valueOf(row.get(index)));
+        if (dataType.equals(DataTypes.ShortType)) {
+            return new ColumnPlan(ColumnType.LONG, READ_SHORT);
         }
-    }
-
-    private ColumnType mapSparkType(DataType dataType) {
-        if (dataType.equals(DataTypes.ByteType) || dataType.equals(DataTypes.ShortType)
-                || dataType.equals(DataTypes.IntegerType) || dataType.equals(DataTypes.LongType)) {
-            return ColumnType.LONG;
+        if (dataType.equals(DataTypes.IntegerType)) {
+            return new ColumnPlan(ColumnType.LONG, READ_INT);
         }
-        if (dataType.equals(DataTypes.FloatType) || dataType.equals(DataTypes.DoubleType)) {
-            return ColumnType.DOUBLE;
+        if (dataType.equals(DataTypes.LongType)) {
+            return new ColumnPlan(ColumnType.LONG, READ_LONG);
+        }
+        if (dataType.equals(DataTypes.FloatType)) {
+            return new ColumnPlan(ColumnType.DOUBLE, READ_FLOAT);
+        }
+        if (dataType.equals(DataTypes.DoubleType)) {
+            return new ColumnPlan(ColumnType.DOUBLE, READ_DOUBLE);
         }
         if (dataType instanceof DecimalType) {
-            return ColumnType.DECIMAL;
+            return new ColumnPlan(ColumnType.DECIMAL, READ_DECIMAL);
         }
-        if (dataType.equals(DataTypes.StringType) || dataType.equals(DataTypes.BooleanType)
-                || dataType.equals(DataTypes.DateType) || dataType.equals(DataTypes.TimestampType)
+        if (dataType.equals(DataTypes.StringType)) {
+            return new ColumnPlan(ColumnType.STRING, READ_STRING);
+        }
+        if (dataType.equals(DataTypes.BooleanType)) {
+            return new ColumnPlan(ColumnType.STRING, READ_BOOLEAN);
+        }
+        if (dataType.equals(DataTypes.DateType) || dataType.equals(DataTypes.TimestampType)
                 || dataType.equals(DataTypes.TimestampNTZType) || dataType.equals(DataTypes.NullType)) {
-            return ColumnType.STRING;
+            // Preserve Spark's external date/time representation (java.sql or java.time) exactly.
+            return new ColumnPlan(ColumnType.STRING, READ_EXTERNAL_STRING);
         }
         throw new UnsupportedOperationException("Spark result type '" + dataType.catalogString()
                 + "' cannot be represented by a cache result frame");
     }
+
+    private record ColumnPlan(ColumnType type, byte getter) { }
 }

@@ -36,6 +36,33 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class CacheExecutionEngineTest {
 
+    @Test
+    void orderedStreamingVisitsAvoidBulkRetentionAndMalformedVisitsFallBack() {
+        CanonicalQueryObject canonical = globalAggregateOverThreeDays();
+        QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
+        for (boolean malformed : List.of(false, true)) {
+            com.cascada.cache.application.port.out.BucketCachePort backend = new com.cascada.cache.application.port.out.BucketCachePort() {
+                @Override public List<Boolean> existsForKeys(List<String> keys) { return keys.stream().map(key -> true).toList(); }
+                @Override public List<Optional<ResultFrame>> multiGet(List<String> keys) {
+                    throw new AssertionError("query should consume streamed frames rather than a bulk decoded list");
+                }
+                @Override public void visitKeys(List<String> keys,
+                        java.util.function.BiConsumer<Integer, Optional<ResultFrame>> visitor) {
+                    for (int index = 0; index < (malformed ? 1 : keys.size()); index++) {
+                        visitor.accept(index, Optional.of(appFrame("netflix", 10.0)));
+                    }
+                }
+                @Override public void store(String key, ResultFrame frame) { }
+            };
+            AtomicInteger calls = new AtomicInteger();
+            QueryExecutorPort spark = sql -> { calls.incrementAndGet(); assertThat(sql).isEqualTo("FULL_SQL"); return appFrame("netflix", 123.0); };
+            ResultFrame answer = new CacheExecutionEngine(backend, spark, (sql, plan) -> "GAP_SQL",
+                    CacheExecutionConfiguration.defaults()).execute(canonical, hash);
+            assertThat(answer.rows().get(0).get("bytes")).isEqualTo(malformed ? 123.0 : 30.0);
+            assertThat(calls.get()).isEqualTo(malformed ? 1 : 0);
+        }
+    }
+
     private static final long DAY = 86_400L;
 
     private final PortableFrameSerializer serializer = new PortableFrameSerializer();

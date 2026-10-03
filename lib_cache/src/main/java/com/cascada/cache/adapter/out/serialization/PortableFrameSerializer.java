@@ -17,24 +17,37 @@ import java.util.List;
 
 /**
  * A dependency-light cache serializer that preserves the exact two-stage contract of
- * {@code cache_serialization.py} — encode the frame to bytes, then zstd-compress at level 9 — without
+ * {@code cache_serialization.py} — encode the frame to bytes, then zstd-compress at a configurable level — without
  * Apache Arrow's JDK-module requirements. It can be injected into environments that cannot open
  * {@code java.base/java.nio}. The app explicitly uses the Arrow IPC serializer
  * ({@link ArrowResultFrameSerializer}) is the language-neutral production alternative behind the same
  * {@link CacheValueSerializerPort}.
  *
- * <p>Blob layout: {@code [4-byte big-endian uncompressed length][zstd level-9 frame]}. A corrupt blob
+ * <p>Blob layout: {@code [4-byte big-endian uncompressed length][zstd frame]}. A corrupt blob
  * raises {@link CacheSerializationException}, mirroring the Python {@code RuntimeError} semantics.
  */
 public final class PortableFrameSerializer implements CacheValueSerializerPort {
 
-    private static final int COMPRESSION_LEVEL = 9;
+    public static final int DEFAULT_COMPRESSION_LEVEL = 3;
     private static final int UTF8_FORMAT = -1;
+
+    private final int compressionLevel;
+
+    public PortableFrameSerializer() {
+        this(DEFAULT_COMPRESSION_LEVEL);
+    }
+
+    public PortableFrameSerializer(int compressionLevel) {
+        if (compressionLevel < Zstd.minCompressionLevel() || compressionLevel > Zstd.maxCompressionLevel()) {
+            throw new IllegalArgumentException("compressionLevel is outside the supported Zstandard range");
+        }
+        this.compressionLevel = compressionLevel;
+    }
 
     @Override
     public byte[] serialize(ResultFrame frame) {
         byte[] encoded = encode(frame);
-        byte[] compressed = Zstd.compress(encoded, COMPRESSION_LEVEL);
+        byte[] compressed = Zstd.compress(encoded, compressionLevel);
         ByteBuffer blob = ByteBuffer.allocate(Integer.BYTES + compressed.length);
         blob.putInt(encoded.length);
         blob.put(compressed);
@@ -46,12 +59,19 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         try {
             ByteBuffer buffer = ByteBuffer.wrap(blob);
             int uncompressedLength = buffer.getInt();
-            byte[] compressed = new byte[buffer.remaining()];
-            buffer.get(compressed);
-            if (uncompressedLength < 0 || Zstd.decompressedSize(compressed) != uncompressedLength) {
+            int compressedOffset = buffer.position();
+            int compressedLength = buffer.remaining();
+            if (uncompressedLength < 0
+                    || Zstd.decompressedSize(blob, compressedOffset, compressedLength) != uncompressedLength) {
                 throw new IllegalArgumentException("invalid uncompressed frame length");
             }
-            byte[] encoded = Zstd.decompress(compressed, uncompressedLength);
+            byte[] encoded = new byte[uncompressedLength];
+            long decompressedBytes = Zstd.decompressByteArray(encoded, 0, uncompressedLength,
+                    blob, compressedOffset, compressedLength);
+            if (Zstd.isError(decompressedBytes) || decompressedBytes != uncompressedLength) {
+                throw new IllegalArgumentException("invalid compressed frame data: "
+                        + Zstd.getErrorName(decompressedBytes));
+            }
             return decode(encoded);
         } catch (RuntimeException corrupt) {
             throw new CacheSerializationException("cache blob could not be decoded; data may be corrupt", corrupt);
@@ -62,16 +82,18 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (DataOutputStream out = new DataOutputStream(bytes)) {
             List<String> columns = frame.columnNames();
+            ColumnType[] columnTypes = new ColumnType[columns.size()];
             out.writeInt(UTF8_FORMAT);
             out.writeInt(columns.size());
-            for (String column : columns) {
-                writeString(out, column);
-                out.writeByte(frame.columnType(column).ordinal());
+            for (int column = 0; column < columns.size(); column++) {
+                writeString(out, columns.get(column));
+                columnTypes[column] = frame.columnTypeAt(column);
+                out.writeByte(columnTypes[column].ordinal());
             }
             out.writeInt(frame.rowCount());
             for (int row = 0; row < frame.rowCount(); row++) {
                 for (int column = 0; column < columns.size(); column++) {
-                    writeValue(out, frame, row, column);
+                    writeValue(out, frame, row, column, columnTypes[column]);
                 }
             }
         } catch (IOException impossible) {
@@ -80,13 +102,14 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         return bytes.toByteArray();
     }
 
-    private void writeValue(DataOutputStream out, ResultFrame frame, int row, int column) throws IOException {
+    private void writeValue(DataOutputStream out, ResultFrame frame, int row, int column, ColumnType type)
+            throws IOException {
         boolean valuePresent = !frame.isNullAt(row, column);
         out.writeBoolean(valuePresent);
         if (!valuePresent) {
             return;
         }
-        switch (frame.columnType(frame.columnNames().get(column))) {
+        switch (type) {
             case LONG -> out.writeLong(frame.longAt(row, column));
             case DOUBLE -> out.writeDouble(frame.doubleAt(row, column));
             case STRING -> writeString(out, frame.stringAt(row, column));
@@ -119,6 +142,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
                     || columnCount == 0 && rowCount != 0) {
                 throw new IOException("invalid row count");
             }
+            builder.expectedRows(rowCount);
             for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
                 for (int column = 0; column < columnNames.size(); column++) {
                     appendValue(in, builder, columnTypes.get(column), utf8);

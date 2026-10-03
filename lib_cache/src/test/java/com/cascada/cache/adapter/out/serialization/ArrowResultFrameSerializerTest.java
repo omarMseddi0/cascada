@@ -19,6 +19,35 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class ArrowResultFrameSerializerTest {
 
+    @Test
+    void largeDirectCompressionPreservesTheLegacyIpcBytesAndEnvelope() throws Exception {
+        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(5_000)
+                .column("id", ColumnType.LONG).column("number", ColumnType.DOUBLE)
+                .column("name", ColumnType.STRING).column("decimal", ColumnType.DECIMAL);
+        for (int row = 0; row < 5_000; row++) {
+            builder.appendLong(Long.MAX_VALUE - row);
+            if (row % 7 == 0) builder.appendNull(); else builder.appendDouble(row % 11 == 0 ? Double.NaN : -0.0);
+            builder.appendString(row % 13 == 0 ? null : "東京😀-" + row % 5);
+            builder.appendDecimal(new java.math.BigDecimal("1234567890123456789012345678.123400"));
+        }
+        ResultFrame frame = builder.build();
+        ArrowResultFrameSerializer codec = new ArrowResultFrameSerializer(3);
+        java.lang.reflect.Method encoder = ArrowResultFrameSerializer.class.getDeclaredMethod("encodeToArrowIpc", ResultFrame.class);
+        encoder.setAccessible(true);
+        byte[] expectedIpc = (byte[]) encoder.invoke(codec, frame);
+        byte[] blob = codec.serialize(frame);
+        int length = java.nio.ByteBuffer.wrap(blob).getInt();
+        assertThat(length).isEqualTo(expectedIpc.length);
+        byte[] compressed = java.util.Arrays.copyOfRange(blob, Integer.BYTES, blob.length);
+        assertThat(com.github.luben.zstd.Zstd.decompressedSize(compressed)).isEqualTo(length);
+        assertThat(com.github.luben.zstd.Zstd.decompress(compressed, length)).isEqualTo(expectedIpc);
+        byte[] legacyCompressed = com.github.luben.zstd.Zstd.compress(expectedIpc, 9);
+        byte[] legacyBlob = java.nio.ByteBuffer.allocate(Integer.BYTES + legacyCompressed.length)
+                .putInt(length).put(legacyCompressed).array();
+        assertThat(codec.deserialize(blob).rows()).isEqualTo(frame.rows());
+        assertThat(codec.deserialize(legacyBlob).rows()).isEqualTo(frame.rows());
+    }
+
     private final ArrowResultFrameSerializer arrow = new ArrowResultFrameSerializer();
     private final PortableFrameSerializer portable = new PortableFrameSerializer();
 
@@ -73,6 +102,20 @@ class ArrowResultFrameSerializerTest {
         ResultFrame restored = arrow.deserialize(arrow.serialize(ResultFrame.empty()));
         assertThat(restored.isEmpty()).isTrue();
         assertThat(restored.columnNames()).isEmpty();
+    }
+
+    @Test
+    void blobsRemainReadableAcrossConfiguredCompressionLevels() {
+        ResultFrame original = sampleFrame();
+        ArrowResultFrameSerializer[] writers = {
+                new ArrowResultFrameSerializer(1), new ArrowResultFrameSerializer(3),
+                new ArrowResultFrameSerializer(9)
+        };
+        ArrowResultFrameSerializer reader = new ArrowResultFrameSerializer(9);
+
+        for (ArrowResultFrameSerializer writer : writers) {
+            assertThat(reader.deserialize(writer.serialize(original)).rows()).isEqualTo(original.rows());
+        }
     }
 
     @Test

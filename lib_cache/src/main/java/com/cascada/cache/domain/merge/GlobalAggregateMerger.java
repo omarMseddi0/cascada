@@ -18,7 +18,7 @@ import java.util.TreeSet;
  * ({@code SUM}/{@code COUNT}→sum, {@code MIN}→min, {@code MAX}→max).
  *
  * <p>Since the columnar rewrite this class is a thin row-object adapter over
- * {@link ColumnarHashAggregator} — the single vectorized group-by operator all merge paths share —
+ * {@link ColumnarHashAggregator}, while typed result frames use {@link TypedFrameAggregator},
  * so the row-level API (and its tests) stay stable while the hot loop runs on primitive arrays.
  *
  * <p>It guards two of the documented root causes:

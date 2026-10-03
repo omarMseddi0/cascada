@@ -131,38 +131,51 @@ public final class CubeSubsumptionPlanner {
         validateMeasureCombiners(measureColumns, declared);
 
         Set<String> extraFilters = filterEvaluator.extraFilters(candidate.shape(), query);
+        int[] dimensionIndexes = new int[dimensionColumns.size()];
+        ColumnType[] dimensionTypes = new ColumnType[dimensionColumns.size()];
+        for (int index = 0; index < dimensionColumns.size(); index++) {
+            dimensionIndexes[index] = frame.columnIndex(dimensionColumns.get(index));
+            dimensionTypes[index] = frame.columnTypeAt(dimensionIndexes[index]);
+        }
+        int[] measureIndexes = new int[measureColumns.size()];
+        ColumnType[] measureTypes = new ColumnType[measureColumns.size()];
+        AggregateFunction[] measureFunctions = new AggregateFunction[measureColumns.size()];
+        for (int index = 0; index < measureColumns.size(); index++) {
+            String measure = measureColumns.get(index);
+            measureIndexes[index] = frame.columnIndex(measure);
+            measureTypes[index] = frame.columnTypeAt(measureIndexes[index]);
+            AggregateFunction function = declared.get(normalize(measure));
+            measureFunctions[index] = function == null
+                    ? AggregateFunctionResolver.resolve(measure, declared) : function;
+        }
+
         Map<List<Object>, CubePlannerGroup> groups = new LinkedHashMap<>();
-        for (Map<String, Object> row : frame.rows()) {
-            if (!filterEvaluator.matchesAll(frame, row, extraFilters)) {
+        for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
+            if (!extraFilters.isEmpty()
+                    && !filterEvaluator.matchesAll(frame, frame.rows().get(rowIndex), extraFilters)) {
                 continue;
             }
             List<Object> keyValues = new ArrayList<>(dimensionColumns.size());
             Object[] rawDimensions = new Object[dimensionColumns.size()];
             for (int index = 0; index < dimensionColumns.size(); index++) {
-                String dimension = dimensionColumns.get(index);
-                Object value = row.get(dimension);
+                Object value = frame.valueAt(rowIndex, dimensionIndexes[index]);
                 rawDimensions[index] = value;
-                keyValues.add(canonicalDimension(frame.columnType(dimension), value));
+                keyValues.add(canonicalDimension(dimensionTypes[index], value));
             }
             List<Object> key = Collections.unmodifiableList(keyValues);
             CubePlannerGroup group = groups.computeIfAbsent(key, ignored -> new CubePlannerGroup(rawDimensions, measureColumns.size()));
             for (int measureIndex = 0; measureIndex < measureColumns.size(); measureIndex++) {
-                String measure = measureColumns.get(measureIndex);
-                Object value = row.get(measure);
+                Object value = frame.valueAt(rowIndex, measureIndexes[measureIndex]);
                 if (value == null) {
                     continue;
                 }
                 if (!group.measurePresent()[measureIndex]) {
-                    validateDecimalValue(frame.columnType(measure), value);
+                    validateDecimalValue(measureTypes[measureIndex], value);
                     group.measureValues()[measureIndex] = value;
                     group.measurePresent()[measureIndex] = true;
                 } else {
-                    AggregateFunction function = declared.get(normalize(measure));
-                    if (function == null) {
-                        function = AggregateFunctionResolver.resolve(measure, declared);
-                    }
                     group.measureValues()[measureIndex] = combine(group.measureValues()[measureIndex], value,
-                            frame.columnType(measure), function);
+                            measureTypes[measureIndex], measureFunctions[measureIndex]);
                 }
             }
         }

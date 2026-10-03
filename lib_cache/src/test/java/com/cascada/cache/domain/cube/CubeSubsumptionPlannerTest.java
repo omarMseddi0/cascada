@@ -4,12 +4,14 @@ import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Proves the single biggest hit-rate multiplier: a coarser cached shape answers a finer query in
@@ -176,6 +178,28 @@ class CubeSubsumptionPlannerTest {
     }
 
     @Test
+    void preservesSpacesInsideQuotedEqualityAndInListLiterals() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("region", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.LONG)
+                .row("north", 10L)
+                .row(" north ", 20L)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("region"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape inFilter = new QueryShape(Set.of(),
+                Set.of("region IN (' north ')"), Set.of("SUM(x)"));
+        QueryShape equalityFilter = new QueryShape(Set.of(),
+                Set.of("region = ' north '"), Set.of("SUM(x)"));
+
+        ResultFrame inAnswer = planner.rollUpAndFilterDown(candidate, inFilter);
+        ResultFrame equalityAnswer = planner.rollUpAndFilterDown(candidate, equalityFilter);
+
+        assertThat(inAnswer.rows()).containsExactly(Map.of("SUM(x)", 20L));
+        assertThat(equalityAnswer.rows()).containsExactly(Map.of("SUM(x)", 20L));
+    }
+
+    @Test
     void rejectsAnExtraFilterOnAColumnTheCandidateDidNotGroupBy() {
         // region is not in the candidate's group-by, so the predicate cannot be applied in memory
         QueryShape query = new QueryShape(Set.of("appName"),
@@ -189,6 +213,251 @@ class CubeSubsumptionPlannerTest {
         QueryShape query = new QueryShape(Set.of("appName"),
                 Set.of("appName LIKE 'net%'"), Set.of("SUM(bytes)"));
         assertThat(planner.findSubsumingCacheEntryForQuery(query, List.of(candidateEntry()))).isEmpty();
+    }
+
+    @Test
+    void keepsNullAndTheLiteralNullInSeparateGroups() {
+        Map<String, Object> nullCity = new java.util.HashMap<>();
+        nullCity.put("city", null);
+        nullCity.put("device", "phone");
+        nullCity.put("SUM(x)", 10.0);
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("device", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.DOUBLE)
+                .row(nullCity)
+                .row(Map.of("city", "null", "device", "tablet", "SUM(x)", 20.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city", "device"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(answer.columnType("city")).isEqualTo(ColumnType.STRING);
+        assertThat(answer.rowCount()).isEqualTo(2);
+        assertThat(answer.rows()).anySatisfy(row -> {
+            assertThat(row.get("city")).isNull();
+            assertThat(row.get("SUM(x)")).isEqualTo(10.0);
+        });
+        assertThat(answer.rows()).anySatisfy(row -> {
+            assertThat(row.get("city")).isEqualTo("null");
+            assertThat(row.get("SUM(x)")).isEqualTo(20.0);
+        });
+    }
+
+    @Test
+    void preservesLongDimensionAndExactLongMeasureAboveDoublePrecision() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("id", ColumnType.LONG)
+                .column("shard", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.LONG)
+                .row(5L, "shard-a", 9_007_199_254_740_992L)
+                .row(5L, "shard-b", 1L)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("id", "shard"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of("id"), Set.of(), Set.of("SUM(x)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(answer.columnType("id")).isEqualTo(ColumnType.LONG);
+        assertThat(answer.columnType("SUM(x)")).isEqualTo(ColumnType.LONG);
+        assertThat(answer.rows().get(0).get("id")).isEqualTo(5L);
+        assertThat(answer.rows().get(0).get("SUM(x)")).isEqualTo(9_007_199_254_740_993L);
+    }
+
+    @Test
+    void rollsUpHighPrecisionDecimalWithoutConvertingThroughDouble() {
+        BigDecimal first = new BigDecimal("90071992547409931234567890.1234");
+        BigDecimal second = new BigDecimal("0.0001");
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("shard", ColumnType.STRING)
+                .column("SUM(amount)", ColumnType.DECIMAL)
+                .row("Paris", "shard-a", first)
+                .row("Paris", "shard-b", second)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city", "shard"), Set.of(), Set.of("SUM(amount)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(amount)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(answer.columnType("SUM(amount)")).isEqualTo(ColumnType.DECIMAL);
+        assertThat((BigDecimal) answer.rows().get(0).get("SUM(amount)"))
+                .isEqualByComparingTo("90071992547409931234567890.1235");
+    }
+
+    @Test
+    void refusesDecimalRollUpThatWouldExceedSparkPrecision() {
+        BigDecimal nearLimit = new BigDecimal("9".repeat(38));
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("shard", ColumnType.STRING)
+                .column("SUM(amount)", ColumnType.DECIMAL)
+                .row("Paris", "shard-a", nearLimit)
+                .row("Paris", "shard-b", nearLimit)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city", "shard"), Set.of(), Set.of("SUM(amount)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(amount)"));
+
+        assertThatThrownBy(() -> planner.rollUpAndFilterDown(candidate, query))
+                .isInstanceOf(CubeRollUpUnavailableException.class)
+                .hasMessageContaining("precision/scale");
+    }
+
+    @Test
+    void refusesDecimalValuesWithMoreThan38IntegerDigitsAtNegativeScale() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("SUM(amount)", ColumnType.DECIMAL)
+                .row("Paris", new BigDecimal("1E+39"))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(amount)")), frame);
+
+        assertThatThrownBy(() -> planner.rollUpAndFilterDown(candidate, candidate.shape()))
+                .isInstanceOf(CubeRollUpUnavailableException.class)
+                .hasMessageContaining("precision/scale");
+    }
+
+    @Test
+    void comparesLongFilterLiteralsExactlyAboveDoublePrecision() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("id", ColumnType.LONG)
+                .column("city", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.DOUBLE)
+                .row(9_007_199_254_740_993L, "wrong", 10.0)
+                .row(9_007_199_254_740_992L, "right", 20.0)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("id", "city"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of("id = 9007199254740992"), Set.of("SUM(x)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(answer.rowCount()).isEqualTo(1);
+        assertThat(answer.rows().get(0).get("city")).isEqualTo("right");
+    }
+
+    @Test
+    void treatsEqualityWithSqlNullAsUnknown() {
+        Map<String, Object> row = new java.util.HashMap<>();
+        row.put("id", null);
+        row.put("city", "Paris");
+        row.put("SUM(x)", 10.0);
+        ResultFrame frame = ResultFrame.builder()
+                .column("id", ColumnType.LONG)
+                .column("city", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.DOUBLE)
+                .row(row)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("id", "city"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of("id = NULL"), Set.of("SUM(x)"));
+
+        assertThat(planner.rollUpAndFilterDown(candidate, query).rowCount()).isZero();
+    }
+
+    @Test
+    void refusesQuotedNumericLiteralInsteadOfCoercingItToAnInteger() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("id", ColumnType.LONG)
+                .column("city", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.DOUBLE)
+                .row(5L, "Paris", 10.0)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("id", "city"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of("id = '5'"), Set.of("SUM(x)"));
+
+        assertThatThrownBy(() -> planner.rollUpAndFilterDown(candidate, query))
+                .isInstanceOf(CubeRollUpUnavailableException.class)
+                .hasMessageContaining("quoted literal");
+    }
+
+    @Test
+    void keepsTheRequestedProjectionOrderAndRefusesReorderedShapeReuse() {
+        List<String> requestedOrder = List.of("SUM(x) AS total", "city");
+        ResultFrame frame = ResultFrame.builder()
+                .column("total", ColumnType.LONG)
+                .column("city", ColumnType.STRING)
+                .row(15L, "Paris")
+                .build();
+        QueryShape fine = new QueryShape(Set.of("city", "region"), Set.of(), Set.of("SUM(x) AS total"),
+                Set.of("traffic"), Map.of(), requestedOrder);
+        CachedShapeEntry candidate = new CachedShapeEntry(fine, frame);
+        QueryShape coarse = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x) AS total"),
+                Set.of("traffic"), Map.of(), requestedOrder);
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, coarse);
+
+        assertThat(answer.columnNames()).containsExactly("total", "city");
+        assertThat(answer.columnType("total")).isEqualTo(ColumnType.LONG);
+
+        QueryShape reordered = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x) AS total"),
+                Set.of("traffic"), Map.of(), List.of("city", "SUM(x) AS total"));
+        assertThat(planner.subsumes(fine, reordered)).isFalse();
+    }
+
+    @Test
+    void rejectsAnUnmappedNumericAliasInsteadOfDefaultingToSum() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("total", ColumnType.LONG)
+                .row("Paris", "north", 10L)
+                .row("Paris", "south", 20L)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city", "region"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x)"));
+
+        assertThatThrownBy(() -> planner.rollUpAndFilterDown(candidate, query))
+                .isInstanceOf(CubeRollUpUnavailableException.class)
+                .hasMessageContaining("no declared mergeable aggregate function");
+    }
+
+    @Test
+    void refusesConflictingAggregateMappingsForOneOutputAlias() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("total", ColumnType.LONG)
+                .row("Paris", "north", 10L)
+                .row("Paris", "south", 20L)
+                .build();
+        QueryShape candidateShape = new QueryShape(Set.of("city", "region"), Set.of(),
+                Set.of("MAX(x) AS total", "SUM(x) AS total"));
+        CachedShapeEntry candidate = new CachedShapeEntry(candidateShape, frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x) AS total"));
+
+        assertThatThrownBy(() -> planner.rollUpAndFilterDown(candidate, query))
+                .isInstanceOf(CubeRollUpUnavailableException.class)
+                .hasMessageContaining("conflicting aggregate functions");
+    }
+
+    @Test
+    void refusesStringAggregateOutputsInsteadOfDroppingThem() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("first_city", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.LONG)
+                .row("Paris", "north", "Amsterdam", 10L)
+                .row("Paris", "south", "Berlin", 20L)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city", "region"), Set.of(),
+                        Set.of("MIN(city) AS first_city", "SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(),
+                Set.of("MIN(city) AS first_city", "SUM(x)"));
+
+        assertThatThrownBy(() -> planner.rollUpAndFilterDown(candidate, query))
+                .isInstanceOf(CubeRollUpUnavailableException.class)
+                .hasMessageContaining("string aggregate output");
     }
 
     private Map<String, Double> byApp(ResultFrame frame) {

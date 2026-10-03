@@ -205,41 +205,6 @@ public final class GapQueryBuilder {
 
     // --- time predicate analysis (ported from _has_time_only_subtree / _replace_time_condition) ---
 
-    private boolean hasTimeOnlySubtree(SqlNode condition) {
-        if (condition == null) {
-            return false;
-        }
-        List<SqlIdentifier> identifiers = new ArrayList<>();
-        collectIdentifiers(condition, identifiers);
-        if (!identifiers.isEmpty() && identifiers.stream().allMatch(this::isTimeColumn)) {
-            return true;
-        }
-        if (condition instanceof SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                if (operand != null && hasTimeOnlySubtree(operand)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private SqlNode replaceTimeCondition(SqlNode condition, SqlNode gapCondition) {
-        if (condition == null) {
-            return gapCondition;
-        }
-        if (isTimeOnlyPredicate(condition)) {
-            return cloneCondition(gapCondition);
-        }
-        SqlKind kind = condition.getKind();
-        if ((kind == SqlKind.AND || kind == SqlKind.OR) && condition instanceof SqlBasicCall call) {
-            SqlNode left = replaceTimeCondition(call.operand(0), gapCondition);
-            SqlNode right = replaceTimeCondition(call.operand(1), gapCondition);
-            return combine(kind, left, right);
-        }
-        return condition;
-    }
-
     /** Ported from {@code _filter_out_time_conditions}: drop {@code timeCol >/>=/</<=} predicates. */
     private SqlNode filterOutTimeConditions(SqlNode condition) {
         if (condition == null || isRangeBound(condition)) {
@@ -271,30 +236,6 @@ public final class GapQueryBuilder {
 
     private boolean isTimeIdentifier(SqlNode node) {
         return node instanceof SqlIdentifier identifier && isTimeColumn(identifier);
-    }
-
-    private boolean isTimeOnlyPredicate(SqlNode node) {
-        List<SqlIdentifier> identifiers = new ArrayList<>();
-        collectIdentifiers(node, identifiers);
-        return !identifiers.isEmpty() && identifiers.stream().allMatch(this::isTimeColumn);
-    }
-
-    private boolean referencesTimeColumn(SqlNode node) {
-        List<SqlIdentifier> identifiers = new ArrayList<>();
-        collectIdentifiers(node, identifiers);
-        return identifiers.stream().anyMatch(this::isTimeColumn);
-    }
-
-    private void collectIdentifiers(SqlNode node, List<SqlIdentifier> collector) {
-        if (node instanceof SqlIdentifier identifier) {
-            collector.add(identifier);
-        } else if (node instanceof SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                if (operand != null) {
-                    collectIdentifiers(operand, collector);
-                }
-            }
-        }
     }
 
     private boolean isTimeColumn(SqlIdentifier identifier) {

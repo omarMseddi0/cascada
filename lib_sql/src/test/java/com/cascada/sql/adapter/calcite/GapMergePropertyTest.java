@@ -9,7 +9,6 @@ import net.jqwik.api.constraints.Size;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.TreeSet;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -43,26 +42,32 @@ class GapMergePropertyTest {
             }
         }
 
-        // coverage is exactly the union of the input day-buckets
-        TreeSet<Long> coveredByMerge = secondsCoveredByDayBuckets(body);
-        for (TimeRange range : merged) {
-            for (long second : sampleSeconds(range)) {
-                assertThat(coveredByMerge).contains(second);
+        // Compare normalized interval unions, so a missing interior day or extra range fails too.
+        assertThat(merged).containsExactlyElementsOf(normalize(dayBuckets(body)));
+    }
+
+    private List<TimeRange> dayBuckets(List<Long> starts) {
+        return starts.stream().map(start -> new TimeRange(start, start + DAY - 1)).toList();
+    }
+
+    private List<TimeRange> normalize(List<TimeRange> ranges) {
+        List<TimeRange> sorted = ranges.stream()
+                .sorted((left, right) -> Long.compare(left.startTimestampSeconds(), right.startTimestampSeconds()))
+                .toList();
+        List<TimeRange> normalized = new java.util.ArrayList<>();
+        for (TimeRange current : sorted) {
+            if (normalized.isEmpty()) {
+                normalized.add(current);
+                continue;
+            }
+            TimeRange previous = normalized.get(normalized.size() - 1);
+            if (previous.endTimestampSeconds() + 1 >= current.startTimestampSeconds()) {
+                normalized.set(normalized.size() - 1, new TimeRange(previous.startTimestampSeconds(),
+                        Math.max(previous.endTimestampSeconds(), current.endTimestampSeconds())));
+            } else {
+                normalized.add(current);
             }
         }
-    }
-
-    private TreeSet<Long> secondsCoveredByDayBuckets(List<Long> body) {
-        TreeSet<Long> seconds = new TreeSet<>();
-        for (long dayStart : body) {
-            seconds.add(dayStart);
-            seconds.add(dayStart + DAY - 1);
-        }
-        return seconds;
-    }
-
-    /** Sample the endpoints of a merged range; both must fall inside some input day-bucket. */
-    private List<Long> sampleSeconds(TimeRange range) {
-        return List.of(range.startTimestampSeconds(), range.endTimestampSeconds());
+        return normalized;
     }
 }

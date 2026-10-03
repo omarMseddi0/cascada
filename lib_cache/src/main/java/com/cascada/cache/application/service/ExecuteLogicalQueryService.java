@@ -54,7 +54,7 @@ public final class ExecuteLogicalQueryService implements ExecuteLogicalQueryUseC
         CanonicalQueryObject canonicalObject;
         try {
             canonicalObject = canonicalizer.canonicalize(physicalSql);
-        } catch (com.cascada.cache.domain.UncacheableQueryException unsupported) {
+        } catch (com.cascada.cache.domain.query.UncacheableQueryException unsupported) {
             return new ExecuteCachedQueryUseCase.Result(executor.execute(physicalSql), false);
         }
         return executeCachedQuery.execute(canonicalObject);

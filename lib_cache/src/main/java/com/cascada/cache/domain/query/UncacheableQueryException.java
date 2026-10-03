@@ -1,4 +1,4 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.query;
 
 /** The SQL is executable, but cannot be represented safely by the cache planner. */
 public class UncacheableQueryException extends RuntimeException {

@@ -2,7 +2,7 @@ package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
-import com.cascada.cache.domain.CacheDecision;
+import com.cascada.cache.domain.safety.CacheDecision;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.QueryExecutorPort;

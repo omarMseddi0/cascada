@@ -1,6 +1,5 @@
 package com.cascada.cache.domain.safety;
 
-import com.cascada.cache.domain.CacheDecision;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 
 import java.util.List;

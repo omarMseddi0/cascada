@@ -1,4 +1,4 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.safety;
 
 /**
  * The outcome of the safety-rule evaluation, ported from {@code CacheDecision} in

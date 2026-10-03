@@ -61,6 +61,55 @@ class SqlCorrectnessRegressionTest {
         assertThat(executed.get()).isEqualTo("SELECT SUM(x) FROM physical");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "RAND() < 0.5",
+            "CURRENT_TIMESTAMP > TIMESTAMP '2026-01-01 00:00:00'",
+            "(CURRENT_TIMESTAMP) > TIMESTAMP '2026-01-01 00:00:00'",
+            "UNKNOWN_UDF(region) > 0"
+    })
+    void volatileAndUnclassifiedFunctionsBypassCacheCanonicalization(String predicate) {
+        assertThatThrownBy(() -> factory.canonicalize(
+                "SELECT SUM(x) FROM t WHERE ts >= 0 AND ts <= 100 AND " + predicate))
+                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SUM", "MAX"})
+    void deterministicStandardAggregatesRemainCacheEligible(String aggregate) {
+        var canonical = factory.canonicalize(
+                "SELECT " + aggregate + "(x) FROM t WHERE ts >= 0 AND ts <= 86399");
+
+        assertThat(SafetyRuleRegistry.defaultRegistry()
+                .evaluate(canonical, CacheConfiguration.defaults()).isBypass()).isFalse();
+    }
+
+    @Test
+    void qualifiedAggregateLookingFunctionsAreNotAssumedToBeStandardAggregates() {
+        assertThatThrownBy(() -> factory.canonicalize(
+                "SELECT custom.SUM(x) FROM t WHERE ts >= 0 AND ts <= 100"))
+                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class);
+    }
+
+    @Test
+    void quotedContextFunctionNamesRemainOrdinaryColumnReferences() {
+        var canonical = factory.canonicalize(
+                "SELECT SUM(x) FROM t WHERE ts >= 0 AND ts <= 86399 AND `CURRENT_TIMESTAMP` > 0");
+        assertThat(SafetyRuleRegistry.defaultRegistry().evaluate(canonical, CacheConfiguration.defaults())
+                .isBypass()).isFalse();
+    }
+
+    @Test void volatileQueryFallsBackToDirectExecution() {
+        AtomicReference<String> executed = new AtomicReference<>();
+        String sql = "SELECT SUM(x) FROM logical WHERE ts >= 0 AND ts <= 100 AND RAND() < 0.5";
+        var service = new ExecuteLogicalQueryService(s -> s, factory,
+                c -> { throw new AssertionError("volatile query must bypass cache"); },
+                s -> { executed.set(s); return ResultFrame.empty(); });
+
+        assertThat(service.query(sql).servedThroughCache()).isFalse();
+        assertThat(executed.get()).isEqualTo(sql);
+    }
+
     @Test void timeBucketingRetainsTheInternalTimeColumnName() {
         var catalog = new TableCatalog().register(RegisteredTable.of("t", "/tmp/t", Map.of("ts", "ts"), "ts"));
         String result = new LogicalToPhysicalSqlTranslator(300, catalog).translateToPhysicalSql(

@@ -5,7 +5,7 @@ import com.cascada.cache.domain.CacheConstants;
 /**
  * Derives the tenant bucket a stored key belongs to, for the per-tenant size breakdown. Production keys
  * are {@code <tenantSegment>:QC:V4:...} (the tenant prefix is prepended to the bucket key from
- * {@link com.cascada.cache.domain.CacheKeyFactory}); a bare {@code QC:V4:...} key (single-tenant/dev) is
+ * {@link com.cascada.cache.domain.key.CacheKeyFactory}); a bare {@code QC:V4:...} key (single-tenant/dev) is
  * attributed to {@code "default"}. This is the one place that knows the prefix convention, so the
  * adapters and the report agree.
  */

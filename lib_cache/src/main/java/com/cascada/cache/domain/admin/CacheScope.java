@@ -6,7 +6,7 @@ import java.util.Objects;
 
 /**
  * What a flush/size operation applies to (plan §8.17). Because every key embeds the tenant segment
- * inside its signed material ({@link com.cascada.cache.domain.CacheKeyFactory}), scoping is purely a
+ * inside its signed material ({@link com.cascada.cache.domain.key.CacheKeyFactory}), scoping is purely a
  * key-prefix match — there is no way for a tenant-scoped flush to reach another tenant's buckets.
  *
  * <ul>

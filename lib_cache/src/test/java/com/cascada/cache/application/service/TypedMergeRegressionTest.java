@@ -6,7 +6,7 @@ import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.query.OrderByClause;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.UncacheableQueryException;
-import com.cascada.cache.domain.CacheKeyFactory;
+import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.BypassReason;
 import com.cascada.cache.domain.CacheDecision;
 import com.cascada.cache.domain.TimeRange;

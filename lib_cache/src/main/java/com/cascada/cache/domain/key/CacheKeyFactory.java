@@ -1,4 +1,6 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.key;
+
+import com.cascada.cache.domain.CacheConstants;
 
 import com.cascada.identity.domain.LineageHash;
 import com.cascada.identity.domain.PolicyVersion;

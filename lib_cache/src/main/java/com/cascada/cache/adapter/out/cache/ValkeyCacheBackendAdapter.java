@@ -1,6 +1,6 @@
 package com.cascada.cache.adapter.out.cache;
 
-import com.cascada.cache.domain.CacheKeyFactory;
+import com.cascada.cache.domain.key.CacheKeyFactory;
 
 import com.cascada.cache.domain.admin.CacheKeyTenantSegment;
 import com.cascada.cache.domain.admin.CacheScope;

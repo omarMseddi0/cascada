@@ -147,7 +147,7 @@ class WarmingOrchestratorTest {
 
         assertThat(result.bucketsWarmed()).isEqualTo(2); // days 0 and 1 only — day 2 is incomplete
         assertThat(sparkCalls.get()).isEqualTo(2);
-        String partialBucketKey = com.cascada.cache.domain.CacheKeyFactory.buildBucketKey(A, 2 * DAY, DAY);
+        String partialBucketKey = com.cascada.cache.domain.key.CacheKeyFactory.buildBucketKey(A, 2 * DAY, DAY);
         assertThat(backend.existsForKeys(List.of(partialBucketKey))).containsExactly(false);
     }
 

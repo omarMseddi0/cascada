@@ -1,8 +1,11 @@
 package com.cascada.sql.adapter.dialect;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Exhaustive coverage of the MySQL→Spark function-mapping (data_explory/all_plans.md §2): every
@@ -32,15 +35,52 @@ class MySqlToSparkFunctionTranslatorDeepTest {
     }
 
     @Test
+    void preservesTheBaseForTwoArgumentLog() {
+        assertThat(translator.translate("SELECT LOG(2, x), LOG(x) FROM t"))
+                .isEqualTo("SELECT log(2, x), ln(x) FROM t");
+    }
+
+    @Test
     void renamesJsonAndFormatFunctions() {
-        assertThat(translator.translate("SELECT JSON_EXTRACT(doc, '$.a'), FORMAT(n, 2) FROM t"))
+        assertThat(translator.translate(
+                "SELECT JSON_UNQUOTE(JSON_EXTRACT(doc, '$.a')), FORMAT(n, 2) FROM t"))
                 .isEqualTo("SELECT get_json_object(doc, '$.a'), format_number(n, 2) FROM t");
+    }
+
+    @Test
+    void rejectsJsonExtractionFormsWhoseReturnContractCannotBePreserved() {
+        assertThatThrownBy(() -> translator.translate("SELECT JSON_EXTRACT(doc, '$.a') FROM t"))
+                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class)
+                .hasMessageContaining("JSON_UNQUOTE");
+        assertThatThrownBy(() -> translator.translate(
+                "SELECT JSON_UNQUOTE(JSON_EXTRACT(doc, '$.a', '$.b')) FROM t"))
+                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class)
+                .hasMessageContaining("onePath");
     }
 
     @Test
     void convertsEveryDateFormatTokenInOnePass() {
         assertThat(translator.translate("SELECT DATE_FORMAT(ts, '%Y-%m-%d %H:%i:%s') FROM t"))
                 .isEqualTo("SELECT date_format(ts, 'yyyy-MM-dd HH:mm:ss') FROM t");
+    }
+
+    @Test
+    void translatesSupportedNumericDateTokensAndEscapedPercent() {
+        assertThat(translator.translate("SELECT DATE_FORMAT(ts, '%c %e %f %I %k %l %S %%') FROM t"))
+                .isEqualTo("SELECT date_format(ts, 'M d SSSSSS hh H h ss ''%''') FROM t");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"%D", "%V", "%q", "%"})
+    void rejectsUnsupportedDateFormatTokensInsteadOfPassingThemThrough(String token) {
+        assertThatThrownBy(() -> translator.translate("SELECT DATE_FORMAT(ts, '" + token + "') FROM t"))
+                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class);
+    }
+
+    @Test
+    void convertsDateFormatWhenTheFirstArgumentContainsNestedCommas() {
+        assertThat(translator.translate("SELECT DATE_FORMAT(COALESCE(ts, fallback), '%Y-%m') FROM t"))
+                .isEqualTo("SELECT date_format(COALESCE(ts, fallback), 'yyyy-MM') FROM t");
     }
 
     @Test
@@ -83,6 +123,6 @@ class MySqlToSparkFunctionTranslatorDeepTest {
                 .containsEntry("IFNULL", "coalesce")
                 .containsEntry("NOW", "current_timestamp")
                 .containsEntry("LOG", "ln")
-                .containsEntry("JSON_EXTRACT", "get_json_object");
+                .doesNotContainKey("JSON_EXTRACT");
     }
 }

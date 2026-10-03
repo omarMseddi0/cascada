@@ -7,7 +7,7 @@ import com.cascada.fabric.application.port.out.EnvironmentPort;
  * by {@link System#getenv(String)}.
  *
  * <p>A composition root passes {@link #INSTANCE} to
- * {@code ClusterValues.fromEnvironment(...)}; every test passes a map-backed lambda. Keeping the OS
+ * {@code ClusterSettingsReader}; every test can pass a map-backed lambda. Keeping the OS
  * behind one named class is what makes the rest of the module provably deterministic.
  */
 public final class SystemEnvironmentAdapter implements EnvironmentPort {

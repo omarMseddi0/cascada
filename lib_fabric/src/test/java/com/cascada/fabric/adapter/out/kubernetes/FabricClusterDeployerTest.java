@@ -2,6 +2,7 @@ package com.cascada.fabric.adapter.out.kubernetes;
 
 import com.cascada.fabric.application.port.in.ManageClusterLifecycleUseCase;
 import com.cascada.fabric.application.service.ClusterLifecycleService;
+import com.cascada.fabric.adapter.out.manifest.ClusterManifestRenderer;
 import com.cascada.fabric.domain.ClusterValues;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
@@ -29,14 +30,14 @@ class FabricClusterDeployerTest {
     static KubernetesClient client;
 
     private ClusterValues values() {
-        return ClusterValues.fromEnvironment(Map.of(
+        return ClusterValues.fromSettings(Map.of(
                 "CASCADA_RELEASE_NAME", "rel",
                 "CASCADA_COPY_SUFFIX", "c1",
-                "CASCADA_NAMESPACE", "default")::get);
+                "CASCADA_NAMESPACE", "default"));
     }
 
     private ManageClusterLifecycleUseCase lifecycle() {
-        return new ClusterLifecycleService(new FabricClusterDeployer(client));
+        return new ClusterLifecycleService(new ClusterManifestRenderer(), new FabricClusterDeployer(client));
     }
 
     @Test

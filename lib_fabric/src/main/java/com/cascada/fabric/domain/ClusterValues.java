@@ -1,98 +1,124 @@
 package com.cascada.fabric.domain;
 
-import com.cascada.fabric.application.port.out.EnvironmentPort;
-
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
- * Every value the Fabric YAML templates need, read from environment variables with sensible defaults
- * (plan §6.7). This is the whole "configuration" story: set a few {@code CASCADA_*} env vars, the rest
- * defaults to the reference deployment. Resource names ({@code <release>-spark-<suffix>}, …) and the few
+ * Every value the Fabric templates need, derived from supplied settings with sensible defaults
+ * (plan §6.7). Unset or blank {@code CASCADA_*} settings use the reference deployment defaults; malformed
+ * numeric settings are rejected. Resource names ({@code <release>-spark-<suffix>}, …) and the few
  * derived numbers (executor limit-cores = cores + 1, the in-cluster driver host) are computed here so
  * the templates only ever see ready-to-substitute strings.
  *
- * <p>{@link #fromEnvironment(EnvironmentPort)} takes the environment as a <em>port</em>, so this class
- * performs no I/O of its own and is trivially testable with a map. A composition root supplies the real
- * process environment by passing {@code SystemEnvironmentAdapter.INSTANCE}; there is deliberately no
- * convenience method that reads the OS from inside the domain.
+ * <p>This is a pure transformation of supplied settings: environment access belongs to the application
+ * layer and reaches this class only as data. Numeric settings are parsed and range-checked before they
+ * can reach a manifest.
  */
 public final class ClusterValues {
+
+    private static final int MAX_EXECUTOR_CORE_COUNT = Integer.MAX_VALUE - 1;
+    private static final int MAX_EXECUTOR_COUNT = Integer.MAX_VALUE;
+    private static final int MAX_REPLICA_COUNT = Integer.MAX_VALUE;
+    private static final int MAX_PORT_NUMBER = 65_535;
+    private static final int REFERENCE_INITIAL_EXECUTOR_COUNT = 3;
 
     private final Map<String, String> placeholders;
 
     private ClusterValues(Map<String, String> placeholders) {
-        this.placeholders = placeholders;
+        this.placeholders = Collections.unmodifiableMap(new LinkedHashMap<>(placeholders));
     }
 
-    /** Defaults only — every {@code CASCADA_*} value falls back. Useful for tests and for docs. */
+    /** Defaults only — every {@code CASCADA_*} setting falls back. Useful for tests and documentation. */
     public static ClusterValues defaults() {
-        return fromEnvironment(EnvironmentPort.empty());
+        return fromSettings(Map.of());
     }
 
-    public static ClusterValues fromEnvironment(EnvironmentPort env) {
-        String release = get(env, "CASCADA_RELEASE_NAME", "cascada");
-        String suffix = get(env, "CASCADA_COPY_SUFFIX", "copy1");
-        String namespace = get(env, "CASCADA_NAMESPACE", "default");
-        String executorCores = get(env, "CASCADA_EXECUTOR_CORES", "3");
+    /** Builds template values from already-read settings without performing environment or filesystem I/O. */
+    public static ClusterValues fromSettings(Map<String, String> settings) {
+        Objects.requireNonNull(settings, "settings");
+        String release = settingOrDefault(settings, "CASCADA_RELEASE_NAME", "cascada");
+        String suffix = settingOrDefault(settings, "CASCADA_COPY_SUFFIX", "copy1");
+        String namespace = settingOrDefault(settings, "CASCADA_NAMESPACE", "default");
+        int executorCoreCount = readBoundedIntegerSetting(
+                settings, "CASCADA_EXECUTOR_CORES", 3, 1, MAX_EXECUTOR_CORE_COUNT);
+        int minimumExecutors = readBoundedIntegerSetting(
+                settings, "CASCADA_MIN_EXECUTORS", 2, 0, MAX_EXECUTOR_COUNT);
+        int maximumExecutors = readBoundedIntegerSetting(
+                settings, "CASCADA_MAX_EXECUTORS", 3, 1, MAX_EXECUTOR_COUNT);
+        if (minimumExecutors > maximumExecutors) {
+            throw new IllegalArgumentException("CASCADA_MIN_EXECUTORS must be <= CASCADA_MAX_EXECUTORS");
+        }
+        int initialExecutors = Math.max(minimumExecutors,
+                Math.min(REFERENCE_INITIAL_EXECUTOR_COUNT, maximumExecutors));
+        int replicas = readBoundedIntegerSetting(
+                settings, "CASCADA_REPLICAS", 1, 1, MAX_REPLICA_COUNT);
+        int driverPort = readBoundedIntegerSetting(
+                settings, "CASCADA_DRIVER_PORT", 8002, 1, MAX_PORT_NUMBER);
+        int blockManagerPort = readBoundedIntegerSetting(
+                settings, "CASCADA_BLOCKMGR_PORT", 8001, 1, MAX_PORT_NUMBER);
 
         String serviceAccountName = release + "-spark-" + suffix;
         String driverWorkloadName = release + "-driver-" + suffix;
         String driverServiceName = release + "-spark-driver-" + suffix;
 
-        Map<String, String> v = new LinkedHashMap<>();
+        Map<String, String> values = new LinkedHashMap<>();
         // identity / images
-        v.put("releaseName", release);
-        v.put("copySuffix", suffix);
-        v.put("namespace", namespace);
-        v.put("containerImage", get(env, "CASCADA_CONTAINER_IMAGE",
+        values.put("releaseName", release);
+        values.put("copySuffix", suffix);
+        values.put("namespace", namespace);
+        values.put("containerImage", settingOrDefault(settings, "CASCADA_CONTAINER_IMAGE",
                 "docker.registry.local:5000/spark:python3-java17-hadoop"));
-        v.put("imagePullSecret", get(env, "CASCADA_IMAGE_PULL_SECRET", "regsec"));
+        values.put("imagePullSecret", settingOrDefault(settings, "CASCADA_IMAGE_PULL_SECRET", "regsec"));
         // derived resource names
-        v.put("serviceAccountName", serviceAccountName);
-        v.put("driverWorkloadName", driverWorkloadName);
-        v.put("driverServiceName", driverServiceName);
-        v.put("clusterRoleBindingName", release + "-cluster-edit-binding-" + suffix);
-        v.put("roleName", release + "-namespace-role-" + suffix);
-        v.put("roleBindingName", release + "-namespace-role-binding-" + suffix);
-        v.put("coreSiteConfigMapName", release + "-hadoop-core-site-config-" + suffix);
-        v.put("hdfsSiteConfigMapName", release + "-hadoop-hdfs-site-config-" + suffix);
-        v.put("podTemplateConfigMapName", release + "-spark-executor-pod-template-config-" + suffix);
-        v.put("sparkConfigMapName", release + "-spark-config-" + suffix);
-        v.put("log4jConfigMapName", release + "-spark-log4j-config-" + suffix);
-        v.put("podNamePrefix", release + "-exec-" + suffix);
+        values.put("serviceAccountName", serviceAccountName);
+        values.put("driverWorkloadName", driverWorkloadName);
+        values.put("driverServiceName", driverServiceName);
+        values.put("clusterRoleBindingName", release + "-cluster-edit-binding-" + suffix);
+        values.put("roleName", release + "-namespace-role-" + suffix);
+        values.put("roleBindingName", release + "-namespace-role-binding-" + suffix);
+        values.put("coreSiteConfigMapName", release + "-hadoop-core-site-config-" + suffix);
+        values.put("hdfsSiteConfigMapName", release + "-hadoop-hdfs-site-config-" + suffix);
+        values.put("podTemplateConfigMapName", release + "-spark-executor-pod-template-config-" + suffix);
+        values.put("sparkConfigMapName", release + "-spark-config-" + suffix);
+        values.put("log4jConfigMapName", release + "-spark-log4j-config-" + suffix);
+        values.put("podNamePrefix", release + "-exec-" + suffix);
         // sizing knobs
-        v.put("executorMemory", get(env, "CASCADA_EXECUTOR_MEMORY", "8g"));
-        v.put("executorCores", executorCores);
-        v.put("executorLimitCores", Integer.toString(parseInt(executorCores, 3) + 1));
-        v.put("driverMemory", get(env, "CASCADA_DRIVER_MEMORY", "2g"));
-        v.put("minExecutors", get(env, "CASCADA_MIN_EXECUTORS", "2"));
-        v.put("maxExecutors", get(env, "CASCADA_MAX_EXECUTORS", "3"));
-        v.put("replicas", get(env, "CASCADA_REPLICAS", "1"));
+        values.put("executorMemory", settingOrDefault(settings, "CASCADA_EXECUTOR_MEMORY", "8g"));
+        values.put("executorCores", Integer.toString(executorCoreCount));
+        values.put("executorLimitCores", Integer.toString(executorCoreCount + 1));
+        values.put("driverMemory", settingOrDefault(settings, "CASCADA_DRIVER_MEMORY", "2g"));
+        values.put("minExecutors", Integer.toString(minimumExecutors));
+        values.put("maxExecutors", Integer.toString(maximumExecutors));
+        values.put("initialExecutors", Integer.toString(initialExecutors));
+        values.put("replicas", Integer.toString(replicas));
         // networking
-        v.put("driverPort", get(env, "CASCADA_DRIVER_PORT", "8002"));
-        v.put("blockManagerPort", get(env, "CASCADA_BLOCKMGR_PORT", "8001"));
-        v.put("driverHost", driverServiceName + "." + namespace + ".svc.cluster.local");
+        values.put("driverPort", Integer.toString(driverPort));
+        values.put("blockManagerPort", Integer.toString(blockManagerPort));
+        values.put("driverHost", driverServiceName + "." + namespace + ".svc.cluster.local");
         // placement (the third knob, expressed as a node-selector label)
-        v.put("placementLabel", get(env, "CASCADA_PLACEMENT_LABEL", "cascada.io/placement"));
-        v.put("placementValue", get(env, "CASCADA_PLACEMENT_VALUE", "spread"));
+        values.put("placementLabel", settingOrDefault(settings,
+                "CASCADA_PLACEMENT_LABEL", "cascada.io/placement"));
+        values.put("placementValue", settingOrDefault(settings, "CASCADA_PLACEMENT_VALUE", "spread"));
         // storage
-        v.put("hdfsDefaultFs", get(env, "CASCADA_HDFS_DEFAULT_FS", "hdfs://namenode:9000"));
-        v.put("dataHostPath", get(env, "CASCADA_DATA_HOST_PATH", "/mnt/data-prod"));
-        v.put("dataMountPath", get(env, "CASCADA_DATA_MOUNT_PATH", "/DATA_ROOT"));
+        values.put("hdfsDefaultFs", settingOrDefault(settings, "CASCADA_HDFS_DEFAULT_FS", "hdfs://namenode:9000"));
+        values.put("dataHostPath", settingOrDefault(settings, "CASCADA_DATA_HOST_PATH", "/mnt/data-prod"));
+        values.put("dataMountPath", settingOrDefault(settings, "CASCADA_DATA_MOUNT_PATH", "/DATA_ROOT"));
         // fixed mount paths (same on driver and executors so table paths resolve identically)
-        v.put("coreSiteMount", "/opt/spark/work-dir/core-site.xml");
-        v.put("hdfsSiteMount", "/opt/spark/work-dir/hdfs-site.xml");
-        v.put("dnSocketPath", "/var/lib/hadoop-hdfs/dn_socket");
-        v.put("podTemplateMount", "/opt/spark/templates/executor-pod-template.yaml");
-        v.put("sparkJsonMount", "/app/spark.json");
-        v.put("log4jMount", "/opt/spark/conf/log4j2.properties");
+        values.put("coreSiteMount", "/opt/spark/work-dir/core-site.xml");
+        values.put("hdfsSiteMount", "/opt/spark/work-dir/hdfs-site.xml");
+        values.put("hadoopConfDir", "/opt/spark/work-dir");
+        values.put("dnSocketPath", "/var/lib/hadoop-hdfs/dn_socket");
+        values.put("podTemplateMount", "/opt/spark/templates/executor-pod-template.yaml");
+        values.put("sparkJsonMount", "/app/spark.json");
+        values.put("log4jMount", "/opt/spark/conf/log4j2.properties");
 
-        return new ClusterValues(v);
+        return new ClusterValues(values);
     }
 
     public Map<String, String> placeholders() {
-        return Map.copyOf(placeholders);
+        return placeholders;
     }
 
     public String namespace() {
@@ -107,15 +133,24 @@ public final class ClusterValues {
         return placeholders.get(key);
     }
 
-    private static String get(EnvironmentPort env, String key, String fallback) {
-        return env.getOrDefault(key, fallback);
+    private static String settingOrDefault(Map<String, String> settings, String key, String fallback) {
+        String value = settings.get(key);
+        return value == null || value.isBlank() ? fallback : value;
     }
 
-    private static int parseInt(String value, int fallback) {
+    private static int readBoundedIntegerSetting(Map<String, String> settings, String key, int fallback,
+                                                 int minimumAllowed, int maximumAllowed) {
+        String value = settingOrDefault(settings, key, Integer.toString(fallback));
         try {
-            return Integer.parseInt(value.trim());
+            int parsed = Integer.parseInt(value.trim());
+            if (parsed < minimumAllowed || parsed > maximumAllowed) {
+                throw new IllegalArgumentException(key + " must be between " + minimumAllowed + " and "
+                        + maximumAllowed
+                        + ", but was: '" + value + "'");
+            }
+            return parsed;
         } catch (NumberFormatException e) {
-            return fallback;
+            throw new IllegalArgumentException(key + " must be an integer, but was: '" + value + "'", e);
         }
     }
 }

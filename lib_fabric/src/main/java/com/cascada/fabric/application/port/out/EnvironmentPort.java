@@ -5,14 +5,12 @@ package com.cascada.fabric.application.port.out;
  * cluster ({@code CASCADA_*} variables today; a ConfigMap, a Helm values file, or a control-plane API
  * tomorrow).
  *
- * <p><b>Why this exists.</b> {@code ClusterValues.fromSystemEnvironment()} called
- * {@link System#getenv(String)} from what is otherwise a pure value object. That put an I/O call in the
- * innermost ring, which is precisely what the dependency rule forbids — and it meant the only way to
- * test the defaults was to mutate the real process environment or thread a lambda through by hand.
+ * <p><b>Why this exists.</b> Reading deployment settings is an external concern. This port keeps the
+ * application independent of the process environment and lets tests provide deterministic values.
  *
- * <p>The domain now depends on this interface; {@code SystemEnvironmentAdapter} is the single
- * implementation that touches the OS, and a test passes a map instead. Swapping env vars for a
- * ConfigMap later is a new adapter, not a change to the manifest logic.
+ * <p>{@code ClusterSettingsReader} consumes this interface; {@code SystemEnvironmentAdapter} is the
+ * single implementation that touches the OS, and tests can pass a map-backed implementation instead.
+ * Swapping environment variables for a ConfigMap later is a new adapter, not a change to domain logic.
  *
  * <p>This module declares its own copy rather than sharing {@code lib_spark}'s identical port on
  * purpose: a port belongs to the hexagon that needs it, and a shared "common utils" module every

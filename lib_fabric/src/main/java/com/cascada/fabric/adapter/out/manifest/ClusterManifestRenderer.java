@@ -1,4 +1,7 @@
-package com.cascada.fabric.domain;
+package com.cascada.fabric.adapter.out.manifest;
+
+import com.cascada.fabric.application.port.out.ClusterManifestRenderingPort;
+import com.cascada.fabric.domain.ClusterValues;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -8,6 +11,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Fills the {@code src/main/resources/fabric} YAML templates from {@link ClusterValues} and returns the
@@ -15,11 +19,11 @@ import java.util.Map;
  * this class only substitutes {@code ${placeholder}} tokens and indents the embedded block-scalar files
  * (the HDFS XML, {@code spark.json}, log4j, and the executor pod template) into their ConfigMaps.
  *
- * <p>No YAML is built in Java and there is no Kubernetes dependency here — that lives in
- * {@code com.cascada.fabric.adapter.out.kubernetes.FabricClusterDeployer}. This class is pure string templating, so it
- * is fast and trivially unit-testable.
+ * <p>No YAML is built in Java and there is no Kubernetes dependency here — API calls live in
+ * {@code com.cascada.fabric.adapter.out.kubernetes.FabricClusterDeployer}. This adapter owns classpath
+ * resource access and deterministic placeholder substitution.
  */
-public final class ClusterManifestRenderer {
+public final class ClusterManifestRenderer implements ClusterManifestRenderingPort {
 
     /** Manifest templates in {@code kubectl apply} order (RBAC → ConfigMaps → Deployment → Service). */
     private static final List<String> TEMPLATES = List.of(
@@ -35,7 +39,9 @@ public final class ClusterManifestRenderer {
             "service-driver.yaml");
 
     /** Render every manifest, in apply order, as a list of YAML documents. */
+    @Override
     public List<String> render(ClusterValues values) {
+        Objects.requireNonNull(values, "values");
         Map<String, String> v = new LinkedHashMap<>(values.placeholders());
         // Resolve the embedded files first, indented to sit under their ConfigMap `data:` block scalar.
         v.put("coreSiteXml", indent(fill(loadFile("core-site.xml"), v), 4));

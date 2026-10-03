@@ -1,6 +1,7 @@
-package com.cascada.fabric.domain;
+package com.cascada.fabric.adapter.out.manifest;
 
-import com.cascada.fabric.application.port.out.EnvironmentPort;
+import com.cascada.fabric.domain.ClusterValues;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -12,9 +13,8 @@ class ClusterManifestRendererTest {
 
     private final ClusterManifestRenderer renderer = new ClusterManifestRenderer();
 
-    private ClusterValues values(Map<String, String> env) {
-        EnvironmentPort lookup = env::get;
-        return ClusterValues.fromEnvironment(lookup);
+    private ClusterValues values(Map<String, String> environmentValues) {
+        return ClusterValues.fromSettings(environmentValues);
     }
 
     @Test
@@ -36,13 +36,13 @@ class ClusterManifestRendererTest {
 
     @Test
     void environmentVariablesOverrideDefaults() {
-        ClusterValues v = values(Map.of(
+        ClusterValues clusterValues = values(Map.of(
                 "CASCADA_RELEASE_NAME", "al-collector2",
                 "CASCADA_COPY_SUFFIX", "copy2",
                 "CASCADA_NAMESPACE", "review",
                 "CASCADA_EXECUTOR_MEMORY", "16g",
                 "CASCADA_EXECUTOR_CORES", "5"));
-        String combined = renderer.renderCombined(v);
+        String combined = renderer.renderCombined(clusterValues);
 
         assertThat(combined)
                 .contains("name: al-collector2-spark-copy2")          // derived SA name
@@ -75,7 +75,36 @@ class ClusterManifestRendererTest {
         String podTemplateCm = manifests.get(5); // configmap-executor-pod-template.yaml
         assertThat(podTemplateCm)
                 .contains("executor-pod-template.yaml: |")
-                .contains("    kind: Pod");
+                .contains("    kind: Pod")
+                .contains("    - name: HADOOP_CONF_DIR")
+                .contains("      value: /opt/spark/work-dir");
+
+        String deployment = manifests.get(8);
+        assertThat(deployment)
+                .contains("- name: HADOOP_CONF_DIR")
+                .contains("value: /opt/spark/work-dir");
+    }
+
+    @Test
+    void renderedSparkConfigSetsAnInitialExecutorTargetWithinItsBounds() {
+        ClusterValues values = values(Map.of(
+                "CASCADA_MIN_EXECUTORS", "0",
+                "CASCADA_MAX_EXECUTORS", "1"));
+        String sparkConfigMap = renderer.render(values).get(6);
+
+        assertThat(sparkConfigMap)
+                .contains("\"spark.executor.instances\": \"1\"")
+                .contains("\"spark.dynamicAllocation.minExecutors\": \"0\"")
+                .contains("\"spark.dynamicAllocation.maxExecutors\": \"1\"");
+    }
+
+    @Test
+    void renderedSparkAndHadoopConfigLeaveBlockReplicationToStoragePolicy() {
+        String combined = renderer.renderCombined(values(Map.of()));
+
+        assertThat(combined)
+                .doesNotContain("spark.hadoop.dfs.replication")
+                .doesNotContain("<name>dfs.replication</name>");
     }
 
     @Test

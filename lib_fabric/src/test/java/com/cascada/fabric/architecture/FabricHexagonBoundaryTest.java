@@ -16,9 +16,8 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
  *   <li><b>Fabric8 in the core.</b> The deployer rendered manifests and issued Kubernetes calls in one
  *       class, so there was no line to defend. Now the lifecycle rules live in {@code application/} and must
  *       stay expressible without a Kubernetes client on the classpath.</li>
- *   <li><b>Reading the OS from the innermost ring.</b> {@code ClusterValues.fromSystemEnvironment()} called
- *       {@link System#getenv} from a value object. The test below is why that cannot return: nothing outside
- *       {@code adapter/} may reference {@code System} at all.</li>
+ *   <li><b>Reading the OS from the innermost ring.</b> Process environment access belongs to the adapter;
+ *       the settings reader receives it through a core-owned port.</li>
  * </ul>
  */
 class FabricHexagonBoundaryTest {
@@ -43,12 +42,28 @@ class FabricHexagonBoundaryTest {
     }
 
     @Test
+    void coreDependsOnlyOnItsOwnContractsModelsAndTheJdk() {
+        noClasses().that().resideInAnyPackage("com.cascada.fabric.domain..", "com.cascada.fabric.application..")
+                .should().dependOnClassesThat().resideOutsideOfPackages(
+                        "com.cascada.fabric.domain..", "com.cascada.fabric.application..", "java..")
+                .check(moduleClasses);
+    }
+
+    @Test
     void domainDoesNotDependOnApplicationOrAdapter() {
         noClasses().that().resideInAPackage("com.cascada.fabric.domain..")
                 .should().dependOnClassesThat().resideInAnyPackage(
-                        "com.cascada.fabric.application.service..",
+                        "com.cascada.fabric.application..",
                         "com.cascada.fabric.adapter..")
                 .because("dependencies point inwards only")
+                .check(moduleClasses);
+    }
+
+    @Test
+    void domainDoesNotPerformResourceOrFilesystemIo() {
+        noClasses().that().resideInAPackage("com.cascada.fabric.domain..")
+                .should().dependOnClassesThat().resideInAnyPackage("java.io..", "java.nio.file..")
+                .because("resource loading belongs in an adapter")
                 .check(moduleClasses);
     }
 

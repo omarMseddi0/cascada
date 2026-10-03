@@ -46,6 +46,8 @@ spec:
           value: ${driverHost}
         - name: HADOOP_USER_NAME
           value: hadoop
+        - name: HADOOP_CONF_DIR
+          value: ${hadoopConfDir}
         volumeMounts:
         - name: spark-config-volume
           mountPath: ${sparkJsonMount}

@@ -16,8 +16,4 @@
     <name>dfs.client.use.datanode.hostname</name>
     <value>false</value>
   </property>
-  <property>
-    <name>dfs.replication</name>
-    <value>1</value>
-  </property>
 </configuration>

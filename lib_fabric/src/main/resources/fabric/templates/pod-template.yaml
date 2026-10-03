@@ -11,6 +11,8 @@ spec:
     env:
     - name: HADOOP_USER_NAME
       value: hadoop
+    - name: HADOOP_CONF_DIR
+      value: ${hadoopConfDir}
     volumeMounts:
     - name: hadoop-config-core
       mountPath: ${coreSiteMount}

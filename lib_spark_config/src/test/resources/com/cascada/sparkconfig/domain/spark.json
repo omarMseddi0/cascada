@@ -1,0 +1,107 @@
+{
+    "common": {
+      "spark.executor.instances": "3",
+      "spark.submit.deployMode": "client",
+      "spark.driver.host": "spark-master.default.svc.cluster.local",
+      "spark.driver.port": "8002",
+      "spark.blockManager.port": "8001",
+      "spark.kubernetes.namespace": "default",
+      "spark.kubernetes.container.image": "docker.registry.local:5000/spark:python3-java17-hadoop",
+      "spark.kubernetes.container.image.pullPolicy": "IfNotPresent",
+      "spark.kubernetes.authenticate.driver.serviceAccountName": "spark",
+      "spark.kubernetes.authenticate.executor.serviceAccountName": "spark",
+      "spark.executor.memory": "18g",
+      "spark.executor.cores": "18",
+      "spark.kubernetes.executor.limit.cores": "19",
+      "spark.driver.memory": "2g",
+      "spark.authenticate": "false",
+      "spark.hadoop.security.authentication": "simple",
+      "spark.hadoop.security.authorization": "false",
+      "spark.driver.bindAddress": "0.0.0.0",
+      "spark.scheduler.mode": "FAIR"
+    },
+    "executor_pod_template": {
+      "spark.kubernetes.executor.podTemplateFile": "/opt/spark/templates/executor-pod-template.yaml"
+    },
+    "hdfs": {
+      "spark.hadoop.dfs.client.read.shortcircuit": "true",
+      "spark.hadoop.dfs.client.use.datanode.hostname": "false",
+      "spark.hadoop.dfs.domain.socket.path": "/var/lib/hadoop-hdfs/dn_socket/dn.sock",
+      "spark.hadoop.dfs.block.local-path-access.user": "hadoop,root",
+      "spark.hadoop.fs.hdfs.impl.disable.cache": "true",
+      "spark.hadoop.dfs.replication": "1"
+    },
+    "hadoop_permissions": {
+      "spark.hadoop.fs.permissions.umask-mode": "000",
+      "spark.hadoop.dfs.permissions": "false",
+      "spark.hadoop.fs.permission.umask-mode": "000"
+    },
+    "delta": {
+      "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+      "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+      "spark.sql.files.maxPartitionBytes": "267108864",
+      "spark.databricks.delta.optimize.maxFileSize": "267108864",
+      "spark.sql.adaptive.advisoryPartitionSizeInBytes": "267108864"
+    },
+    "metrics": {
+      "spark.metrics.conf.*.sink.graphite.class": "org.apache.spark.metrics.sink.GraphiteSink",
+      "spark.metrics.conf.*.sink.graphite.host": "spark-dashboard-influx.default.svc.cluster.local",
+      "spark.metrics.conf.*.sink.graphite.port": "2003",
+      "spark.metrics.conf.*.sink.graphite.period": "5",
+      "spark.metrics.conf.*.sink.graphite.unit": "seconds",
+      "spark.metrics.conf.*.sink.graphite.prefix": "spark",
+      "spark.metrics.appStatusSource.enabled": "true",
+      "spark.metrics.conf.*.source.jvm.class": "org.apache.spark.metrics.source.JvmSource",
+      "spark.metrics.namespace": "omar_mseddi"
+    },
+    "dynamic_allocation": {
+      "spark.dynamicAllocation.enabled": "true",
+      "spark.dynamicAllocation.shuffleTracking.enabled": "true",
+      "spark.dynamicAllocation.minExecutors": "2",
+      "spark.dynamicAllocation.maxExecutors": "3",
+      "spark.dynamicAllocation.executorIdleTimeout": "60s",
+      "spark.dynamicAllocation.schedulerBacklogTimeout": "60s"
+    },
+    "adaptive": {
+      "spark.sql.adaptive.enabled": "true",
+      "spark.sql.adaptive.skewJoin.enabled": "true",
+      "spark.sql.adaptive.coalescePartitions.enabled": "true",
+      "spark.sql.adaptive.localShuffleReader.enabled": "true"
+    },
+    "shuffle": {
+      "spark.default.parallelism": "254",
+      "spark.sql.shuffle.partitions": "254"
+    },
+    "arrow": {
+      "spark.sql.execution.arrow.pyspark.enabled": "true",
+      "spark.sql.hive.filesourcePartitionFileCacheSize": "924288000"
+    },
+    "api": {
+      "spark.kubernetes.executor.apiPollingInterval": "65s",
+      "spark.kubernetes.driver.connectionTimeout": "70000"
+    },
+    "compression": {
+      "spark.sql.parquet.compression.codec": "gzip",
+      "spark.hadoop.io.compression.codec.gz.level": "9"
+    },
+    "additional": {
+      "spark.jars": "/app/jars/antlr4-runtime-4.9.3.jar,/app/jars/delta-spark_2.12-3.3.0.jar,/app/jars/delta-storage-3.3.0.jar",
+      "spark.sql.statistics.size.autoUpdate.enabled": "true",
+      "spark.sql.join.preferSortMergeJoin": "true",
+      "spark.sql.parquet.mergeSchema": "true",
+      "spark.sql.files.ignoreMissingFiles": "true",
+      "spark.databricks.optimizer.dynamicFilePruning": "true",
+      "spark.sql.files.ignoreCorruptFiles": "true",
+      "spark.driver.maxResultSize": "6g",
+      "fs.permissions.umask-mode": "000",
+      "hadoop.fs.permissions.umask-mode": "000",
+      "fs.hdfs.impl.disable.cache": "true",
+      "spark.hadoop.fs.permissions.umask-mode": "000",
+      "spark.databricks.delta.schema.autoMerge.enabled": "true",
+      "spark.databricks.delta.retentionDurationCheck.enabled": "false",
+      "spark.databricks.delta.autoOptimize.optimizeWrite": "true",
+      "spark.databricks.delta.autoOptimize.autoCompact": "true",
+      "spark.kubernetes.executor.resources.requests.ephemeral-storage": "30Gi",
+      "spark.kubernetes.executor.resources.limits.ephemeral-storage": "30Gi"
+    }
+  }

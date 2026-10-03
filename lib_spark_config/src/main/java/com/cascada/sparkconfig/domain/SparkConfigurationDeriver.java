@@ -2,6 +2,7 @@ package com.cascada.sparkconfig.domain;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * The zero-config derivation (plan §6.6, Appendix G; ARCHITECTURE §8). A pure function that turns
@@ -26,29 +27,25 @@ public final class SparkConfigurationDeriver {
 
     static final long ADVISORY_PARTITION_SIZE_BYTES = 267_108_864L;
     static final String REFERENCE_DRIVER_MEMORY = "2g";
+    static final int REFERENCE_INITIAL_EXECUTOR_COUNT = 3;
     static final int REFERENCE_SHUFFLE_PARTITIONS = 254;
     static final String DELTA_EXTENSION = "io.delta.sql.DeltaSparkSessionExtension";
     static final String DELTA_CATALOG = "org.apache.spark.sql.delta.catalog.DeltaCatalog";
 
     /** Splits one executor's RAM between heap, Gluten off-heap, and overhead (invariant: sum <= RAM). */
     public SparkMemorySplit deriveMemorySplit(int randomAccessMemoryGigabytes, boolean glutenOffHeapEnabled) {
-        if (randomAccessMemoryGigabytes <= 0) {
-            throw new IllegalArgumentException("RAM must be > 0 gigabytes, but was: " + randomAccessMemoryGigabytes);
+        if (randomAccessMemoryGigabytes < 2) {
+            throw new IllegalArgumentException("RAM must be at least 2 GiB to fit the minimum supported "
+                    + "executor heap and explicit Spark overhead, but was: " + randomAccessMemoryGigabytes + " GiB");
         }
         if (!glutenOffHeapEnabled) {
-            int overhead = randomAccessMemoryGigabytes == 1 ? 0 : Math.max(1, randomAccessMemoryGigabytes / 10);
+            int overhead = Math.max(1, randomAccessMemoryGigabytes / 10);
             return new SparkMemorySplit(randomAccessMemoryGigabytes - overhead, 0, overhead);
         }
         // Reserve at least 1 GiB overhead, give the majority of the remainder to Velox off-heap.
         int overhead = Math.max(1, randomAccessMemoryGigabytes / 10);
         int remaining = randomAccessMemoryGigabytes - overhead;
-        if (remaining <= 0) {
-            // Budget too small to carve out off-heap: keep the whole budget as JVM heap so the
-            // split never exceeds the container RAM (the old fallback could request RAM + 1 GiB,
-            // which Kubernetes answers with an OOMKill).
-            return new SparkMemorySplit(randomAccessMemoryGigabytes, 0, 0);
-        }
-        int offHeap = (remaining * 6) / 10;
+        int offHeap = (int) (((long) remaining * 6) / 10);
         int heap = remaining - offHeap;
         return new SparkMemorySplit(heap, offHeap, overhead);
     }
@@ -58,9 +55,12 @@ public final class SparkConfigurationDeriver {
                                                                      int processorCoreCount,
                                                                      ExecutorPlacement executorPlacement,
                                                                      WorkloadType workloadType) {
-        if (processorCoreCount <= 0) {
-            throw new IllegalArgumentException("core count must be > 0, but was: " + processorCoreCount);
+        if (processorCoreCount <= 0 || processorCoreCount == Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("core count must be between 1 and " + (Integer.MAX_VALUE - 1)
+                    + ", but was: " + processorCoreCount);
         }
+        Objects.requireNonNull(executorPlacement, "executorPlacement");
+        Objects.requireNonNull(workloadType, "workloadType");
 
         SparkMemorySplit memorySplit =
                 deriveMemorySplit(randomAccessMemoryGigabytes, workloadType.isGlutenOffHeapEnabled());
@@ -71,6 +71,13 @@ public final class SparkConfigurationDeriver {
         entries.put("spark.executor.memory", memorySplit.heapAsSparkMemoryString());
         entries.put("spark.executor.cores", Integer.toString(processorCoreCount));
         entries.put("spark.kubernetes.executor.limit.cores", Integer.toString(processorCoreCount + 1));
+        int minimumExecutors = executorPlacement.minimumExecutors();
+        int maximumExecutors = executorPlacement.maximumExecutors();
+        // Keep the startup target within the same placement budget as dynamic allocation. The
+        // reference placement remains at three executors, matching the golden profile.
+        int initialExecutors = Math.max(minimumExecutors,
+                Math.min(REFERENCE_INITIAL_EXECUTOR_COUNT, maximumExecutors));
+        entries.put("spark.executor.instances", Integer.toString(initialExecutors));
         entries.put("spark.driver.memory", REFERENCE_DRIVER_MEMORY);
         if (memorySplit.offHeapGigabytes() > 0) {
             entries.put("spark.memory.offHeap.enabled", "true");
@@ -108,8 +115,8 @@ public final class SparkConfigurationDeriver {
         // On Kubernetes there is no external shuffle service, so dynamic allocation is only legal
         // with shuffle tracking — without this key Spark refuses to start the application at all.
         entries.put("spark.dynamicAllocation.shuffleTracking.enabled", "true");
-        entries.put("spark.dynamicAllocation.minExecutors", Integer.toString(executorPlacement.minimumExecutors()));
-        entries.put("spark.dynamicAllocation.maxExecutors", Integer.toString(executorPlacement.maximumExecutors()));
+        entries.put("spark.dynamicAllocation.minExecutors", Integer.toString(minimumExecutors));
+        entries.put("spark.dynamicAllocation.maxExecutors", Integer.toString(maximumExecutors));
 
         // --- Placement compiled to a Kubernetes node-selector hint ---
         entries.put("spark.kubernetes.node.selector." + executorPlacement.nodeSelectorLabel(),

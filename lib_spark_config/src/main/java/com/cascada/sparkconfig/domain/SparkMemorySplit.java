@@ -5,8 +5,8 @@ package com.cascada.sparkconfig.domain;
  *
  * <p>The invariant {@code heap + offHeap + overhead <= totalRam} is what stops a misconfiguration
  * from OOM-ing in production (plan §5.1, §6.6) — it is asserted as a property over a wide knob
- * matrix. When the workload does not use Gluten off-heap (the {@code MIXED} reference), the whole
- * budget is heap, matching the golden config's single {@code spark.executor.memory} value.
+ * matrix. When the workload does not use Gluten off-heap (the {@code MIXED} reference), the budget is
+ * split between heap and explicit Spark overhead; the reference keeps the overhead within the RAM knob.
  */
 public record SparkMemorySplit(int heapGigabytes, int offHeapGigabytes, int overheadGigabytes) {
 

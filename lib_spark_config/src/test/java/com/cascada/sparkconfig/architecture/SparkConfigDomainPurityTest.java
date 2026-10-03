@@ -27,7 +27,8 @@ class SparkConfigDomainPurityTest {
     @Test
     void derivationDomainDependsOnlyOnTheJdk() {
         noClasses()
-                .should().dependOnClassesThat().resideOutsideOfPackages("com.cascada..", "java..")
+                .should().dependOnClassesThat().resideOutsideOfPackages(
+                        "com.cascada.sparkconfig.domain..", "java..")
                 .check(domainClasses);
     }
 }

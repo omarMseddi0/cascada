@@ -1,5 +1,6 @@
 package com.cascada.sparkconfig.domain;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -26,8 +27,7 @@ public final class StaticSparkInfrastructureSettings {
     public static Map<String, String> referenceInfrastructure() {
         Map<String, String> entries = new LinkedHashMap<>();
 
-        // --- common (infrastructure subset; executor/driver memory+cores are derived) ---
-        entries.put("spark.executor.instances", "3");
+        // --- common (infrastructure subset; executor/driver sizing is derived) ---
         entries.put("spark.submit.deployMode", "client");
         entries.put("spark.driver.host", "spark-master.default.svc.cluster.local");
         entries.put("spark.driver.port", "8002");
@@ -52,7 +52,6 @@ public final class StaticSparkInfrastructureSettings {
         entries.put("spark.hadoop.dfs.domain.socket.path", "/var/lib/hadoop-hdfs/dn_socket/dn.sock");
         entries.put("spark.hadoop.dfs.block.local-path-access.user", "hadoop,root");
         entries.put("spark.hadoop.fs.hdfs.impl.disable.cache", "true");
-        entries.put("spark.hadoop.dfs.replication", "1");
 
         // --- hadoop permissions ---
         entries.put("spark.hadoop.fs.permissions.umask-mode", "000");
@@ -70,8 +69,7 @@ public final class StaticSparkInfrastructureSettings {
         entries.put("spark.metrics.conf.*.source.jvm.class", "org.apache.spark.metrics.source.JvmSource");
         entries.put("spark.metrics.namespace", "omar_mseddi");
 
-        // --- dynamic allocation extras (enabled/min/max are derived) ---
-        entries.put("spark.dynamicAllocation.shuffleTracking.enabled", "true");
+        // --- dynamic allocation extras (enablement and bounds are derived) ---
         entries.put("spark.dynamicAllocation.executorIdleTimeout", "60s");
         entries.put("spark.dynamicAllocation.schedulerBacklogTimeout", "60s");
 
@@ -92,20 +90,21 @@ public final class StaticSparkInfrastructureSettings {
         entries.put("spark.sql.statistics.size.autoUpdate.enabled", "true");
         entries.put("spark.sql.join.preferSortMergeJoin", "true");
         entries.put("spark.sql.parquet.mergeSchema", "true");
-        entries.put("spark.sql.files.ignoreMissingFiles", "true");
+        // Missing or corrupt source files must fail a query instead of silently returning partial data.
+        entries.put("spark.sql.files.ignoreMissingFiles", "false");
         entries.put("spark.databricks.optimizer.dynamicFilePruning", "true");
-        entries.put("spark.sql.files.ignoreCorruptFiles", "true");
+        entries.put("spark.sql.files.ignoreCorruptFiles", "false");
         entries.put("spark.driver.maxResultSize", "6g");
         entries.put("fs.permissions.umask-mode", "000");
         entries.put("hadoop.fs.permissions.umask-mode", "000");
         entries.put("fs.hdfs.impl.disable.cache", "true");
         entries.put("spark.databricks.delta.schema.autoMerge.enabled", "true");
-        entries.put("spark.databricks.delta.retentionDurationCheck.enabled", "false");
+        entries.put("spark.databricks.delta.retentionDurationCheck.enabled", "true");
         entries.put("spark.databricks.delta.autoOptimize.optimizeWrite", "true");
         entries.put("spark.databricks.delta.autoOptimize.autoCompact", "true");
         entries.put("spark.kubernetes.executor.resources.requests.ephemeral-storage", "30Gi");
         entries.put("spark.kubernetes.executor.resources.limits.ephemeral-storage", "30Gi");
 
-        return entries;
+        return Collections.unmodifiableMap(entries);
     }
 }

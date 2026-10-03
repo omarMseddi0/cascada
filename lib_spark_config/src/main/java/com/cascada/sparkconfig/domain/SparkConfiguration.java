@@ -1,5 +1,6 @@
 package com.cascada.sparkconfig.domain;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -12,7 +13,7 @@ import java.util.TreeMap;
 public record SparkConfiguration(Map<String, String> entries) {
 
     public SparkConfiguration {
-        entries = new TreeMap<>(entries);
+        entries = Collections.unmodifiableMap(new TreeMap<>(entries));
     }
 
     public Optional<String> get(String key) {

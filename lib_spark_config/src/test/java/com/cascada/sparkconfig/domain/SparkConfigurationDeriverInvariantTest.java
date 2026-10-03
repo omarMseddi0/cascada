@@ -25,6 +25,25 @@ class SparkConfigurationDeriverInvariantTest {
         assertThat(split.heapGigabytes()).isPositive();
     }
 
+    @Test
+    void smallestSupportedMemoryBudgetIncludesExplicitSparkOverhead() {
+        for (boolean glutenOffHeapEnabled : new boolean[]{false, true}) {
+            SparkMemorySplit split = deriver.deriveMemorySplit(2, glutenOffHeapEnabled);
+            assertThat(split.heapGigabytes()).isEqualTo(1);
+            assertThat(split.overheadGigabytes()).isEqualTo(1);
+            assertThat(split.totalGigabytes()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void largeGlutenMemoryBudgetDoesNotOverflowIntermediateArithmetic() {
+        SparkMemorySplit split = deriver.deriveMemorySplit(Integer.MAX_VALUE, true);
+
+        assertThat(split.heapGigabytes()).isPositive();
+        assertThat(split.offHeapGigabytes()).isPositive();
+        assertThat(split.totalGigabytes()).isEqualTo(Integer.MAX_VALUE);
+    }
+
     @Property
     void limitCoresIsAlwaysExactlyOneAboveExecutorCores(
             @ForAll @IntRange(min = 1, max = 64) int processorCoreCount) {
@@ -56,6 +75,8 @@ class SparkConfigurationDeriverInvariantTest {
         assertThat(minimum).isEqualTo(placement.minimumExecutors());
         assertThat(maximum).isEqualTo(placement.maximumExecutors());
         assertThat(minimum).isLessThanOrEqualTo(maximum);
+        int initial = Integer.parseInt(configuration.require("spark.executor.instances"));
+        assertThat(initial).isBetween(minimum, maximum);
     }
 
     @Test
@@ -88,11 +109,36 @@ class SparkConfigurationDeriverInvariantTest {
     }
 
     @Test
-    void rejectsNonPositiveCoreCountAndRam() {
+    void rejectsNonPositiveCoreCountAndRamBelowMinimumSupportedSplit() {
         assertThatThrownBy(() -> deriver.deriveSparkConfigurationFromThreeKnobs(
                 16, 0, ExecutorPlacement.SPREAD_ACROSS_NODES, WorkloadType.MIXED))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> deriver.deriveMemorySplit(0, false))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> deriver.deriveMemorySplit(1, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("2 GiB");
+        assertThatThrownBy(() -> deriver.deriveMemorySplit(1, true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Spark overhead");
+        assertThatThrownBy(() -> deriver.deriveSparkConfigurationFromThreeKnobs(
+                1, 4, ExecutorPlacement.DEDICATED_NODE_POOL, WorkloadType.MIXED))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> deriver.deriveSparkConfigurationFromThreeKnobs(
+                16, Integer.MAX_VALUE, ExecutorPlacement.DEDICATED_NODE_POOL, WorkloadType.MIXED))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("core count");
+    }
+
+    @Test
+    void configurationEntriesAreDefensivelyCopiedAndReadOnly() {
+        java.util.Map<String, String> source = new java.util.HashMap<>();
+        source.put("spark.executor.memory", "8g");
+        SparkConfiguration configuration = new SparkConfiguration(source);
+
+        source.put("spark.executor.memory", "16g");
+        assertThat(configuration.require("spark.executor.memory")).isEqualTo("8g");
+        assertThatThrownBy(() -> configuration.entries().put("spark.executor.cores", "2"))
+                .isInstanceOf(UnsupportedOperationException.class);
     }
 }

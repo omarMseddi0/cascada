@@ -1,29 +1,29 @@
 package com.cascada.sparkconfig.domain;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Iterator;
 import java.util.Map;
-import java.util.TreeMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * FULL parity gate: proves the Java module reproduces <em>every</em> key/value of
  * {@code data_collector/src/spark.json} — not just the derived subset. The assembled full
  * configuration ({@link StaticSparkInfrastructureSettings} + {@link SparkConfigurationDeriver}) must
- * contain each golden key with the exact golden value; the only keys it may have <em>beyond</em> the
- * golden file are the placement node-selector hints the derivation adds. This is the answer to "are all
- * spark.json sections the same in the Java module?" — by construction and assertion, yes.
+ * retain the golden values except for documented fail-closed corrections and the storage replication
+ * value, which is deliberately inherited from the storage system. The only keys it may have
+ * <em>beyond</em> the golden file are the placement node-selector hints the derivation adds.
  */
 class FullSparkConfigParityTest {
+
+    private static final Map<String, String> FAIL_CLOSED_CORRECTIONS = Map.of(
+            "spark.sql.files.ignoreMissingFiles", "false",
+            "spark.sql.files.ignoreCorruptFiles", "false",
+            "spark.databricks.delta.retentionDurationCheck.enabled", "true");
+    private static final String INHERITED_STORAGE_REPLICATION_KEY = "spark.hadoop.dfs.replication";
 
     private static final SparkConfigurationDeriver DERIVER = new SparkConfigurationDeriver();
     private static final SparkSessionConfigurationAssembler ASSEMBLER = new SparkSessionConfigurationAssembler();
@@ -33,44 +33,28 @@ class FullSparkConfigParityTest {
 
     @BeforeAll
     static void loadGoldenAndAssemble() throws IOException {
-        Path goldenPath = locateGoldenSparkJson();
-        assumeTrue(goldenPath != null, "golden spark.json not found relative to module; skipping full parity");
-
-        JsonNode root = new ObjectMapper().readTree(Files.readString(goldenPath));
-        Map<String, String> flattened = new TreeMap<>();
-        Iterator<Map.Entry<String, JsonNode>> groups = root.fields();
-        while (groups.hasNext()) {
-            JsonNode group = groups.next().getValue();
-            Iterator<Map.Entry<String, JsonNode>> leaves = group.fields();
-            while (leaves.hasNext()) {
-                Map.Entry<String, JsonNode> leaf = leaves.next();
-                flattened.put(leaf.getKey(), leaf.getValue().asText());
-            }
-        }
-        goldenFlattened = flattened;
+        goldenFlattened = SparkJsonGoldenFixture.loadFlattenedConfiguration();
 
         SparkConfiguration derived = DERIVER.deriveSparkConfigurationFromThreeKnobs(
                 18, 18, ExecutorPlacement.DEDICATED_NODE_POOL, WorkloadType.MIXED);
         assembledFull = ASSEMBLER.assembleFullConfiguration(derived);
     }
 
-    private static Path locateGoldenSparkJson() {
-        Path[] candidates = {
-                Path.of("..", "..", "data_collector", "src", "spark.json"),
-                Path.of("..", "data_collector", "src", "spark.json"),
-                Path.of("data_collector", "src", "spark.json")
-        };
-        for (Path candidate : candidates) {
-            if (Files.exists(candidate)) {
-                return candidate;
-            }
-        }
-        return null;
-    }
-
     @Test
     void everyGoldenKeyIsReproducedWithTheExactValue() {
         for (Map.Entry<String, String> golden : goldenFlattened.entrySet()) {
+            if (golden.getKey().equals(INHERITED_STORAGE_REPLICATION_KEY)) {
+                assertThat(assembledFull.containsKey(INHERITED_STORAGE_REPLICATION_KEY))
+                        .as("storage replication follows the storage system's configured durability policy")
+                        .isFalse();
+                continue;
+            }
+            if (FAIL_CLOSED_CORRECTIONS.containsKey(golden.getKey())) {
+                assertThat(assembledFull.require(golden.getKey()))
+                        .as("unsafe reference value for %s is deliberately corrected", golden.getKey())
+                        .isEqualTo(FAIL_CLOSED_CORRECTIONS.get(golden.getKey()));
+                continue;
+            }
             if (golden.getKey().equals("spark.executor.memory")) {
                 assertThat(assembledFull.get(golden.getKey())).contains("17g");
                 continue;
@@ -117,5 +101,23 @@ class FullSparkConfigParityTest {
         assertThat(ASSEMBLER.requiresRestart("spark.executor.cores")).isTrue();
         assertThat(ASSEMBLER.requiresRestart("spark.dynamicAllocation.maxExecutors")).isTrue();
         assertThat(ASSEMBLER.isLiveMutable("spark.executor.memory")).isFalse();
+    }
+
+    @Test
+    void missingAndCorruptFilesFailAndDeltaRetentionCheckRemainsEnabled() {
+        FAIL_CLOSED_CORRECTIONS.forEach((key, value) -> assertThat(assembledFull.require(key))
+                .as("safe setting %s", key).isEqualTo(value));
+    }
+
+    @Test
+    void storageReplicationIsNotOverriddenByTheSparkProfile() {
+        assertThat(assembledFull.containsKey(INHERITED_STORAGE_REPLICATION_KEY)).isFalse();
+    }
+
+    @Test
+    void fixedInfrastructureMapCannotBeMutatedByCallers() {
+        assertThatThrownBy(() -> StaticSparkInfrastructureSettings.referenceInfrastructure()
+                .put("spark.executor.memory", "1g"))
+                .isInstanceOf(UnsupportedOperationException.class);
     }
 }

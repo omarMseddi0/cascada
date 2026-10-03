@@ -29,6 +29,7 @@ public final class SparkSessionConfigurationAssembler {
             "spark.executor.memory",
             "spark.driver.cores",
             "spark.executor.cores",
+            "spark.executor.instances",
             "spark.dynamicAllocation.minExecutors",
             "spark.dynamicAllocation.maxExecutors");
 

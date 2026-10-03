@@ -1,6 +1,6 @@
 package com.cascada.cache.application.port.out;
 
-import com.cascada.cache.domain.GapPlan;
+import com.cascada.cache.domain.time.GapPlan;
 
 /**
  * Rewrites a physical SQL string so it scans only the gap (the buckets not in cache). The cache

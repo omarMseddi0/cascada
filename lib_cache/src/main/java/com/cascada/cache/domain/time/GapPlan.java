@@ -1,6 +1,5 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.time;
 
-import com.cascada.cache.domain.time.TimeRange;
 
 import java.util.List;
 import java.util.Optional;

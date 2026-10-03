@@ -1,7 +1,7 @@
 package com.cascada.sql.adapter.calcite;
 
 import com.cascada.cache.application.service.ExecuteLogicalQueryService;
-import com.cascada.cache.domain.GapPlan;
+import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.safety.CacheConfiguration;
 import com.cascada.cache.domain.safety.SafetyRuleRegistry;

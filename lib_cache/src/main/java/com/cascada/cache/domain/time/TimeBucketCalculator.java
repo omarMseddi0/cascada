@@ -1,7 +1,6 @@
 package com.cascada.cache.domain.time;
 
 import com.cascada.cache.domain.CacheConstants;
-import com.cascada.cache.domain.GapPlan;
 
 import java.util.ArrayList;
 import java.util.List;

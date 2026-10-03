@@ -1,6 +1,5 @@
 package com.cascada.cache.domain.time;
 
-import com.cascada.cache.domain.GapPlan;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.constraints.LongRange;

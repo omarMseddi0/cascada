@@ -1,4 +1,4 @@
-package com.cascada.app.bootstrap;
+package com.cascada.app.adapter.out.configuration;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,10 +10,10 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** Reads the flat Spark JSON ConfigMap mounted by the Kubernetes deployment. */
-final class SparkConfigurationFileReader {
+public final class SparkConfigurationFileReader {
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    Map<String, String> read(String path) {
+    public Map<String, String> read(String path) {
         if (path == null || path.isBlank()) return Map.of();
         try {
             Map<String, Object> raw = JSON.readValue(Files.readString(Path.of(path)), new TypeReference<>() { });

@@ -4,7 +4,7 @@ import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
-import com.cascada.cache.application.service.CacheExecutionConfiguration;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.application.service.WarmingOrchestrator;
 import com.cascada.cache.domain.query.CanonicalQueryObject;

@@ -1,4 +1,4 @@
-package com.cascada.cache.application.service;
+package com.cascada.cache.application.config;
 
 import com.cascada.cache.domain.CacheConstants;
 

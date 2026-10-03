@@ -58,7 +58,7 @@ class CascadaEngineFactoryTest {
         executor = new CapturingExecutor();
         // Literal settings, no environment read: the factory is deterministic by construction.
         EngineSettings settings = new EngineSettings(
-                com.cascada.cache.application.service.CacheExecutionConfiguration.defaults(),
+                com.cascada.cache.application.config.CacheExecutionConfiguration.defaults(),
                 "redis://unused:6379",
                 "traffic",
                 "/tmp/traffic",
@@ -117,7 +117,7 @@ class CascadaEngineFactoryTest {
     @Test
     void configuredTimeColumnIsRecognisedByCanonicalization() {
         EngineSettings settings = new EngineSettings(
-                new com.cascada.cache.application.service.CacheExecutionConfiguration(86_400, 300, "event_time"),
+                new com.cascada.cache.application.config.CacheExecutionConfiguration(86_400, 300, "event_time"),
                 "redis://unused:6379", "traffic", "/tmp/traffic", true, 10);
         CascadaEngineFactory configured = new CascadaEngineFactory(settings, executor);
 

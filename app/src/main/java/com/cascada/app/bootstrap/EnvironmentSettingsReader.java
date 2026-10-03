@@ -1,6 +1,6 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.cache.application.service.CacheExecutionConfiguration;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.spark.application.port.out.EnvironmentPort;
 
 /**

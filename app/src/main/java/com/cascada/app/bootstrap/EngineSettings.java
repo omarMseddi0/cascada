@@ -1,6 +1,6 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.cache.application.service.CacheExecutionConfiguration;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
 
 /**
  * Every deployment-time decision the composition root needs, in one place.

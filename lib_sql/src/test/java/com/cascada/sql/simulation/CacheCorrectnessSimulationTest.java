@@ -2,7 +2,7 @@ package com.cascada.sql.simulation;
 
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.service.CacheExecutionConfiguration;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;

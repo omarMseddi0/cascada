@@ -2,7 +2,6 @@ package com.cascada.cache.domain.safety;
 
 import com.cascada.cache.domain.time.CacheTimeConstants;
 
-
 import java.util.Optional;
 import java.util.Set;
 

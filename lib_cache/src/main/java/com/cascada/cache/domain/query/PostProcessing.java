@@ -1,6 +1,5 @@
 package com.cascada.cache.domain.query;
 
-
 import java.util.List;
 import java.util.Optional;
 

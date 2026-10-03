@@ -2,7 +2,6 @@ package com.cascada.cache.application.config;
 
 import com.cascada.cache.domain.time.CacheTimeConstants;
 
-
 /**
  * The few knobs the execution engine needs: the cache bucket width, the fixed internal storage step,
  * and the physical time column name. Defaults mirror the reference engine (24h buckets, 300s step,

@@ -1,6 +1,5 @@
 package com.cascada.cache.domain.key;
 
-
 import com.cascada.identity.domain.LineageHash;
 import com.cascada.identity.domain.PolicyVersion;
 import com.cascada.identity.domain.QueryHash;

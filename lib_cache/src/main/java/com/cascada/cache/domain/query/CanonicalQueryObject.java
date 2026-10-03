@@ -1,10 +1,7 @@
 package com.cascada.cache.domain.query;
 
-import com.cascada.cache.domain.time.TimeRange;
-
-
-
 import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.time.TimeRange;
 
 import java.util.List;
 import java.util.Optional;

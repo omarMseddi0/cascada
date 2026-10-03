@@ -1,6 +1,7 @@
 package com.cascada.identity.domain;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * A deterministic hash over the set of source-table versions a cache entry depends on
@@ -31,13 +32,17 @@ public record LineageHash(String value) {
     }
 
     /**
-     * Builds the canonical, order-independent string that a hashing adapter signs to
-     * produce the lineage hash: source table versions sorted then joined. The sort makes
-     * the result independent of the order tables appear in the query.
+     * Builds the canonical, order-independent string that a hashing adapter signs to produce the
+     * lineage hash. Duplicate source versions are removed, the remaining values are sorted, and each
+     * value is encoded as its Java string length followed by {@code :} and the value. This format
+     * replaces delimiter joining because source values may themselves contain the delimiter. The
+     * resulting serialization is independent of source order and unambiguous when decoded.
      */
     public static String canonicalSourceVersionString(List<String> sourceTableVersions) {
         return sourceTableVersions.stream()
+                .distinct()
                 .sorted()
-                .reduce("", (left, right) -> left.isEmpty() ? right : left + "|" + right);
+                .map(version -> version.length() + ":" + version)
+                .collect(Collectors.joining());
     }
 }

@@ -84,13 +84,27 @@ class IdentityValueObjectTest {
         void canonicalSourceVersionStringIsOrderIndependent() {
             String ordered = LineageHash.canonicalSourceVersionString(List.of("table_a:5", "table_b:2"));
             String reversed = LineageHash.canonicalSourceVersionString(List.of("table_b:2", "table_a:5"));
-            assertThat(ordered).isEqualTo(reversed).isEqualTo("table_a:5|table_b:2");
+            assertThat(ordered).isEqualTo(reversed).isEqualTo("9:table_a:59:table_b:2");
         }
 
         @Test
         void canonicalSourceVersionStringHandlesSingleAndEmpty() {
-            assertThat(LineageHash.canonicalSourceVersionString(List.of("only:1"))).isEqualTo("only:1");
+            assertThat(LineageHash.canonicalSourceVersionString(List.of("only:1"))).isEqualTo("6:only:1");
             assertThat(LineageHash.canonicalSourceVersionString(List.of())).isEmpty();
+        }
+
+        @Test
+        void sourceVersionsCannotCollideWithJoinedOrEmptyElements() {
+            assertThat(LineageHash.canonicalSourceVersionString(List.of("a:1|b:2")))
+                    .isNotEqualTo(LineageHash.canonicalSourceVersionString(List.of("a:1", "b:2")));
+            assertThat(LineageHash.canonicalSourceVersionString(List.of("")))
+                    .isNotEqualTo(LineageHash.canonicalSourceVersionString(List.of()));
+        }
+
+        @Test
+        void duplicateSourceVersionsDoNotChangeTheCanonicalSet() {
+            assertThat(LineageHash.canonicalSourceVersionString(List.of("table_a:5", "table_a:5")))
+                    .isEqualTo(LineageHash.canonicalSourceVersionString(List.of("table_a:5")));
         }
     }
 

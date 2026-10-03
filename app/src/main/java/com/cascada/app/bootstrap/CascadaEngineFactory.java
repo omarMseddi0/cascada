@@ -1,5 +1,7 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.app.config.EngineSettings;
+
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;

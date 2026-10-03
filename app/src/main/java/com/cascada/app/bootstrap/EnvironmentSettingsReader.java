@@ -1,5 +1,7 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.app.config.EngineSettings;
+
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.spark.application.port.out.EnvironmentPort;
 

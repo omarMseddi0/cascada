@@ -1,5 +1,7 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.app.config.EngineSettings;
+
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.out.QueryExecutorPort;

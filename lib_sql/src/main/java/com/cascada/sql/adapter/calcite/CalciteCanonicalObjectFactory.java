@@ -1,6 +1,5 @@
 package com.cascada.sql.adapter.calcite;
 
-import com.cascada.sql.domain.AggregateNormalizer;
 import com.cascada.sql.domain.TimeDimensionMap;
 import com.cascada.sql.domain.UnsupportedSqlException;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
@@ -8,17 +7,14 @@ import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.query.OrderByClause;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
-import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
-import org.apache.calcite.sql.SqlNumericLiteral;
 import org.apache.calcite.sql.SqlOrderBy;
 import org.apache.calcite.sql.SqlSelect;
 
@@ -67,20 +63,23 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
     private static final Set<String> AGGREGATE_FUNCTION_NAMES = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX");
 
     private final AggregateNormalizer aggregateNormalizer = new AggregateNormalizer();
+    private final SqlCacheabilityGuard cacheabilityGuard = new SqlCacheabilityGuard();
+    private final CanonicalTimeSeriesAnalyzer timeSeriesAnalyzer = new CanonicalTimeSeriesAnalyzer();
 
     public CanonicalQueryObject extractCanonicalObjectFromSql(String sql) {
         return extractCanonicalObjectFromSql(sql, TimeDimensionMap.defaults());
     }
 
     public CanonicalQueryObject extractCanonicalObjectFromSql(String sql, TimeDimensionMap timeDimensionMap) {
-        ParsedQuery parsed = parse(sql);
+        ParsedSqlQuery parsed = parse(sql);
         SqlSelect select = parsed.select();
+        cacheabilityGuard.validate(parsed.root(), select, timeDimensionMap);
 
         List<String> groupBy = extractGroupBy(select);
         Map<String, String> compositeAliases = new LinkedHashMap<>();
         List<String> aggregateSpecs = new ArrayList<>();
         Map<String, AggregateFunction> measureAggregates = new LinkedHashMap<>();
-        List<String> rawAggregateExpressions =
+        List<SqlBasicCall> rawAggregateCalls =
                 extractAggregates(select, aggregateSpecs, compositeAliases, measureAggregates);
         List<String> projectionSignature = extractProjectionSignature(select);
         List<String> logicSignature = extractLogicSignature(select);
@@ -88,14 +87,15 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             logicSignature.add("UNSUPPORTED_MERGE_SHAPE");
         }
 
-        TimeRangeExtraction timeExtraction = extractTimeRangeAndFilters(select, timeDimensionMap);
+        CanonicalTimeRangeExtraction timeExtraction =
+                timeSeriesAnalyzer.extractTimeRangeAndFilters(select, timeDimensionMap);
         if (timeExtraction.timeRange().isEmpty()) {
             throw new UnsupportedSqlException("query has no extractable time range; bypassing cache");
         }
 
-        TimeSeriesShape shape = detectTimeSeries(select, timeDimensionMap);
+        CanonicalTimeSeriesShape shape = timeSeriesAnalyzer.detectTimeSeries(select, timeDimensionMap);
 
-        AggregateNormalizer.NormalizedAggregates normalized = aggregateNormalizer.normalize(rawAggregateExpressions);
+        NormalizedAggregates normalized = aggregateNormalizer.normalize(rawAggregateCalls);
 
         HashComponents hashComponents = new HashComponents(
                 new ArrayList<>(new TreeSet<>(groupBy)),
@@ -119,7 +119,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                 metadata, sql, extractSourceSignature(select), projectionSignature, logicSignature);
     }
 
-    private boolean hasMergeableProjection(ParsedQuery parsed, TimeDimensionMap dimensions) {
+    private boolean hasMergeableProjection(ParsedSqlQuery parsed, TimeDimensionMap dimensions) {
         SqlSelect select = parsed.select();
         if ((parsed.orderBy() != null && parsed.orderBy().offset != null) || select.getOffset() != null) return false;
         if (extractOrderBy(parsed).stream().anyMatch(order -> order.expression().isPresent())) return false;
@@ -141,7 +141,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             if (expression instanceof SqlIdentifier id && id.isSimple()
                     && (alias == null || alias.equals(id.getSimple()))) {
                 projectedGroups.add(rendered);
-            } else if (floorBucketStep(expression, dimensions).isPresent()
+            } else if (CanonicalTimeSeriesAnalyzer.floorBucketStep(expression, dimensions).isPresent()
                     && alias != null && dimensions.isTimeColumn(alias)) {
                 projectedGroups.add(rendered);
             } else return false;
@@ -151,13 +151,13 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
 
     // --- parsing ---------------------------------------------------------------------------------
 
-    private ParsedQuery parse(String sql) {
+    private ParsedSqlQuery parse(String sql) {
         SqlNode node = CalciteSql.parseQuery(sql);
         if (node instanceof SqlOrderBy orderBy && orderBy.query instanceof SqlSelect select) {
-            return new ParsedQuery(select, orderBy);
+            return new ParsedSqlQuery(select, orderBy);
         }
         if (node instanceof SqlSelect select) {
-            return new ParsedQuery(select, null);
+            return new ParsedSqlQuery(select, null);
         }
         throw new UnsupportedSqlException("only a simple SELECT can be canonicalised, got: "
                 + node.getKind());
@@ -178,10 +178,10 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
 
     // --- aggregates ------------------------------------------------------------------------------
 
-    private List<String> extractAggregates(SqlSelect select, List<String> aggregateSpecsOut,
-                                           Map<String, String> compositeAliasesOut,
-                                           Map<String, AggregateFunction> measureAggregatesOut) {
-        List<String> rawAggregateExpressions = new ArrayList<>();
+    private List<SqlBasicCall> extractAggregates(SqlSelect select, List<String> aggregateSpecsOut,
+                                                 Map<String, String> compositeAliasesOut,
+                                                 Map<String, AggregateFunction> measureAggregatesOut) {
+        List<SqlBasicCall> rawAggregateCalls = new ArrayList<>();
         for (SqlNode item : select.getSelectList()) {
             SqlNode expression = item;
             String aliasName = null;
@@ -197,9 +197,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                 continue;
             }
 
-            for (SqlBasicCall aggregate : aggregatesInItem) {
-                rawAggregateExpressions.add(CalciteSql.unparse(aggregate));
-            }
+            rawAggregateCalls.addAll(aggregatesInItem);
 
             boolean isComposite = aggregatesInItem.size() > 1 || !isSingleAggregateCall(expression);
             if (isComposite && aliasName != null) {
@@ -224,7 +222,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                     : CalciteSql.unparse(expression);
             aggregateSpecsOut.add(spec);
         }
-        return rawAggregateExpressions;
+        return rawAggregateCalls;
     }
 
     private boolean isSingleAggregateCall(SqlNode expression) {
@@ -308,7 +306,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         for (SqlNode item : select.getSelectList()) {
             projections.add(CalciteSql.unparse(item));
         }
-        return new ArrayList<>(new TreeSet<>(projections));
+        return projections;
     }
 
     private List<String> extractSourceSignature(SqlSelect select) {
@@ -332,202 +330,25 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         }
     }
 
-    // --- time range + filters --------------------------------------------------------------------
-
-    private TimeRangeExtraction extractTimeRangeAndFilters(SqlSelect select, TimeDimensionMap timeDimensionMap) {
-        List<SqlNode> conjuncts = new ArrayList<>();
-        flattenAndConjuncts(select.getWhere(), conjuncts);
-
-        Long start = null;
-        Long end = null;
-        List<String> filters = new ArrayList<>();
-
-        for (SqlNode conjunct : conjuncts) {
-            TimeBound bound = asTimeBound(conjunct, timeDimensionMap);
-            if (bound == null) {
-                filters.add(CalciteSql.unparse(conjunct));
-                continue;
-            }
-            // Intersect, never overwrite: with several bounds on the same side the *tightest* one
-            // is the query's true window (ts >= 100 AND ts >= 150 means ts >= 150). Overwriting
-            // with whichever conjunct came last would widen the window and serve rows the query
-            // excluded.
-            if (bound.start() != null) {
-                start = start == null ? bound.start() : Math.max(start, bound.start());
-            }
-            if (bound.end() != null) {
-                end = end == null ? bound.end() : Math.min(end, bound.end());
-            }
-        }
-
-        Optional<TimeRange> timeRange = (start != null && end != null && end >= start)
-                ? Optional.of(new TimeRange(start, end))
-                : Optional.empty();
-        return new TimeRangeExtraction(timeRange, new ArrayList<>(new TreeSet<>(filters)));
-    }
-
-    private void flattenAndConjuncts(SqlNode where, List<SqlNode> collector) {
-        if (where == null) {
-            return;
-        }
-        if (where.getKind() == SqlKind.AND) {
-            for (SqlNode operand : ((SqlBasicCall) where).getOperandList()) {
-                flattenAndConjuncts(operand, collector);
-            }
-        } else {
-            collector.add(where);
-        }
-    }
-
-    private TimeBound asTimeBound(SqlNode conjunct, TimeDimensionMap timeDimensionMap) {
-        if (!(conjunct instanceof SqlBasicCall call)) {
-            return null;
-        }
-        return switch (conjunct.getKind()) {
-            case GREATER_THAN_OR_EQUAL -> comparisonBound(call, timeDimensionMap, true, false);
-            case GREATER_THAN -> comparisonBound(call, timeDimensionMap, true, true);
-            case LESS_THAN_OR_EQUAL -> comparisonBound(call, timeDimensionMap, false, false);
-            case LESS_THAN -> comparisonBound(call, timeDimensionMap, false, true);
-            case BETWEEN -> betweenBound(call, timeDimensionMap);
-            default -> null;
-        };
-    }
-
-    private TimeBound betweenBound(SqlBasicCall call, TimeDimensionMap timeDimensionMap) {
-        SqlIdentifier column = null;
-        List<Long> numbers = new ArrayList<>();
-        for (SqlNode operand : call.getOperandList()) {
-            if (operand instanceof SqlIdentifier identifier && column == null) {
-                column = identifier;
-            } else {
-                Long value = asLong(operand);
-                if (value != null) {
-                    numbers.add(value);
-                }
-            }
-        }
-        if (column != null && isTimeColumn(column, timeDimensionMap) && numbers.size() == 2) {
-            return new TimeBound(numbers.get(0), numbers.get(1));
-        }
-        return null;
-    }
-
-    /**
-     * Extracts an inclusive epoch-second bound from a comparison, handling both operand orders and
-     * strict vs. non-strict operators. {@code ts > v} tightens to {@code start = v + 1} and
-     * {@code ts < v} to {@code end = v - 1}, so two queries differing only in boundary inclusivity
-     * can never share a canonical time range (that would be a cache collision serving wrong rows).
-     * A literal-first form ({@code 100 < ts}) is the mirrored bound of its column-first equivalent.
-     */
-    private TimeBound comparisonBound(SqlBasicCall call, TimeDimensionMap timeDimensionMap,
-                                      boolean greater, boolean strict) {
-        SqlNode left = call.operand(0);
-        SqlNode right = call.operand(1);
-        boolean isStart;
-        Long value;
-        if (left instanceof SqlIdentifier identifier && isTimeColumn(identifier, timeDimensionMap)) {
-            value = asLong(right);
-            isStart = greater;
-        } else if (right instanceof SqlIdentifier identifier && isTimeColumn(identifier, timeDimensionMap)) {
-            value = asLong(left);
-            isStart = !greater;
-        } else {
-            return null;
-        }
-        if (value == null) {
-            return null;
-        }
-        long inclusive = strict ? (isStart ? value + 1 : value - 1) : value;
-        return isStart ? new TimeBound(inclusive, null) : new TimeBound(null, inclusive);
-    }
-
-    private boolean isTimeColumn(SqlIdentifier identifier, TimeDimensionMap timeDimensionMap) {
-        return timeDimensionMap.isTimeColumn(simpleName(identifier));
-    }
-
     private String simpleName(SqlIdentifier identifier) {
         return identifier.names.get(identifier.names.size() - 1);
     }
 
-    private Long asLong(SqlNode node) {
-        if (node instanceof SqlNumericLiteral literal && literal.isInteger()) {
-            return literal.getValueAs(Long.class);
-        }
-        if (node instanceof SqlLiteral literal && literal.getTypeName().getFamily() != null) {
-            try {
-                return literal.getValueAs(Long.class);
-            } catch (RuntimeException notLong) {
-                return null;
-            }
-        }
-        return null;
-    }
-
-    // --- time-series detection -------------------------------------------------------------------
-
-    private TimeSeriesShape detectTimeSeries(SqlSelect select, TimeDimensionMap timeDimensionMap) {
-        SqlNodeList group = select.getGroup();
-        if (group == null) {
-            return new TimeSeriesShape(false, Optional.empty(), false);
-        }
-        for (SqlNode expression : group) {
-            Optional<Integer> step = floorBucketStep(expression, timeDimensionMap);
-            if (step.isPresent()) {
-                return new TimeSeriesShape(true, step, false);
-            }
-        }
-        for (SqlNode expression : group) {
-            if (expression instanceof SqlIdentifier identifier && isTimeColumn(identifier, timeDimensionMap)) {
-                // Grouping directly by a raw time column: a time series with no synthetic step.
-                return new TimeSeriesShape(true, Optional.empty(), true);
-            }
-        }
-        return new TimeSeriesShape(false, Optional.empty(), false);
-    }
-
-    /**
-     * Detect {@code FLOOR(timeCol / N) * N} (in either factor order, possibly wrapped in CAST) and
-     * return {@code N}. Mirrors the Python regex {@code FLOOR(col / N) * N} bucket recognition.
-     */
-    private Optional<Integer> floorBucketStep(SqlNode expression, TimeDimensionMap timeDimensionMap) {
-        SqlNode node = unwrapCast(expression);
-        if (node.getKind() != SqlKind.TIMES || !(node instanceof SqlBasicCall times)) {
-            return Optional.empty();
-        }
-        SqlNode left = times.operand(0);
-        SqlNode right = times.operand(1);
-        SqlNode floor = left.getKind() == SqlKind.FLOOR ? left : right.getKind() == SqlKind.FLOOR ? right : null;
-        if (floor == null) {
-            return Optional.empty();
-        }
-        SqlNode divide = ((SqlBasicCall) floor).operand(0);
-        if (divide.getKind() != SqlKind.DIVIDE) {
-            return Optional.empty();
-        }
-        SqlBasicCall division = (SqlBasicCall) divide;
-        if (!(division.operand(0) instanceof SqlIdentifier column) || !isTimeColumn(column, timeDimensionMap)) {
-            return Optional.empty();
-        }
-        Long step = asLong(division.operand(1));
-        return step == null ? Optional.empty() : Optional.of(step.intValue());
-    }
-
-    private SqlNode unwrapCast(SqlNode node) {
-        if (node.getKind() == SqlKind.CAST && node instanceof SqlBasicCall cast) {
-            return cast.operand(0);
-        }
-        return node;
-    }
-
     // --- order by / limit ------------------------------------------------------------------------
 
-    private Optional<Integer> extractLimit(ParsedQuery parsed) {
+    private Optional<Integer> extractLimit(ParsedSqlQuery parsed) {
         SqlNode fetch = parsed.fetch();
-        Long value = fetch == null ? null : asLong(fetch);
-        return value == null ? Optional.empty() : Optional.of(value.intValue());
+        if (fetch == null) {
+            return Optional.empty();
+        }
+        Long value = SqlNumericLiteralValue.asLong(fetch);
+        if (value == null || value < 0 || value > Integer.MAX_VALUE) {
+            throw new UnsupportedSqlException("LIMIT/FETCH must be a non-negative 32-bit integer literal");
+        }
+        return Optional.of(value.intValue());
     }
 
-    private List<OrderByClause> extractOrderBy(ParsedQuery parsed) {
+    private List<OrderByClause> extractOrderBy(ParsedSqlQuery parsed) {
         List<OrderByClause> orderBy = new ArrayList<>();
         SqlNodeList orderList = parsed.orderList();
         if (orderList == null) {
@@ -564,28 +385,4 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         return orderBy;
     }
 
-    // --- carriers --------------------------------------------------------------------------------
-
-    private record ParsedQuery(SqlSelect select, SqlOrderBy orderBy) {
-        SqlNode fetch() {
-            return orderBy == null ? select.getFetch() : orderBy.fetch;
-        }
-
-        SqlNodeList orderList() {
-            if (orderBy != null) {
-                return orderBy.orderList;
-            }
-            return select.getOrderList();
-        }
-    }
-
-    private record TimeRangeExtraction(Optional<TimeRange> timeRange, List<String> filters) {
-    }
-
-    private record TimeBound(Long start, Long end) {
-    }
-
-    private record TimeSeriesShape(boolean isTimeSeries, Optional<Integer> userStepSeconds,
-                                   boolean preserveRawTimeSeries) {
-    }
 }

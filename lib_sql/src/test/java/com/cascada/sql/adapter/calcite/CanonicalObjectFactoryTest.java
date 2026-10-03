@@ -41,6 +41,15 @@ class CanonicalObjectFactoryTest {
     }
 
     @Test
+    void decomposesAverageOfNestedExpressionsFromTheParsedTree() {
+        CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
+                "SELECT AVG(COALESCE(latency, 0)) FROM traffic WHERE ts >= 0 AND ts <= 86399");
+
+        assertThat(canonical.hashComponents().aggregates()).containsExactly(
+                "COUNT(COALESCE(latency, 0))", "SUM(COALESCE(latency, 0))");
+    }
+
+    @Test
     void detectsTimeSeriesAndUserStepFromAFloorBucketExpression() {
         CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
                 "SELECT FLOOR(ts / 600) * 600 AS bucket, SUM(bytes) AS b FROM traffic "

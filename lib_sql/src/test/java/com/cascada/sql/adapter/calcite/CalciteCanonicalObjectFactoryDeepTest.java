@@ -114,6 +114,16 @@ class CalciteCanonicalObjectFactoryDeepTest {
     }
 
     @Test
+    void fractionalTimeComparisonsRemainPartOfTheFilterSignature() {
+        CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) FROM traffic WHERE ts >= 0 AND ts <= 100 AND ts > 1.5");
+
+        assertThat(canonical.timeRange().startTimestampSeconds()).isZero();
+        assertThat(canonical.hashComponents().filters()).anySatisfy(
+                filter -> assertThat(filter).contains("ts > 1.5"));
+    }
+
+    @Test
     void strictAndInclusiveBoundsNeverCollideOnTheSameCanonicalRange() {
         CanonicalQueryObject strict = factory.extractCanonicalObjectFromSql(
                 "SELECT SUM(b) AS s FROM traffic WHERE ts > 100 AND ts <= 500");
@@ -147,11 +157,86 @@ class CalciteCanonicalObjectFactoryDeepTest {
     }
 
     @Test
-    void recognisesAlternativeTimeColumnNames() {
+    void reversedBetweenStaysAnOrdinaryFilterInsteadOfBecomingATimeRange() {
         CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
-                "SELECT SUM(b) AS s FROM traffic WHERE starttime >= 0 AND stoptime <= 999");
+                "SELECT SUM(b) AS s FROM traffic WHERE ts >= 0 AND ts <= 100 "
+                        + "AND 86400 BETWEEN ts AND 172799");
+
         assertThat(canonical.timeRange().startTimestampSeconds()).isZero();
-        assertThat(canonical.timeRange().endTimestampSeconds()).isEqualTo(999);
+        assertThat(canonical.timeRange().endTimestampSeconds()).isEqualTo(100);
+        assertThat(canonical.hashComponents().filters())
+                .anySatisfy(filter -> assertThat(filter).contains("86400 BETWEEN ASYMMETRIC ts AND 172799"));
+    }
+
+    @Test
+    void reversedBetweenAloneDoesNotSupplyAnExtractableTimeRange() {
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) AS s FROM traffic WHERE 86400 BETWEEN ts AND 172799"))
+                .isInstanceOf(UnsupportedSqlException.class);
+    }
+
+    @Test
+    void strictComparisonsAtLongBoundariesBypassInsteadOfWrapping() {
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) FROM traffic WHERE ts > 9223372036854775807 "
+                        + "AND ts <= 9223372036854775807"))
+                .isInstanceOf(UnsupportedSqlException.class);
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) FROM traffic WHERE ts < -9223372036854775808 "
+                        + "AND ts >= -9223372036854775808"))
+                .isInstanceOf(UnsupportedSqlException.class);
+    }
+
+    @Test
+    void outOfRangeTimeLiteralsBypassWithASupportedSqlException() {
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) FROM traffic WHERE ts > 9223372036854775808 "
+                        + "AND ts <= 9223372036854775810"))
+                .isInstanceOf(UnsupportedSqlException.class);
+    }
+
+    @Test
+    void recognisesEachAlternativeTimeColumnWhenUsedByItself() {
+        for (String timeColumn : new String[]{"starttime", "stoptime", "timestamp"}) {
+            CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
+                    "SELECT SUM(b) AS s FROM traffic WHERE " + timeColumn + " >= 0 AND "
+                            + timeColumn + " <= 999");
+
+            assertThat(canonical.timeRange().startTimestampSeconds()).isZero();
+            assertThat(canonical.timeRange().endTimestampSeconds()).isEqualTo(999);
+        }
+    }
+
+    @Test
+    void bypassesTimePredicatesAcrossMultipleSourcesInsteadOfCombiningTheirWindows() {
+        String first = "SELECT SUM(a.amount) FROM events a, sessions b "
+                + "WHERE a.ts >= 0 AND a.ts <= 99 AND b.ts >= 50 AND b.ts <= 149";
+        String second = "SELECT SUM(a.amount) FROM events a, sessions b "
+                + "WHERE a.ts >= 50 AND a.ts <= 149 AND b.ts >= 0 AND b.ts <= 99";
+
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(first))
+                .isInstanceOf(UnsupportedSqlException.class)
+                .hasMessageContaining("multiple sources");
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(second))
+                .isInstanceOf(UnsupportedSqlException.class)
+                .hasMessageContaining("multiple sources");
+    }
+
+    @Test
+    void rejectsBoundsFromDifferentConfiguredTimeColumns() {
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) FROM traffic WHERE ts >= 0 AND ts <= 100 "
+                        + "AND stoptime >= 50 AND stoptime <= 80"))
+                .isInstanceOf(UnsupportedSqlException.class)
+                .hasMessageContaining("multiple time columns");
+    }
+
+    @Test
+    void doesNotTreatProjectionAliasDeclarationsAsTimeColumnReferences() {
+        CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) AS stoptime FROM traffic WHERE ts >= 0 AND ts <= 86399");
+
+        assertThat(canonical.timeRange().endTimestampSeconds()).isEqualTo(86_399);
     }
 
     @Test
@@ -205,6 +290,21 @@ class CalciteCanonicalObjectFactoryDeepTest {
     }
 
     @Test
+    void rejectsBucketExpressionsWhoseMultiplierOrStepCannotBePreserved() {
+        for (String bucket : new String[]{
+                "FLOOR(ts / 300) * 1",
+                "FLOOR(ts / 600) * 300",
+                "FLOOR(ts / 2147483648) * 2147483648",
+                "FLOOR(ts / 0) * 0"}) {
+            String sql = "SELECT " + bucket + " AS ts, SUM(b) AS s FROM traffic "
+                    + "WHERE ts >= 0 AND ts <= 100 GROUP BY " + bucket;
+            assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(sql))
+                    .as("unsupported bucket expression: %s", bucket)
+                    .isInstanceOf(UnsupportedSqlException.class);
+        }
+    }
+
+    @Test
     void groupingByRawTimeColumnIsTimeSeriesWithPreserveRaw() {
         CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
                 "SELECT ts, SUM(b) AS s FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY ts");
@@ -249,6 +349,19 @@ class CalciteCanonicalObjectFactoryDeepTest {
     }
 
     @Test
+    void oversizedAndUnresolvedLimitsBypassInsteadOfNarrowingOrDisappearing() {
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) FROM traffic WHERE ts >= 0 AND ts <= 100 LIMIT 4294967296"))
+                .isInstanceOf(UnsupportedSqlException.class);
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) FROM traffic WHERE ts >= 0 AND ts <= 100 LIMIT ?"))
+                .isInstanceOf(UnsupportedSqlException.class);
+        assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(b) FROM traffic WHERE ts >= 0 AND ts <= 100 LIMIT 9223372036854775808"))
+                .isInstanceOf(UnsupportedSqlException.class);
+    }
+
+    @Test
     void noOrderOrLimitYieldsEmptyPostProcessing() {
         CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
                 "SELECT SUM(b) AS s FROM traffic WHERE ts >= 0 AND ts <= 100");
@@ -269,6 +382,19 @@ class CalciteCanonicalObjectFactoryDeepTest {
         CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(
                 "SELECT SUM(b) AS s FROM traffic WHERE ts >= 0 AND ts <= 100");
         assertThat(canonical.sourceSignature()).contains("traffic");
+    }
+
+    @Test
+    void preservesSelectProjectionOrderAndDuplicateSlots() {
+        CanonicalQueryObject first = factory.extractCanonicalObjectFromSql(
+                "SELECT city, SUM(x) AS total, city FROM traffic "
+                        + "WHERE ts >= 0 AND ts <= 100 GROUP BY city");
+        CanonicalQueryObject reversed = factory.extractCanonicalObjectFromSql(
+                "SELECT SUM(x) AS total, city, city FROM traffic "
+                        + "WHERE ts >= 0 AND ts <= 100 GROUP BY city");
+
+        assertThat(first.projectionSignature()).containsExactly("city", "SUM(x) total", "city");
+        assertThat(reversed.projectionSignature()).containsExactly("SUM(x) total", "city", "city");
     }
 
     // --- bypass guards ---------------------------------------------------------------------------

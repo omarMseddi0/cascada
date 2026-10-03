@@ -7,12 +7,11 @@ import com.cascada.identity.domain.QueryHash;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Pins the fixes for README caveats 4, 5 and 6: {@code HAVING}, {@code JOIN ... ON} conditions and
- * {@code DISTINCT} must all reach the logic hash (two queries differing only in one of them must
- * never share a cache entry), and the parsed aggregate function must survive aliasing so the merge
- * combines {@code MAX(latency) AS peak_latency} with MAX, not SUM.
+ * Checks HAVING and DISTINCT identity, rejection of time bounds across joined sources,
+ * and preservation of parsed aggregate functions behind output aliases.
  */
 class CanonicalLogicSignatureTest {
 
@@ -45,15 +44,17 @@ class CanonicalLogicSignatureTest {
     }
 
     @Test
-    void joinOnConditionChangesTheLogicHash() {
+    void timeBoundedQueriesAcrossJoinedSourcesBypassCanonicalization() {
         String joinOnUser = "SELECT appName, SUM(bytes) FROM traffic t JOIN dims d ON t.userId = d.userId "
                 + "WHERE ts >= 0 AND ts <= 86399 GROUP BY appName";
         String joinOnDevice = "SELECT appName, SUM(bytes) FROM traffic t JOIN dims d ON t.deviceId = d.deviceId "
                 + "WHERE ts >= 0 AND ts <= 86399 GROUP BY appName";
 
-        CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(joinOnUser);
-        assertThat(canonical.logicSignature()).anyMatch(marker -> marker.startsWith("JOIN ON "));
-        assertThat(hashOf(joinOnUser)).isNotEqualTo(hashOf(joinOnDevice));
+        for (String sql : java.util.List.of(joinOnUser, joinOnDevice)) {
+            assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(sql))
+                    .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class)
+                    .hasMessageContaining("multiple sources");
+        }
     }
 
     @Test

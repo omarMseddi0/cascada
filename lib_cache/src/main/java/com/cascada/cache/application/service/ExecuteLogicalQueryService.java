@@ -3,45 +3,25 @@ package com.cascada.cache.application.service;
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.query.UncacheableQueryException;
 
 import java.util.Objects;
 
-/**
- * The full read path for a query submitted as logical SQL:
- *
- * <pre>
- *   logical SQL ──▶ LogicalSqlTranslatorPort  (logical names → storage path + physical columns)
- *               ──▶ SqlCanonicalizerPort      (physical SQL → CanonicalQueryObject)
- *               ──▶ ExecuteCachedQueryUseCase (safety rules → cache path, or bypass to the executor)
- * </pre>
- *
- * <p><b>Why this class exists.</b> This three-step sequence previously lived in {@code CascadaEngine} in
- * the {@code app} module — that is, inside the composition root. A composition root is supposed to do
- * nothing but wire objects together; the moment it also decides <em>the order in which translation,
- * canonicalisation and execution happen</em>, that decision can only be tested by standing up the whole
- * application, and a second driving adapter (REST, JDBC, a scheduler) either duplicates the sequence or
- * reaches into the app module. Both are the symptom of business logic sitting one ring too far out.
- *
- * <p>Here, in the application layer behind {@link ExecuteLogicalQueryUseCase}, the sequence is testable
- * with three fakes and is shared by every driving adapter that will ever exist.
- *
- * <p>Note that translation and canonicalisation are <em>outbound</em> ports even though they happen at
- * the start of an inbound call. Direction of a port is not about when it runs — it is about who is in
- * control. The application calls out to them; they never call in.
- */
+/** Translates logical SQL, canonicalizes it, and delegates the physical query to the cache use case. */
 public final class ExecuteLogicalQueryService implements ExecuteLogicalQueryUseCase {
 
     private final LogicalSqlTranslatorPort translator;
     private final SqlCanonicalizerPort canonicalizer;
     private final ExecuteCachedQueryUseCase executeCachedQuery;
-    private final com.cascada.cache.application.port.out.QueryExecutorPort executor;
+    private final QueryExecutorPort executor;
 
     public ExecuteLogicalQueryService(LogicalSqlTranslatorPort translator,
                                      SqlCanonicalizerPort canonicalizer,
                                      ExecuteCachedQueryUseCase executeCachedQuery,
-                                     com.cascada.cache.application.port.out.QueryExecutorPort executor) {
+                                     QueryExecutorPort executor) {
         this.executor = Objects.requireNonNull(executor, "executor");
         this.translator = Objects.requireNonNull(translator, "translator");
         this.canonicalizer = Objects.requireNonNull(canonicalizer, "canonicalizer");
@@ -54,7 +34,7 @@ public final class ExecuteLogicalQueryService implements ExecuteLogicalQueryUseC
         CanonicalQueryObject canonicalObject;
         try {
             canonicalObject = canonicalizer.canonicalize(physicalSql);
-        } catch (com.cascada.cache.domain.query.UncacheableQueryException unsupported) {
+        } catch (UncacheableQueryException unsupported) {
             return new ExecuteCachedQueryUseCase.Result(executor.execute(physicalSql), false);
         }
         return executeCachedQuery.execute(canonicalObject);

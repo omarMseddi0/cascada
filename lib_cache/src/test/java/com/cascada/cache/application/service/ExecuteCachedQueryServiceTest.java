@@ -1,7 +1,6 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
-
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.domain.safety.BypassReason;
@@ -14,6 +13,7 @@ import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.domain.safety.CacheConfiguration;
 import com.cascada.cache.domain.safety.SafetyRule;
 import com.cascada.cache.domain.safety.SafetyRuleRegistry;
@@ -99,6 +99,32 @@ class ExecuteCachedQueryServiceTest {
 
         assertThat(result.servedThroughCache()).isTrue();
         assertThat(sparkCalls.get()).isEqualTo(1); // zero cached buckets -> engine's direct fast path
+        assertThat(((Number) result.frame().rows().get(0).get("bytes")).doubleValue()).isEqualTo(42.0);
+    }
+
+    @Test
+    void failedWarmingObservationDoesNotDiscardTheQueryResult() {
+        SafetyRuleRegistry neverBypass = new SafetyRuleRegistry(List.of());
+        QueryExecutorPort spark = sql -> frame();
+        CacheExecutionEngine engine = new CacheExecutionEngine(
+                new InMemoryBlobCacheBackendAdapter(serializer), spark,
+                (physicalSql, gapPlan) -> "GAP_SQL", CacheExecutionConfiguration.defaults());
+        WarmCacheUseCase unavailableWarmer = new WarmCacheUseCase() {
+            @Override public void recordQuery(com.cascada.identity.domain.QueryHash hash,
+                                              CanonicalQueryObject canonicalObject) {
+                throw new IllegalStateException("warming tracker unavailable");
+            }
+            @Override public Report warmCycle(long start, long end, boolean forceOverwrite) {
+                return new Report(0, 0, 0);
+            }
+        };
+        ExecuteCachedQueryService service = new ExecuteCachedQueryService(neverBypass,
+                CacheConfiguration.defaults(), new QueryHashGenerator(), engine, spark, unavailableWarmer);
+
+        ExecuteCachedQueryService.Result result = service.execute(canonical());
+
+        assertThat(result.servedThroughCache()).isTrue();
+        assertThat(result.frame().rowCount()).isEqualTo(1);
         assertThat(((Number) result.frame().rows().get(0).get("bytes")).doubleValue()).isEqualTo(42.0);
     }
 }

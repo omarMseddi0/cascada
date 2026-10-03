@@ -10,6 +10,8 @@ import com.cascada.cache.domain.safety.CacheConfiguration;
 import com.cascada.cache.domain.safety.SafetyRuleRegistry;
 import com.cascada.identity.domain.QueryHash;
 
+import java.util.logging.Logger;
+
 /**
  * The application entry point ported from {@code cache_manager.py}'s handle-query flow: evaluate the
  * safety guardrails; on a bypass run the physical SQL directly on Spark; otherwise compute the logic
@@ -19,6 +21,8 @@ import com.cascada.identity.domain.QueryHash;
  * only choose <em>within</em> the safe set this use case already enforces.
  */
 public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCase {
+
+    private static final Logger LOGGER = Logger.getLogger(ExecuteCachedQueryService.class.getName());
 
     private final SafetyRuleRegistry safetyRuleRegistry;
     private final CacheConfiguration cacheConfiguration;
@@ -54,7 +58,15 @@ public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCas
         }
         QueryHash queryHash =
                 queryHashGenerator.generateQueryHash(canonicalObject, cacheConfiguration.fixedStepSeconds());
-        if (warmer != null) warmer.recordQuery(queryHash, canonicalObject);
+        if (warmer != null) {
+            try {
+                warmer.recordQuery(queryHash, canonicalObject);
+            } catch (RuntimeException observationFailure) {
+                // Warming/popularity state is an optional hint. Its outage cannot break query service.
+                LOGGER.warning("could not record warming observation for query hash " + queryHash + " ("
+                        + observationFailure.getClass().getSimpleName() + ")");
+            }
+        }
         return new Result(cacheExecutionEngine.execute(canonicalObject, queryHash), true);
     }
 

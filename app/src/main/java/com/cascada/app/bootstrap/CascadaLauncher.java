@@ -3,7 +3,7 @@ package com.cascada.app.bootstrap;
 import com.cascada.spark.adapter.out.environment.SystemEnvironmentAdapter;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import com.cascada.spark.domain.SparkSessionConfig;
-import com.cascada.spark.domain.SparkSessionConfigBuilder;
+import com.cascada.spark.application.configuration.SparkSessionConfigBuilder;
 
 /**
  * The process entry point: read the environment, build the execution tier, hand both to

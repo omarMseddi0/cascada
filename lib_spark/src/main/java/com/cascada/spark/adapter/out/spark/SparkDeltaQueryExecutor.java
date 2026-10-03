@@ -1,19 +1,14 @@
 package com.cascada.spark.adapter.out.spark;
 
-import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.spark.domain.SparkSessionConfig;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.types.DataType;
-import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * The production {@link QueryExecutorPort}: runs a physical SQL string on a Spark 3.5.x session
@@ -37,13 +32,15 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
     /**
      * Hard ceiling on rows materialised into the engine's JVM per query. The cache path only ever
      * pulls pre-aggregated frames (group-by cardinality × buckets — thousands of rows), so a result
-     * beyond this is a runaway raw scan that would otherwise OOM the driver via collect.
+     * beyond this is rejected before the adapter builds the full {@link ResultFrame}. Spark may still
+     * materialize the largest partition while providing {@code toLocalIterator()}.
      */
     private static final int DEFAULT_MAX_RESULT_ROWS = 1_000_000;
+    private static final SessionOwnershipCoordinator SESSION_OWNERSHIP = new SessionOwnershipCoordinator();
 
     private final SparkSession sparkSession;
     private final boolean ownsSession;
-    private final int maxResultRows;
+    private final SparkResultFrameMapper resultFrameMapper;
 
     /** Build (or get) a SparkSession from the resolved config — the single place a session is created. */
     public SparkDeltaQueryExecutor(SparkSessionConfig config) {
@@ -52,18 +49,19 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
 
     /** As above, with an explicit driver-side row ceiling. */
     public SparkDeltaQueryExecutor(SparkSessionConfig config, int maxResultRows) {
-        if (maxResultRows <= 0) {
-            throw new IllegalArgumentException("maxResultRows must be > 0, but was: " + maxResultRows);
-        }
+        this.resultFrameMapper = new SparkResultFrameMapper(maxResultRows);
+        // getOrCreate may reuse a session or create one over somebody else's SparkContext.
+        // Serialize our own construction so concurrent executors cannot both claim a shared context.
         SparkSession.Builder builder = SparkSession.builder()
                 .appName(config.appName())
                 .master(config.master());
         for (Map.Entry<String, String> property : config.sparkProperties().entrySet()) {
             builder = builder.config(property.getKey(), property.getValue());
         }
-        this.sparkSession = builder.getOrCreate();
-        this.ownsSession = true;
-        this.maxResultRows = maxResultRows;
+        SessionLease<SparkSession> lease = SESSION_OWNERSHIP.acquire(
+                () -> org.apache.spark.SparkContext$.MODULE$.getActive().isDefined(), builder::getOrCreate);
+        this.sparkSession = lease.session();
+        this.ownsSession = lease.ownsContext();
     }
 
     /**
@@ -71,9 +69,9 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
      * will NOT stop a session passed in this way — only the caller that created it should stop it.
      */
     public SparkDeltaQueryExecutor(SparkSession sparkSession) {
-        this.sparkSession = sparkSession;
+        this.sparkSession = Objects.requireNonNull(sparkSession, "sparkSession");
         this.ownsSession = false;
-        this.maxResultRows = DEFAULT_MAX_RESULT_ROWS;
+        this.resultFrameMapper = new SparkResultFrameMapper(DEFAULT_MAX_RESULT_ROWS);
     }
 
     @Override
@@ -84,61 +82,8 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
 
     /** Map a Spark result into a {@link ResultFrame}; visible for the cluster integration test. */
     ResultFrame toResultFrame(Dataset<Row> dataset) {
-        StructType schema = dataset.schema();
-        StructField[] fields = schema.fields();
-
-        ResultFrame.Builder builder = ResultFrame.builder();
-        ColumnType[] columnTypes = new ColumnType[fields.length];
-        for (int index = 0; index < fields.length; index++) {
-            ColumnType type = mapSparkType(fields[index].dataType());
-            columnTypes[index] = type;
-            builder.column(fields[index].name(), type);
-        }
-
-        // toLocalIterator streams partitions one at a time instead of materialising the whole
-        // result in the driver at once (collectAsList), and the row ceiling turns a runaway raw
-        // scan into a clear error instead of an OOM-killed engine.
-        java.util.Iterator<Row> rows = dataset.toLocalIterator();
-        int rowCount = 0;
-        while (rows.hasNext()) {
-            if (rowCount >= maxResultRows) {
-                throw new IllegalStateException("query result exceeds the " + maxResultRows
-                        + "-row driver ceiling; add a LIMIT or aggregate further");
-            }
-            Row row = rows.next();
-            Map<String, Object> values = new LinkedHashMap<>();
-            for (int index = 0; index < fields.length; index++) {
-                values.put(fields[index].name(), readCell(row, index, columnTypes[index]));
-            }
-            builder.row(values);
-            rowCount++;
-        }
-        return builder.build();
-    }
-
-    private Object readCell(Row row, int index, ColumnType type) {
-        if (row.isNullAt(index)) {
-            return null;
-        }
-        return switch (type) {
-            case DECIMAL -> row.getDecimal(index);
-            case LONG -> ((Number) row.get(index)).longValue();
-            case DOUBLE -> ((Number) row.get(index)).doubleValue();
-            case STRING -> String.valueOf(row.get(index));
-        };
-    }
-
-    private ColumnType mapSparkType(DataType dataType) {
-        if (dataType.equals(DataTypes.ByteType) || dataType.equals(DataTypes.ShortType)
-                || dataType.equals(DataTypes.IntegerType) || dataType.equals(DataTypes.LongType)) {
-            return ColumnType.LONG;
-        }
-        if (dataType.equals(DataTypes.FloatType) || dataType.equals(DataTypes.DoubleType)
-) {
-            return ColumnType.DOUBLE;
-        }
-        if (dataType instanceof org.apache.spark.sql.types.DecimalType) return ColumnType.DECIMAL;
-        return ColumnType.STRING;
+        // toLocalIterator streams through the result; Spark may materialize its largest partition.
+        return resultFrameMapper.map(dataset.schema(), dataset.toLocalIterator());
     }
 
     @Override

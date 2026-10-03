@@ -27,7 +27,7 @@ public interface EnvironmentPort {
     /** {@code name}'s value, or {@code fallback} when unset or blank. */
     default String getOrDefault(String name, String fallback) {
         String value = get(name);
-        return (value == null || value.isEmpty()) ? fallback : value;
+        return (value == null || value.isBlank()) ? fallback : value;
     }
 
     /** The deterministic default: nothing is configured. Used by the domain and by unit tests. */

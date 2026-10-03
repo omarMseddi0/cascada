@@ -56,4 +56,28 @@ class SparkHexagonBoundaryTest {
                 .should().dependOnClassesThat().resideInAPackage("com.cascada.spark.adapter..")
                 .check(moduleClasses);
     }
+
+    @Test
+    void domainDoesNotDependOnApplicationPortsOrServices() {
+        noClasses().that().resideInAPackage("com.cascada.spark.domain..")
+                .should().dependOnClassesThat().resideInAPackage("com.cascada.spark.application..")
+                .because("application ports point outward from the application core, never back into domain")
+                .check(moduleClasses);
+    }
+
+    @Test
+    void domainDependsOnlyOnDomainTypesAndTheJdk() {
+        noClasses().that().resideInAPackage("com.cascada.spark.domain..")
+                .should().dependOnClassesThat().resideOutsideOfPackages(
+                        "com.cascada.spark.domain..", "java..")
+                .check(moduleClasses);
+    }
+
+    @Test
+    void applicationDependsOnlyOnItsOwnTypesDomainAndTheJdk() {
+        noClasses().that().resideInAPackage("com.cascada.spark.application..")
+                .should().dependOnClassesThat().resideOutsideOfPackages(
+                        "com.cascada.spark.application..", "com.cascada.spark.domain..", "java..")
+                .check(moduleClasses);
+    }
 }

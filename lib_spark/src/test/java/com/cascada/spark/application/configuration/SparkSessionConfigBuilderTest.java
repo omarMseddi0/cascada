@@ -1,5 +1,6 @@
-package com.cascada.spark.domain;
+package com.cascada.spark.application.configuration;
 
+import com.cascada.spark.domain.SparkSessionConfig;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;

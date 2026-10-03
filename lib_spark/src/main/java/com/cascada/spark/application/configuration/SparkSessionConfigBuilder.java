@@ -1,6 +1,7 @@
-package com.cascada.spark.domain;
+package com.cascada.spark.application.configuration;
 
 import com.cascada.spark.application.port.out.EnvironmentPort;
+import com.cascada.spark.domain.SparkSessionConfig;
 
 import java.util.LinkedHashMap;
 import java.util.Map;

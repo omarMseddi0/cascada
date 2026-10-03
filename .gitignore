@@ -11,3 +11,8 @@ IMPLEMENTATION_PLAN.md
 # Local code review artifacts
 /code-review/
 /CODE_REVIEW.md
+
+# Local refactor and architecture review documents
+/docs/refactor-review.md
+/docs/design.md
+refactor*.md

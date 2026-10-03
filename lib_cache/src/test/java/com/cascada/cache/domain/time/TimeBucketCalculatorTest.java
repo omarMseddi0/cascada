@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Ports the head/body/tail behaviour of {@code TimeBucketCalculator} from {@code time_utils.py}
@@ -68,6 +69,47 @@ class TimeBucketCalculatorTest {
     void nonPositiveBucketWidthFallsBackToOneDay() {
         TimeBucketCalculator degenerate = new TimeBucketCalculator(0);
         assertThat(degenerate.secondsPerBucket()).isEqualTo(DAY);
+    }
+
+    @Test
+    void materializesAtMostTheConfiguredBucketLimit() {
+        long withinLimitEnd = (long) TimeBucketCalculator.MAX_BUCKETS_PER_PLAN * DAY - 1;
+        assertThat(calculator.getDailyBuckets(0, withinLimitEnd).body())
+                .hasSize(TimeBucketCalculator.MAX_BUCKETS_PER_PLAN);
+
+        long aboveLimitEnd = (long) (TimeBucketCalculator.MAX_BUCKETS_PER_PLAN + 1) * DAY - 1;
+        assertThatThrownBy(() -> calculator.getDailyBuckets(0, aboveLimitEnd))
+                .isInstanceOf(BucketEnumerationLimitExceededException.class);
+    }
+
+    @Test
+    void narrowRangesAtLongExtremesRemainPartialInsteadOfOverflowing() {
+        DailyBuckets nearMinimum = calculator.getDailyBuckets(Long.MIN_VALUE, Long.MIN_VALUE + 10);
+        assertThat(nearMinimum.body()).isEmpty();
+        assertThat(nearMinimum.head().isPresent() || nearMinimum.tail().isPresent()).isTrue();
+        nearMinimum.head().ifPresent(range -> {
+            assertThat(range.startTimestampSeconds()).isEqualTo(Long.MIN_VALUE);
+            assertThat(range.endTimestampSeconds()).isLessThanOrEqualTo(Long.MIN_VALUE + 10);
+        });
+        nearMinimum.tail().ifPresent(range -> {
+            assertThat(range.startTimestampSeconds()).isGreaterThanOrEqualTo(Long.MIN_VALUE);
+            assertThat(range.endTimestampSeconds()).isEqualTo(Long.MIN_VALUE + 10);
+        });
+
+        DailyBuckets nearMaximum = calculator.getDailyBuckets(Long.MAX_VALUE, Long.MAX_VALUE);
+        assertThat(nearMaximum.body()).isEmpty();
+        assertThat(nearMaximum.head().isPresent() || nearMaximum.tail().isPresent()).isTrue();
+        nearMaximum.head().ifPresent(range -> assertThat(range).isEqualTo(new TimeRange(Long.MAX_VALUE, Long.MAX_VALUE)));
+        nearMaximum.tail().ifPresent(range -> assertThat(range).isEqualTo(new TimeRange(Long.MAX_VALUE, Long.MAX_VALUE)));
+    }
+
+    @Test
+    void aCompleteSingleSecondBucketAtLongMaxRemainsRepresentable() {
+        DailyBuckets buckets = new TimeBucketCalculator(1).getDailyBuckets(Long.MAX_VALUE, Long.MAX_VALUE);
+
+        assertThat(buckets.body()).containsExactly(Long.MAX_VALUE);
+        assertThat(buckets.head()).isEmpty();
+        assertThat(buckets.tail()).isEmpty();
     }
 
     @Property

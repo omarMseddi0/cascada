@@ -55,8 +55,30 @@ class TimeBucketPyramidTest {
         HierarchicalPlan plan = pyramid.assemble(start, now);
 
         assertThat(plan.completeDayBucketStarts()).isEmpty();
+        assertThat(plan.leadingPartialRange()).contains(
+                new com.cascada.cache.domain.time.TimeRange(start, 2 * DAY + 2 * HOUR - 1));
         assertThat(plan.completeHourBucketStartsToday()).containsExactly(2 * DAY + 2 * HOUR);
         assertThat(plan.livePartialRange()).contains(new com.cascada.cache.domain.time.TimeRange(2 * DAY + 3 * HOUR, now));
+    }
+
+    @Test
+    void sameDayRangeStartingInTheLiveHourHasOneNonOverlappingPartialRange() {
+        long start = 2 * DAY + 3 * HOUR + 20;
+        long now = start + 30;
+
+        HierarchicalPlan plan = pyramid.assemble(start, now);
+
+        assertThat(plan.leadingPartialRange()).isEmpty();
+        assertThat(plan.completeDayBucketStarts()).isEmpty();
+        assertThat(plan.completeHourBucketStartsToday()).isEmpty();
+        assertThat(plan.livePartialRange()).contains(new com.cascada.cache.domain.time.TimeRange(start, now));
+    }
+
+    @Test
+    void refusesToMaterializeAnUnboundedDayPlan() {
+        long now = (long) (TimeBucketCalculator.MAX_BUCKETS_PER_PLAN + 1) * DAY + HOUR;
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> pyramid.assemble(0, now))
+                .isInstanceOf(BucketEnumerationLimitExceededException.class);
     }
 
     @Test

@@ -1,9 +1,11 @@
 package com.cascada.cache.domain.time;
 
-
+import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Pure day-bucket math, ported line-for-line from {@code TimeBucketCalculator} in
@@ -11,11 +13,13 @@ import java.util.Optional;
  * lines 105-145).
  *
  * <p>The head/body/tail split is correctness-critical: it decides which whole days can be served
- * from cache and which partial edges must be recomputed. The arithmetic
- * {@code (timestamp / bucketSeconds) * bucketSeconds} uses Java long floor division, which matches
- * Python's {@code //} for the non-negative epoch seconds the cache deals in.
+ * from cache and which partial edges must be recomputed. Bucket alignment uses floor division, matching
+ * Python's {@code //} across the full timestamp domain.
  */
 public final class TimeBucketCalculator {
+
+    /** Hard ceiling for a single materialized bucket plan (about 27 years at daily granularity). */
+    public static final int MAX_BUCKETS_PER_PLAN = 10_000;
 
     private final long secondsPerBucket;
 
@@ -30,43 +34,73 @@ public final class TimeBucketCalculator {
 
     /** Ported from {@code _get_daily_buckets(start_ts, end_ts)}. */
     public DailyBuckets getDailyBuckets(long startTimestampSeconds, long endTimestampSeconds) {
-        // floorDiv, not '/': plain division rounds toward zero, so a pre-epoch (negative)
-        // timestamp would land in the bucket *after* its own — floorDiv keeps bucket starts
-        // aligned for the full timestamp domain.
-        long firstDayStart = Math.floorDiv(startTimestampSeconds, secondsPerBucket) * secondsPerBucket;
-        long lastDayStart = Math.floorDiv(endTimestampSeconds, secondsPerBucket) * secondsPerBucket;
+        if (endTimestampSeconds < startTimestampSeconds) {
+            throw new IllegalArgumentException("endTimestampSeconds must not be before startTimestampSeconds");
+        }
+        // Use BigInteger for the aligned boundaries: the containing bucket for Long.MIN_VALUE can
+        // begin just outside the long domain, and the last bucket's inclusive end can exceed MAX.
+        // Those cases are partial edges, not arithmetic failures or cacheable complete buckets.
+        BigInteger width = BigInteger.valueOf(secondsPerBucket);
+        BigInteger start = BigInteger.valueOf(startTimestampSeconds);
+        BigInteger end = BigInteger.valueOf(endTimestampSeconds);
+        BigInteger firstDayStart = floorBucketStart(start, width);
+        BigInteger lastDayStart = floorBucketStart(end, width);
 
         Optional<TimeRange> head = Optional.empty();
         Optional<TimeRange> tail = Optional.empty();
 
-        long firstFullDay;
-        if (startTimestampSeconds > firstDayStart) {
+        BigInteger firstFullDay;
+        if (start.compareTo(firstDayStart) > 0) {
             // Query starts after midnight -> partial HEAD day.
-            long firstDayEnd = firstDayStart + secondsPerBucket - 1;
-            head = Optional.of(new TimeRange(startTimestampSeconds, Math.min(endTimestampSeconds, firstDayEnd)));
-            firstFullDay = firstDayStart + secondsPerBucket;
+            BigInteger firstDayEnd = firstDayStart.add(width).subtract(BigInteger.ONE);
+            long headEnd = end.min(firstDayEnd).longValueExact();
+            head = Optional.of(new TimeRange(startTimestampSeconds, headEnd));
+            firstFullDay = firstDayStart.add(width);
         } else {
             firstFullDay = firstDayStart;
         }
 
-        long lastDayEnd = lastDayStart + secondsPerBucket - 1;
-        long lastFullDay;
-        if (endTimestampSeconds < lastDayEnd) {
+        BigInteger lastDayEnd = lastDayStart.add(width).subtract(BigInteger.ONE);
+        BigInteger lastFullDay;
+        if (end.compareTo(lastDayEnd) < 0) {
             // Query ends before midnight -> partial TAIL day.
-            tail = Optional.of(new TimeRange(Math.max(startTimestampSeconds, lastDayStart), endTimestampSeconds));
-            lastFullDay = lastDayStart - secondsPerBucket;
+            long tailStart = start.max(lastDayStart).longValueExact();
+            tail = Optional.of(new TimeRange(tailStart, endTimestampSeconds));
+            lastFullDay = lastDayStart.subtract(width);
         } else {
             lastFullDay = lastDayStart;
         }
 
-        List<Long> body = new ArrayList<>();
-        long currentDay = firstFullDay;
-        while (currentDay <= lastFullDay) {
-            body.add(currentDay);
-            currentDay += secondsPerBucket;
+        long bucketCount = 0;
+        if (firstFullDay.compareTo(lastFullDay) <= 0) {
+            BigInteger distance = lastFullDay.subtract(firstFullDay);
+            BigInteger count = distance.divide(width).add(BigInteger.ONE);
+            if (count.compareTo(BigInteger.valueOf(MAX_BUCKETS_PER_PLAN)) > 0) {
+                throw new BucketEnumerationLimitExceededException(MAX_BUCKETS_PER_PLAN);
+            }
+            bucketCount = count.longValueExact();
+        }
+
+        List<Long> body = new ArrayList<>((int) bucketCount);
+        for (long index = 0; index < bucketCount; index++) {
+            BigInteger bucketStart = firstFullDay.add(width.multiply(BigInteger.valueOf(index)));
+            try {
+                body.add(bucketStart.longValueExact());
+            } catch (ArithmeticException outsideLongDomain) {
+                throw new BucketEnumerationLimitExceededException(MAX_BUCKETS_PER_PLAN);
+            }
         }
 
         return new DailyBuckets(head, body, tail);
+    }
+
+    private BigInteger floorBucketStart(BigInteger timestamp, BigInteger width) {
+        BigInteger[] division = timestamp.divideAndRemainder(width);
+        BigInteger quotient = division[0];
+        if (division[1].signum() < 0) {
+            quotient = quotient.subtract(BigInteger.ONE);
+        }
+        return quotient.multiply(width);
     }
 
     /**
@@ -77,7 +111,7 @@ public final class TimeBucketCalculator {
         DailyBuckets buckets = getDailyBuckets(startTimestampSeconds, endTimestampSeconds);
         // O(1) membership: cachedDays arrives as a List, and List.contains inside the body loop made
         // gap analysis O(body x cached) — noticeable on year-long windows.
-        java.util.Set<Long> cachedDaySet = new java.util.HashSet<>(cachedDays);
+        Set<Long> cachedDaySet = new HashSet<>(cachedDays);
         List<Long> missingBody = new ArrayList<>();
         for (long day : buckets.body()) {
             if (!cachedDaySet.contains(day)) {

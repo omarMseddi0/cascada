@@ -1,6 +1,6 @@
 package com.cascada.cache.domain.time;
 
-
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -16,12 +16,20 @@ public final class TimeBucketPyramid {
     /** Floor a timestamp to the start of its bucket at the given level. */
     public long bucketStart(long timestampSeconds, BucketLevel level) {
         long size = level.secondsPerBucket();
-        return Math.floorDiv(timestampSeconds, size) * size;
+        try {
+            return Math.multiplyExact(Math.floorDiv(timestampSeconds, size), size);
+        } catch (ArithmeticException outsideLongDomain) {
+            throw new BucketEnumerationLimitExceededException(TimeBucketCalculator.MAX_BUCKETS_PER_PLAN);
+        }
     }
 
     /** A bucket is complete (and therefore cacheable) once its whole span lies in the past. */
     public boolean isCompleteBucket(long bucketStartSeconds, BucketLevel level, long nowSeconds) {
-        return bucketStartSeconds + level.secondsPerBucket() <= nowSeconds;
+        try {
+            return Math.addExact(bucketStartSeconds, level.secondsPerBucket()) <= nowSeconds;
+        } catch (ArithmeticException outsideLongDomain) {
+            return false;
+        }
     }
 
     /** The coarser bucket start that a completed finer bucket compacts into at a boundary. */
@@ -45,19 +53,47 @@ public final class TimeBucketPyramid {
         Optional<TimeRange> leadingPartial = Optional.empty();
         long day = startDay;
         if (day < startSeconds) {
-            long firstDayEnd = day + BucketLevel.DAY.secondsPerBucket() - 1;
-            if (day < currentDayStart) leadingPartial = Optional.of(new TimeRange(startSeconds, firstDayEnd));
-            day += BucketLevel.DAY.secondsPerBucket();
+            if (day < currentDayStart) {
+                long firstDayEnd = day + BucketLevel.DAY.secondsPerBucket() - 1;
+                leadingPartial = Optional.of(new TimeRange(startSeconds, firstDayEnd));
+                day = Math.addExact(day, BucketLevel.DAY.secondsPerBucket());
+            }
         }
-        while (day < currentDayStart) {
-            completeDays.add(day);
-            day += BucketLevel.DAY.secondsPerBucket();
+        BigInteger completeDayCount = day < currentDayStart
+                ? BigInteger.valueOf(currentDayStart).subtract(BigInteger.ONE).subtract(BigInteger.valueOf(day))
+                .divide(BigInteger.valueOf(BucketLevel.DAY.secondsPerBucket())).add(BigInteger.ONE)
+                : BigInteger.ZERO;
+        if (completeDayCount.compareTo(BigInteger.valueOf(TimeBucketCalculator.MAX_BUCKETS_PER_PLAN)) > 0) {
+            throw new BucketEnumerationLimitExceededException(TimeBucketCalculator.MAX_BUCKETS_PER_PLAN);
+        }
+        long daysToAdd = completeDayCount.longValueExact();
+        long completeDay = day;
+        for (long index = 0; index < daysToAdd; index++) {
+            completeDays.add(completeDay);
+            if (index + 1 < daysToAdd) {
+                completeDay = Math.addExact(completeDay, BucketLevel.DAY.secondsPerBucket());
+            }
         }
 
         List<Long> completeHoursOfToday = new ArrayList<>();
         long liveHourStart = bucketStart(nowSeconds, BucketLevel.HOUR);
         long firstHour = Math.max(currentDayStart, bucketStart(startSeconds, BucketLevel.HOUR));
-        if (firstHour < startSeconds) firstHour += BucketLevel.HOUR.secondsPerBucket();
+        // When the query starts part-way through an earlier hour on today's date, the completed
+        // hour buckets begin at the following hour. Preserve the leading seconds as a separate
+        // live range; if start and now share an hour, livePartial below owns the whole range.
+        long startHourStart = bucketStart(startSeconds, BucketLevel.HOUR);
+        if (startDay == currentDayStart && startSeconds > startHourStart && startHourStart < liveHourStart) {
+            long firstCompleteHourStart = startHourStart + BucketLevel.HOUR.secondsPerBucket();
+            leadingPartial = Optional.of(new TimeRange(startSeconds,
+                    Math.min(nowSeconds, firstCompleteHourStart - 1)));
+        }
+        if (firstHour < startSeconds) {
+            try {
+                firstHour = Math.addExact(firstHour, BucketLevel.HOUR.secondsPerBucket());
+            } catch (ArithmeticException outsideLongDomain) {
+                firstHour = Long.MAX_VALUE;
+            }
+        }
         for (long hour = firstHour; hour < liveHourStart; hour += BucketLevel.HOUR.secondsPerBucket()) {
             completeHoursOfToday.add(hour);
         }

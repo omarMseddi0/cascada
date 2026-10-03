@@ -13,14 +13,16 @@
     <artifactId>cascada-app</artifactId>
     <name>Cascada Application - engine assembler + entrypoint</name>
     <description>
-        The thin "main code that calls the library": wires lib_sql (SQL canonicalisation) + lib_cache
-        (the cache engine, serializers, backends) + lib_spark/DuckDB (executor) into a single
-        CascadaEngine facade, and a runnable main() that runs an end-to-end query through the in-process
-        executor. Local and cluster differ only in which SparkQueryExecutorPort and CacheBackendPort are
-        injected here — the engine code is identical.
+        Composition root and command-line adapter for the SQL compiler, cache use cases,
+        and Spark/Delta execution adapter. Owns deployment configuration and resource lifecycle.
     </description>
 
     <dependencies>
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>com.cascada</groupId>
             <artifactId>cascada-lib-cache</artifactId>

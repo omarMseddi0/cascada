@@ -3,6 +3,7 @@
 A lakehouse query engine with a smart bucket cache
 
 
+
 ## Modules
 
 | Module | Contents |
@@ -32,8 +33,8 @@ mvn test
 - Bucket boundary algebra partitions head/body/tail with no gap or overlap; epoch resampling
   floors to step buckets, never to zero.
 - The logic hash ignores the time range and clause order, but changes with aggregates, group-by,
-  filters, step, HAVING, JOIN ON conditions, and DISTINCT — and stays byte-stable for queries
-  that use none of the new signature (no cold-cache event on upgrade).
+  filters, step, HAVING, JOIN ON conditions, and DISTINCT. The canonical semantics version also
+  separates identities produced by different projection-order rules.
 - DISTINCT, HAVING, and JOIN bypass the cache entirely (`NON_MERGEABLE_SQL_FEATURE`): their
   per-bucket partials cannot be recombined into the whole-window answer.
 - Warming stops at the last **complete** bucket boundary; a mid-bucket `warmEnd` never stores a
@@ -51,8 +52,8 @@ mvn test
 Gluten is config-layered onto the same SparkSession — no engine code change. Needs a Linux image
 with `gluten-velox-bundle-spark3.5_*.jar` and, critically, the **off-heap re-split**: Velox works
 off-heap, so `spark.memory.offHeap.size` takes ~60% of executor RAM and the JVM heap *shrinks* to
-~30% (leaving heap at its vanilla size is the classic production OOM). `spark.gluten.enabled` is
-the per-query kill switch; any Gluten failure retries once with it off. Verify with `EXPLAIN`
+~30% (leaving heap at its vanilla size can exceed the executor memory budget). Gluten configuration
+is selected by the workload profile; the executor does not implement an automatic retry with Gluten disabled. Verify with `EXPLAIN`
 (look for `VeloxNativeScan`); many `VeloxColumnarToRowExec` boundaries mean a mostly-fallback plan.
 
 

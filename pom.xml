@@ -13,7 +13,7 @@
     <description>
         The lakehouse query engine that gets faster the more you use it.
         Parent aggregator and dependency-management BOM for every Cascada module.
-        Domain and application layers are framework-free Java 21; frameworks live only in adapters.
+        Domain and application layers are framework-free Java 17; frameworks live only in adapters.
     </description>
 
     <modules>

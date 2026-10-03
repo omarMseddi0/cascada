@@ -8,7 +8,7 @@ import com.cascada.cache.application.service.CacheExecutionConfiguration;
 import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.application.service.WarmingOrchestrator;
 import com.cascada.cache.domain.CanonicalQueryObject;
-import com.cascada.cache.domain.HashComponents;
+import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.PostProcessing;
 import com.cascada.cache.domain.QueryMetadata;
 import com.cascada.cache.domain.TimeRange;

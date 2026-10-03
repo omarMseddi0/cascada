@@ -4,7 +4,7 @@ import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.domain.BypassReason;
 import com.cascada.cache.domain.CanonicalQueryObject;
-import com.cascada.cache.domain.HashComponents;
+import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.PostProcessing;
 import com.cascada.cache.domain.QueryMetadata;
 import com.cascada.cache.domain.TimeRange;

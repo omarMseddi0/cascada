@@ -1,5 +1,7 @@
 package com.cascada.cache.domain;
 
+import com.cascada.cache.domain.hashing.HashComponents;
+
 import java.util.List;
 import java.util.Optional;
 

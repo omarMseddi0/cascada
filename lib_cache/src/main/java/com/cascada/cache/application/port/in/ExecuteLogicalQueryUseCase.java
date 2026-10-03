@@ -1,5 +1,7 @@
 package com.cascada.cache.application.port.in;
 
+import com.cascada.cache.domain.CanonicalQueryObject;
+
 /**
  * <b>Primary (driving) port</b> — "answer this query, written the way the customer thinks about their
  * data".

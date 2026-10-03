@@ -4,7 +4,7 @@ import com.cascada.sql.domain.AggregateNormalizer;
 import com.cascada.sql.domain.TimeDimensionMap;
 import com.cascada.sql.domain.UnsupportedSqlException;
 import com.cascada.cache.domain.CanonicalQueryObject;
-import com.cascada.cache.domain.HashComponents;
+import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.OrderByClause;
 import com.cascada.cache.domain.PostProcessing;
 import com.cascada.cache.domain.QueryMetadata;

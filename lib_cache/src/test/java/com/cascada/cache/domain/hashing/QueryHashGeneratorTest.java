@@ -2,7 +2,7 @@ package com.cascada.cache.domain.hashing;
 
 import com.cascada.cache.domain.CacheConstants;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.PostProcessing;
+import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.TimeRange;
 import com.cascada.identity.domain.QueryHash;

@@ -1,6 +1,5 @@
-package com.cascada.cache.domain;
+package com.cascada.cache.domain.query;
 
-import com.cascada.cache.domain.query.OrderByClause;
 
 import java.util.List;
 import java.util.Optional;

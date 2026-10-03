@@ -2,6 +2,7 @@ package com.cascada.cache.domain.cube;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.merge.AggregateFunction;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -159,12 +160,71 @@ class CubeConsistencyVerifierTest {
     }
 
     @Test
+    void preservesNullAverageForAllNullIngredientsAndZeroCount() {
+        Map<String, Object> zeroCountRow = new HashMap<>();
+        zeroCountRow.put("city", "Paris");
+        zeroCountRow.put("shard", "first");
+        zeroCountRow.put("SUM(amount)", null);
+        zeroCountRow.put("COUNT(amount)", 0.0d);
+        Map<String, Object> nullIngredientsRow = new HashMap<>();
+        nullIngredientsRow.put("city", "Paris");
+        nullIngredientsRow.put("shard", "second");
+        nullIngredientsRow.put("SUM(amount)", null);
+        nullIngredientsRow.put("COUNT(amount)", null);
+        Map<String, Object> noIngredientsRow = new HashMap<>();
+        noIngredientsRow.put("city", "Rome");
+        noIngredientsRow.put("shard", "first");
+        noIngredientsRow.put("SUM(amount)", null);
+        noIngredientsRow.put("COUNT(amount)", null);
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("shard", ColumnType.STRING)
+                .column("SUM(amount)", ColumnType.DOUBLE)
+                .column("COUNT(amount)", ColumnType.DOUBLE)
+                .row(zeroCountRow)
+                .row(nullIngredientsRow)
+                .row(noIngredientsRow)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city", "shard"), Set.of(),
+                        Set.of("SUM(amount)", "COUNT(amount)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(),
+                Set.of("SUM(amount)", "COUNT(amount)", "AVG(amount)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(answer.rows()).hasSize(2);
+        assertThat(answer.rows()).allSatisfy(row -> assertThat(row.get("AVG(amount)")).isNull());
+        assertThat(verifier.verifyRollUp(candidate, query, answer).isConsistent()).isTrue();
+    }
+
+    @Test
     void confirmsAFaithfulFilterDown() {
         QueryShape query = new QueryShape(Set.of("appName"),
                 Set.of("region IN ('eu', 'us')"), Set.of("SUM(latency)"));
         ResultFrame answer = planner.rollUpAndFilterDown(finest(), query);
 
         assertThat(verifier.verifyRollUp(finest(), query, answer).isConsistent()).isTrue();
+    }
+
+    @Test
+    void rejectsAFilterResultThatLosesSpacesInsideAQuotedStringLiteral() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("region", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.LONG)
+                .row("north", 10L)
+                .row(" north ", 20L)
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("region"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of(),
+                Set.of("region IN (' north ')"), Set.of("SUM(x)"));
+        ResultFrame incorrectlyTrimmedAnswer = ResultFrame.builder()
+                .column("SUM(x)", ColumnType.LONG)
+                .row(10L)
+                .build();
+
+        assertThat(verifier.verifyRollUp(candidate, query, incorrectlyTrimmedAnswer).isConsistent()).isFalse();
     }
 
     @Test
@@ -260,15 +320,72 @@ class CubeConsistencyVerifierTest {
         }
     }
 
+    @Test
+    void rejectsAPlannerAnswerWithDifferentColumnOrderAndTypes() {
+        List<String> projection = List.of("SUM(x) AS total", "city");
+        ResultFrame frame = ResultFrame.builder()
+                .column("total", ColumnType.LONG)
+                .column("city", ColumnType.STRING)
+                .row(15L, "Paris")
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city", "region"), Set.of(), Set.of("SUM(x) AS total"),
+                        Set.of("traffic"), Map.of("total", AggregateFunction.SUM), projection), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x) AS total"),
+                Set.of("traffic"), Map.of("total", AggregateFunction.SUM), projection);
+        ResultFrame wrongContract = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("total", ColumnType.DOUBLE)
+                .row("Paris", 15.0)
+                .build();
+
+        CubeConsistencyVerifier.VerificationResult result =
+                verifier.verifyRollUp(candidate, query, wrongContract);
+
+        assertThat(result.isConsistent()).isFalse();
+        assertThat(result.reason()).contains("schema or column order");
+    }
+
+    @Test
+    void preservesNullAndStringDimensionKeysDuringIndependentVerification() {
+        Map<String, Object> nullCity = new HashMap<>();
+        nullCity.put("city", null);
+        nullCity.put("region", "north");
+        nullCity.put("SUM(x)", 10.0);
+        ResultFrame frame = ResultFrame.builder()
+                .column("city", ColumnType.STRING)
+                .column("region", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.DOUBLE)
+                .row(nullCity)
+                .row(Map.of("city", "null", "region", "south", "SUM(x)", 20.0))
+                .build();
+        CachedShapeEntry candidate = new CachedShapeEntry(
+                new QueryShape(Set.of("city", "region"), Set.of(), Set.of("SUM(x)")), frame);
+        QueryShape query = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x)"));
+
+        ResultFrame answer = planner.rollUpAndFilterDown(candidate, query);
+
+        assertThat(verifier.verifyRollUp(candidate, query, answer).isConsistent()).isTrue();
+    }
+
+    @Test
+    void convertsUnexpectedVerifierRuntimeFailuresIntoAnInconsistentVerdict() {
+        CubeConsistencyVerifier.VerificationResult result =
+                verifier.verifyRollUp(finest(), new QueryShape(Set.of(), Set.of(), Set.of()), null);
+
+        assertThat(result.isConsistent()).isFalse();
+        assertThat(result.reason()).isNotBlank();
+    }
+
     // --- frame-tampering helpers (simulate a buggy roll-up) ------------------------------------------
 
     private ResultFrame withMeasureBumped(ResultFrame frame, String measure) {
         ResultFrame.Builder builder = rebuildSchema(frame);
         boolean bumped = false;
-        for (Map<String, Object> r : frame.rows()) {
-            Map<String, Object> copy = new HashMap<>(r);
+        for (Map<String, Object> row : frame.rows()) {
+            Map<String, Object> copy = new HashMap<>(row);
             if (!bumped) {
-                copy.put(measure, ((Number) r.get(measure)).doubleValue() + 1.0);
+                copy.put(measure, ((Number) row.get(measure)).doubleValue() + 1.0);
                 bumped = true;
             }
             builder.row(copy);

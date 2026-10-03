@@ -1,6 +1,7 @@
 package com.cascada.cache.domain.cube;
 
 import com.cascada.cache.domain.merge.AggregateFunction;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -10,7 +11,8 @@ import java.util.Set;
  * a finer one by roll-up and filter-down.
  */
 public record QueryShape(Set<String> groupBy, Set<String> filters, Set<String> aggregates,
-                         Set<String> sources, Map<String, AggregateFunction> outputAggregates) {
+                         Set<String> sources, Map<String, AggregateFunction> outputAggregates,
+                         List<String> projectionSignature) {
 
     public QueryShape {
         groupBy = Set.copyOf(groupBy);
@@ -18,9 +20,15 @@ public record QueryShape(Set<String> groupBy, Set<String> filters, Set<String> a
         aggregates = Set.copyOf(aggregates);
         sources = Set.copyOf(sources);
         outputAggregates = Map.copyOf(outputAggregates);
+        projectionSignature = List.copyOf(projectionSignature);
+    }
+
+    public QueryShape(Set<String> groupBy, Set<String> filters, Set<String> aggregates,
+                      Set<String> sources, Map<String, AggregateFunction> outputAggregates) {
+        this(groupBy, filters, aggregates, sources, outputAggregates, List.of());
     }
 
     public QueryShape(Set<String> groupBy, Set<String> filters, Set<String> aggregates) {
-        this(groupBy, filters, aggregates, Set.of(), Map.of());
+        this(groupBy, filters, aggregates, Set.of(), Map.of(), List.of());
     }
 }

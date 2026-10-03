@@ -6,6 +6,10 @@ import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.nio.ByteBuffer;
+import com.github.luben.zstd.Zstd;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -49,6 +53,41 @@ class PortableFrameSerializerTest {
     @Test
     void corruptBlobRaisesSerializationException() {
         assertThatThrownBy(() -> serializer.deserialize(new byte[]{0, 0, 0, 8, 1, 2, 3}))
+                .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
+    }
+
+    @Test
+    void roundTripsStringsBeyondModifiedUtfLimit() {
+        String value = "é😀".repeat(30_000);
+        ResultFrame frame = ResultFrame.builder().column("value", ColumnType.STRING)
+                .row(Map.of("value", value)).build();
+        assertThat(serializer.deserialize(serializer.serialize(frame)).rows()).isEqualTo(frame.rows());
+    }
+
+    @Test
+    void readsExistingPortableEncoding() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(bytes)) {
+            out.writeInt(1);
+            out.writeUTF("value");
+            out.writeByte(ColumnType.STRING.ordinal());
+            out.writeInt(1);
+            out.writeBoolean(true);
+            out.writeUTF("old cached value");
+        }
+        byte[] compressed = Zstd.compress(bytes.toByteArray());
+        byte[] blob = ByteBuffer.allocate(4 + compressed.length).putInt(bytes.size())
+                .put(compressed).array();
+        assertThat(serializer.deserialize(blob).rows()).containsExactly(Map.of("value", "old cached value"));
+    }
+
+    @Test
+    void rejectsForgedLengthBeforeAllocation() {
+        byte[] blob = serializer.serialize(sampleFrame());
+        ByteBuffer.wrap(blob).putInt(Integer.MAX_VALUE);
+        assertThatThrownBy(() -> serializer.deserialize(blob))
+                .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
+        assertThatThrownBy(() -> new ArrowResultFrameSerializer().deserialize(blob))
                 .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
     }
 }

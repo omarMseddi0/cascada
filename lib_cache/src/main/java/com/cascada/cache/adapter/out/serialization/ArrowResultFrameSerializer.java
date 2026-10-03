@@ -66,6 +66,9 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             int uncompressedLength = buffer.getInt();
             byte[] compressed = new byte[buffer.remaining()];
             buffer.get(compressed);
+            if (uncompressedLength < 0 || Zstd.decompressedSize(compressed) != uncompressedLength) {
+                throw new IllegalArgumentException("invalid uncompressed frame length");
+            }
             byte[] ipc = Zstd.decompress(compressed, uncompressedLength);
             return decodeFromArrowIpc(ipc);
         } catch (RuntimeException corrupt) {

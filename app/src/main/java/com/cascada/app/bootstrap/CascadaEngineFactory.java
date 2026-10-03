@@ -1,5 +1,7 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.app.config.CacheBackend;
+
 import com.cascada.app.config.EngineSettings;
 
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
@@ -124,7 +126,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
      */
     private CacheBackendPort cacheBackend() {
         ArrowResultFrameSerializer serializer = new ArrowResultFrameSerializer();
-        return settings.useLocalSpark()
+        return settings.cacheBackend() == CacheBackend.MEMORY
                 ? new InMemoryBlobCacheBackendAdapter(serializer)
                 : new ValkeyCacheBackendAdapter(settings.redisUri(), serializer);
     }

@@ -1,28 +1,18 @@
 package com.cascada.app.adapter.out.configuration;
 
-import com.cascada.app.config.EngineSettings;
-
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
-import com.cascada.spark.application.port.out.EnvironmentPort;
+import com.cascada.app.config.EngineSettings;
+import com.cascada.app.config.CacheBackend;
+import java.util.Objects;
+import java.util.function.Function;
 
-/**
- * Turns the surrounding environment into an {@link EngineSettings}. This is the <em>only</em> place in
- * the application that decides what an environment variable means.
- *
- * <p>Keeping it separate from {@link EngineSettings} matters: the settings record stays a pure value that
- * a test can construct literally, while every "read this variable, fall back to that default" rule lives
- * in one readable list. Adding a ConfigMap or a control-plane API as a configuration source later is a
- * new reader, not a change to the engine.
- *
- * <p>Note it takes an {@link EnvironmentPort} rather than calling {@link System#getenv} itself, so this
- * class too is unit-testable with a map.
- */
+/** Parses app deployment settings from an injected environment lookup. */
 public final class EnvironmentSettingsReader {
 
-    private final EnvironmentPort environment;
+    private final Function<String, String> environment;
 
-    public EnvironmentSettingsReader(EnvironmentPort environment) {
-        this.environment = environment;
+    public EnvironmentSettingsReader(Function<String, String> environment) {
+        this.environment = Objects.requireNonNull(environment, "environment");
     }
 
     /** Read every setting, falling back to the local defaults for anything unset. */
@@ -30,22 +20,45 @@ public final class EnvironmentSettingsReader {
         EngineSettings defaults = EngineSettings.localDefaults();
         CacheExecutionConfiguration cacheExecution = new CacheExecutionConfiguration(
                 longSetting("CASCADA_BUCKET_SECONDS", defaults.cacheExecution().bucketSeconds()),
-                (int) longSetting("CASCADA_FIXED_STEP_SECONDS", defaults.cacheExecution().fixedStepSeconds()),
-                environment.getOrDefault("CASCADA_TIME_COLUMN", defaults.cacheExecution().timeColumnName()));
+                intSetting("CASCADA_FIXED_STEP_SECONDS", defaults.cacheExecution().fixedStepSeconds()),
+                setting("CASCADA_TIME_COLUMN", defaults.cacheExecution().timeColumnName()));
+
+        boolean localSpark = localSparkMode(setting("CASCADA_RUN_MODE", "local"));
 
         return new EngineSettings(
                 cacheExecution,
-                environment.getOrDefault("REDIS_URL", defaults.redisUri()),
-                environment.getOrDefault("CASCADA_MAIN_TABLE_NAME", defaults.mainTableName()),
-                environment.getOrDefault("CASCADA_MAIN_TABLE_PATH", defaults.mainTablePath()),
-                // Absence of an explicit Kubernetes master means "local" — a dev machine should never
-                // accidentally aim at a cluster because a variable was forgotten.
-                !"cluster".equalsIgnoreCase(environment.getOrDefault("CASCADA_RUN_MODE", "local")),
-                (int) longSetting("CASCADA_WARMING_TOP_N", defaults.warmingTopNQueries()));
+                setting("REDIS_URL", defaults.redisUri()),
+                setting("CASCADA_MAIN_TABLE_NAME", defaults.mainTableName()),
+                setting("CASCADA_MAIN_TABLE_PATH", defaults.mainTablePath()),
+                localSpark,
+                intSetting("CASCADA_WARMING_TOP_N", defaults.warmingTopNQueries()),
+                CacheBackend.parse(setting("CASCADA_CACHE_BACKEND", localSpark ? "memory" : "valkey")));
+    }
+
+    private String setting(String name, String fallback) {
+        String value = environment.apply(name);
+        return value == null ? fallback : value;
+    }
+
+    private static boolean localSparkMode(String value) {
+        return switch (value.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "local" -> true;
+            case "cluster" -> false;
+            default -> throw new IllegalArgumentException("CASCADA_RUN_MODE must be local or cluster: " + value);
+        };
+    }
+
+    private int intSetting(String name, int fallback) {
+        long value = longSetting(name, fallback);
+        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(name + " must be between " + Integer.MIN_VALUE + " and "
+                    + Integer.MAX_VALUE + ", but was: " + value);
+        }
+        return (int) value;
     }
 
     private long longSetting(String name, long fallback) {
-        String raw = environment.get(name);
+        String raw = environment.apply(name);
         if (raw == null) {
             return fallback;
         }

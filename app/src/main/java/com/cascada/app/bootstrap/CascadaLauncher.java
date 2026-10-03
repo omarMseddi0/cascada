@@ -47,7 +47,7 @@ public final class CascadaLauncher {
     }
 
     public static void main(String[] args) {
-        EngineSettings settings = new EnvironmentSettingsReader(SystemEnvironmentAdapter.INSTANCE).read();
+        EngineSettings settings = new EnvironmentSettingsReader(SystemEnvironmentAdapter.INSTANCE::get).read();
 
         try (SparkDeltaQueryExecutor executor = sparkExecutor(settings);
              CascadaEngineFactory factory = new CascadaEngineFactory(settings, executor)) {

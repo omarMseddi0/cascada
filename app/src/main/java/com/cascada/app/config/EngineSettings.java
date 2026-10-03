@@ -1,37 +1,33 @@
 package com.cascada.app.config;
 
-import com.cascada.app.adapter.out.configuration.EnvironmentSettingsReader;
-
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import java.util.Objects;
 
-/**
- * Every deployment-time decision the composition root needs, in one place.
- *
- * <p>This is intentionally a dumb value record with no lookups inside it. Where the values come from —
- * environment variables, a mounted ConfigMap, a CLI flag, a test literal — is the decision of whoever
- * builds it (see {@link EnvironmentSettingsReader}), never of the object itself. That separation is what
- * keeps {@link CascadaEngineFactory} deterministic and lets a test wire the whole engine without
- * touching the machine.
- *
- * @param cacheExecution   bucket width, fixed internal storage step, and physical time column name
- * @param redisUri         Valkey/Redis endpoint for the hot cache tier
- * @param mainTableName    the logical table name customers write in their SQL
- * @param mainTablePath    the physical Delta path that logical table resolves to
- * @param useLocalSpark    {@code true} builds a {@code local[*]} session, {@code false} a {@code k8s://} one;
- *                         nothing else differs between local and cluster
- * @param warmingTopNQueries how many popular query patterns the Layer-2 warmer considers per cycle
- */
+/** Immutable deployment settings, with independent Spark placement and cache storage choices. */
 public record EngineSettings(CacheExecutionConfiguration cacheExecution,
                              String redisUri,
                              String mainTableName,
                              String mainTablePath,
                              boolean useLocalSpark,
-                             int warmingTopNQueries) {
+                             int warmingTopNQueries,
+                             CacheBackend cacheBackend) {
 
     public EngineSettings {
+        Objects.requireNonNull(cacheExecution, "cacheExecution");
+        Objects.requireNonNull(redisUri, "redisUri");
+        Objects.requireNonNull(mainTableName, "mainTableName");
+        Objects.requireNonNull(mainTablePath, "mainTablePath");
+        Objects.requireNonNull(cacheBackend, "cacheBackend");
         if (warmingTopNQueries < 0) {
             throw new IllegalArgumentException("warmingTopNQueries must be >= 0, but was: " + warmingTopNQueries);
         }
+    }
+
+    /** Preserves the original default backend selection for existing callers. */
+    public EngineSettings(CacheExecutionConfiguration cacheExecution, String redisUri, String mainTableName,
+                          String mainTablePath, boolean useLocalSpark, int warmingTopNQueries) {
+        this(cacheExecution, redisUri, mainTableName, mainTablePath, useLocalSpark, warmingTopNQueries,
+                useLocalSpark ? CacheBackend.MEMORY : CacheBackend.VALKEY);
     }
 
     /**

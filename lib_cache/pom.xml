@@ -20,6 +20,12 @@
     </description>
 
     <dependencies>
+        <!-- Latest stable Agrona; Java 17 supported with its required module opens. -->
+        <dependency>
+            <groupId>org.agrona</groupId>
+            <artifactId>agrona</artifactId>
+            <version>2.6.1</version>
+        </dependency>
         <dependency>
             <groupId>com.cascada</groupId>
             <artifactId>cascada-lib-identity</artifactId>
@@ -62,14 +68,44 @@
         </dependency>
     </dependencies>
 
+    <profiles>
+        <profile>
+            <id>benchmarks</id>
+            <dependencies>
+                <dependency>
+                    <groupId>org.openjdk.jmh</groupId>
+                    <artifactId>jmh-core</artifactId>
+                    <version>1.37</version>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.openjdk.jmh</groupId>
+                    <artifactId>jmh-generator-annprocess</artifactId>
+                    <version>1.37</version>
+                    <scope>test</scope>
+                </dependency>
+            </dependencies>
+            <build><plugins><plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions><execution>
+                    <id>benchmark-sources</id><phase>generate-test-sources</phase>
+                    <goals><goal>add-test-source</goal></goals>
+                    <configuration><sources><source>src/benchmark/java</source></sources></configuration>
+                </execution></executions>
+            </plugin></plugins></build>
+        </profile>
+    </profiles>
+
     <build>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!-- Arrow and DataSketches tests access JDK internals on the Java 17 target. -->
-                    <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED</argLine>
+                    <!-- Agrona, Arrow and DataSketches require access to these JDK modules. -->
+                    <argLine>${agrona.jvm.args} --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED</argLine>
                 </configuration>
             </plugin>
         </plugins>

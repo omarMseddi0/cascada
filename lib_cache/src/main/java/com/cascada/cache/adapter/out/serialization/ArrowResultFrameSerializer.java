@@ -27,8 +27,7 @@ import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
+import org.agrona.collections.Object2ObjectHashMap;
 
 /**
  * The language-neutral production cache serializer: encodes a {@link ResultFrame} as **Apache Arrow IPC
@@ -70,31 +69,13 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
     public byte[] serialize(ResultFrame frame) {
         if (frame.rowCount() >= 4_096) return encodeCompressedArrow(frame);
         byte[] ipc = encodeToArrowIpc(frame);
-        byte[] compressed = Zstd.compress(ipc, compressionLevel);
-        ByteBuffer blob = ByteBuffer.allocate(Integer.BYTES + compressed.length);
-        blob.putInt(ipc.length);
-        blob.put(compressed);
-        return blob.array();
+        return ZstdFrameEnvelope.compress(ipc, ipc.length, compressionLevel);
     }
 
     @Override
     public ResultFrame deserialize(byte[] blob) {
         try {
-            ByteBuffer buffer = ByteBuffer.wrap(blob);
-            int uncompressedLength = buffer.getInt();
-            int compressedOffset = buffer.position();
-            int compressedLength = buffer.remaining();
-            if (uncompressedLength < 0
-                    || Zstd.decompressedSize(blob, compressedOffset, compressedLength) != uncompressedLength) {
-                throw new IllegalArgumentException("invalid uncompressed frame length");
-            }
-            byte[] ipc = new byte[uncompressedLength];
-            long decompressedBytes = Zstd.decompressByteArray(ipc, 0, uncompressedLength,
-                    blob, compressedOffset, compressedLength);
-            if (Zstd.isError(decompressedBytes) || decompressedBytes != uncompressedLength) {
-                throw new IllegalArgumentException("invalid compressed frame data: "
-                        + Zstd.getErrorName(decompressedBytes));
-            }
+            byte[] ipc = ZstdFrameEnvelope.decompress(blob);
             return decodeFromArrowIpc(ipc);
         } catch (RuntimeException corrupt) {
             throw new CacheSerializationException("Arrow cache blob could not be decoded; data may be corrupt",
@@ -217,7 +198,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
                 if (rowCount > 0) {
                     for (int column = 0; column < fields.size(); column++) {
                         if (columnTypes[column] == ColumnType.STRING && strings[column] == null) {
-                            strings[column] = new Utf8ValueCache(rowCount >= 4_096 ? 4_096 : Math.min(64, rowCount));
+                            strings[column] = new Utf8ValueCache(rowCount >= 4_096 ? 256 : Math.min(64, rowCount));
                         }
                     }
                 }
@@ -253,14 +234,14 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
 
     /** Bounded per-column encoding reuse; predominantly distinct columns leave the cache early. */
     private static final class Utf8EncodingCache {
-        private final Map<String, byte[]> values = new HashMap<>();
+        private Object2ObjectHashMap<String, byte[]> values = new Object2ObjectHashMap<>();
         private int reads;
         private int hits;
         private int bytes;
         private boolean disabled;
         private final int sampleSize;
 
-        private Utf8EncodingCache(int rows) { sampleSize = rows >= 4_096 ? 4_096 : Math.max(1, Math.min(64, rows)); }
+        private Utf8EncodingCache(int rows) { sampleSize = rows >= 4_096 ? 256 : Math.max(1, Math.min(64, rows)); }
 
         private byte[] encode(String value) {
             if (disabled) return value.getBytes(StandardCharsets.UTF_8);
@@ -269,7 +250,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             if (encoded != null) { hits++; return encoded; }
             encoded = value.getBytes(StandardCharsets.UTF_8);
             if (reads >= sampleSize && (long) hits * 10 < reads) {
-                values.clear();
+                values = null;
                 disabled = true;
             } else if (values.size() < 16_384 && encoded.length <= 1_048_576 - bytes) {
                 values.put(value, encoded);

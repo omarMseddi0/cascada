@@ -16,6 +16,22 @@ A lakehouse query engine with a smart bucket cache
 | `lib_fabric` | Cluster deployment: env-driven K8s YAML templates applied via Fabric8 (ServiceAccount/RBAC, ConfigMaps, executor pod template, driver Deployment), tested against the Fabric8 mock server |
 | `app` | Wiring. `mvn -Plocal-spark` bundles real Spark 3.5 + Delta for a local `local[*]` run (JDK 17 toolchain, or add-opens on newer) |
 
+## Java and Agrona runtime
+
+The project targets Java 17 and uses Agrona **2.6.1** (latest stable release verified on 4 October 2026).
+Java does not need an upgrade for this Agrona release. Agrona 2.x requires these options on the JVM
+running Cascada, including the Spark driver JVM:
+
+```text
+--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+--add-opens=java.base/java.util.zip=ALL-UNNAMED
+```
+
+Keep the existing Arrow/Spark module options as well. Maven tests and the benchmark/resource runners
+include the required options automatically. For an application launch, add them to `JAVA_TOOL_OPTIONS`
+or the JVM startup arguments; for `spark-submit`, include them in `--driver-java-options` before the
+Spark driver starts. Configuring driver JVM options after an in-process SparkSession starts is too late.
+
 ## Build and test
 
 ```bash

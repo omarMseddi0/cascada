@@ -51,4 +51,21 @@ class Utf8ValueCacheTest {
             assertThat(cache.read(vector, 1)).isSameAs(first);
         }
     }
+
+    @Test
+    void rejectsInvalidOffsetsBeforeCreatingANativeLookupView() {
+        try (var allocator = new org.apache.arrow.memory.RootAllocator();
+             var vector = new org.apache.arrow.vector.VarCharVector("s", allocator)) {
+            vector.allocateNew();
+            vector.setSafe(0, "value".getBytes(StandardCharsets.UTF_8));
+            vector.setValueCount(1);
+            var offsets = vector.getOffsetBuffer();
+            offsets.setInt(0, -1);
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> new Utf8ValueCache().read(vector,0))
+                    .isInstanceOf(IllegalArgumentException.class);
+            offsets.setInt(0, 0); offsets.setInt(4, Integer.MAX_VALUE);
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> new Utf8ValueCache().read(vector,0))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+    }
 }

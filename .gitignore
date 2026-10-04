@@ -16,3 +16,9 @@ IMPLEMENTATION_PLAN.md
 /docs/refactor-review.md
 /docs/design.md
 refactor*.md
+
+# Local-only performance benchmarks, runners and measurement reports
+**/src/benchmark/
+/scripts/Run-AgronaBenchmarks.ps1
+/scripts/Measure-AgronaResources.ps1
+/docs/performance/

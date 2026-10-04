@@ -6,13 +6,15 @@ import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.github.luben.zstd.Zstd;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.ByteOrder;
+import org.agrona.ExpandableArrayBuffer;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CharacterCodingException;
+import org.agrona.concurrent.UnsafeBuffer;
 import java.util.List;
 
 /**
@@ -46,139 +48,167 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
 
     @Override
     public byte[] serialize(ResultFrame frame) {
-        byte[] encoded = encode(frame);
-        byte[] compressed = Zstd.compress(encoded, compressionLevel);
-        ByteBuffer blob = ByteBuffer.allocate(Integer.BYTES + compressed.length);
-        blob.putInt(encoded.length);
-        blob.put(compressed);
-        return blob.array();
+        Writer out = encode(frame);
+        return ZstdFrameEnvelope.compress(out.buffer.byteArray(), out.position, compressionLevel);
     }
 
     @Override
     public ResultFrame deserialize(byte[] blob) {
         try {
-            ByteBuffer buffer = ByteBuffer.wrap(blob);
-            int uncompressedLength = buffer.getInt();
-            int compressedOffset = buffer.position();
-            int compressedLength = buffer.remaining();
-            if (uncompressedLength < 0
-                    || Zstd.decompressedSize(blob, compressedOffset, compressedLength) != uncompressedLength) {
-                throw new IllegalArgumentException("invalid uncompressed frame length");
-            }
-            byte[] encoded = new byte[uncompressedLength];
-            long decompressedBytes = Zstd.decompressByteArray(encoded, 0, uncompressedLength,
-                    blob, compressedOffset, compressedLength);
-            if (Zstd.isError(decompressedBytes) || decompressedBytes != uncompressedLength) {
-                throw new IllegalArgumentException("invalid compressed frame data: "
-                        + Zstd.getErrorName(decompressedBytes));
-            }
+            byte[] encoded = ZstdFrameEnvelope.decompress(blob);
             return decode(encoded);
         } catch (RuntimeException corrupt) {
             throw new CacheSerializationException("cache blob could not be decoded; data may be corrupt", corrupt);
         }
     }
 
-    private byte[] encode(ResultFrame frame) {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (DataOutputStream out = new DataOutputStream(bytes)) {
-            List<String> columns = frame.columnNames();
-            ColumnType[] columnTypes = new ColumnType[columns.size()];
-            out.writeInt(UTF8_FORMAT);
-            out.writeInt(columns.size());
-            for (int column = 0; column < columns.size(); column++) {
-                writeString(out, columns.get(column));
-                columnTypes[column] = frame.columnTypeAt(column);
-                out.writeByte(columnTypes[column].ordinal());
-            }
-            out.writeInt(frame.rowCount());
-            for (int row = 0; row < frame.rowCount(); row++) {
-                for (int column = 0; column < columns.size(); column++) {
-                    writeValue(out, frame, row, column, columnTypes[column]);
+    private Writer encode(ResultFrame frame) {
+        Writer out = new Writer();
+        List<String> columns = frame.columnNames();
+        ResultFrame.ColumnReader[] readers = new ResultFrame.ColumnReader[columns.size()];
+        out.writeInt(UTF8_FORMAT);
+        out.writeInt(columns.size());
+        for (int column = 0; column < columns.size(); column++) {
+            out.writeString(columns.get(column));
+            readers[column] = frame.columnReader(column);
+            out.writeByte(readers[column].type().ordinal());
+        }
+        out.writeInt(frame.rowCount());
+        for (int row = 0; row < frame.rowCount(); row++) {
+            for (ResultFrame.ColumnReader values : readers) {
+                boolean present = !values.isNullAt(row);
+                out.writeByte(present ? 1 : 0);
+                if (!present) continue;
+                switch (values.type()) {
+                    case LONG -> out.writeLong(values.longValue(row));
+                    // DataOutputStream canonicalises NaN; preserve the existing wire bytes.
+                    case DOUBLE -> out.writeLong(Double.doubleToLongBits(values.doubleValue(row)));
+                    case STRING -> out.writeString(values.stringValue(row));
+                    case DECIMAL -> out.writeString(values.decimalValue(row).toString());
                 }
             }
-        } catch (IOException impossible) {
-            throw new CacheSerializationException("frame encoding failed", impossible);
         }
-        return bytes.toByteArray();
+        return out;
     }
 
-    private void writeValue(DataOutputStream out, ResultFrame frame, int row, int column, ColumnType type)
-            throws IOException {
-        boolean valuePresent = !frame.isNullAt(row, column);
-        out.writeBoolean(valuePresent);
-        if (!valuePresent) {
-            return;
+    /** Call-owned storage: safe concurrent use, with no retained giant thread-local buffers. */
+    private static final class Writer {
+        private final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(1_024);
+        private int position;
+
+        void writeByte(int value) {
+            buffer.putByte(position, (byte) value);
+            position = Math.addExact(position, 1);
         }
-        switch (type) {
-            case LONG -> out.writeLong(frame.longAt(row, column));
-            case DOUBLE -> out.writeDouble(frame.doubleAt(row, column));
-            case STRING -> writeString(out, frame.stringAt(row, column));
-            case DECIMAL -> writeString(out, frame.valueAt(row, column).toString());
+        void writeInt(int value) {
+            buffer.putInt(position, value, ByteOrder.BIG_ENDIAN);
+            position = Math.addExact(position, Integer.BYTES);
+        }
+        void writeLong(long value) {
+            buffer.putLong(position, value, ByteOrder.BIG_ENDIAN);
+            position = Math.addExact(position, Long.BYTES);
+        }
+        void writeString(String value) {
+            position = Math.addExact(position, buffer.putStringUtf8(position, value, ByteOrder.BIG_ENDIAN));
         }
     }
 
     private ResultFrame decode(byte[] encoded) {
+        Reader in = new Reader(encoded);
+        if (in.readInt() != UTF8_FORMAT) return decodeLegacy(encoded);
+        int columns = in.readInt();
+        if (columns < 0 || columns > in.remaining() / 5) throw new IllegalArgumentException("invalid column count");
+        ColumnType[] types = new ColumnType[columns];
+        ColumnType[] knownTypes = ColumnType.values();
+        ResultFrame.Builder builder = ResultFrame.builder();
+        for (int column = 0; column < columns; column++) {
+            String name = in.readString();
+            int type = in.readByte();
+            if (type >= knownTypes.length) throw new IllegalArgumentException("invalid column type");
+            types[column] = knownTypes[type];
+            builder.column(name, types[column]);
+        }
+        int rows = in.readInt();
+        if (rows < 0 || (long) rows * columns > in.remaining() || columns == 0 && rows != 0) {
+            throw new IllegalArgumentException("invalid row count");
+        }
+        builder.expectedRows(rows);
+        for (int row = 0; row < rows; row++) {
+            for (ColumnType type : types) {
+                if (in.readByte() == 0) builder.appendNull();
+                else switch (type) {
+                    case LONG -> builder.appendLong(in.readLong());
+                    case DOUBLE -> builder.appendDouble(Double.longBitsToDouble(in.readLong()));
+                    case STRING -> builder.appendString(in.readString());
+                    case DECIMAL -> builder.appendDecimal(new java.math.BigDecimal(in.readString()));
+                }
+            }
+        }
+        if (in.remaining() != 0) throw new IllegalArgumentException("trailing frame data");
+        return builder.build();
+    }
+
+    /** Logical bounds remain checked even if Agrona's global bounds checking is disabled. */
+    private static final class Reader {
+        private final UnsafeBuffer buffer;
+        private final ByteBuffer utf8;
+        private final CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder();
+        private int position;
+        Reader(byte[] bytes) { buffer = new UnsafeBuffer(bytes); utf8 = ByteBuffer.wrap(bytes); }
+        int remaining() { return buffer.capacity() - position; }
+        int take(int bytes) {
+            if (bytes < 0 || bytes > remaining()) throw new IllegalArgumentException("truncated frame data");
+            int offset = position;
+            position += bytes;
+            return offset;
+        }
+        int readByte() { return buffer.getByte(take(1)) & 0xff; }
+        int readInt() { return buffer.getInt(take(4), ByteOrder.BIG_ENDIAN); }
+        long readLong() { return buffer.getLong(take(8), ByteOrder.BIG_ENDIAN); }
+        String readString() {
+            int length = readInt();
+            int offset = take(length);
+            utf8.limit(position).position(offset);
+            try { return decoder.decode(utf8).toString(); }
+            catch (CharacterCodingException corrupt) { throw new IllegalArgumentException("invalid UTF-8", corrupt); }
+        }
+    }
+
+    /** Only pre-UTF8 portable blobs need Java's modified-UTF codec. */
+    private ResultFrame decodeLegacy(byte[] encoded) {
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(encoded))) {
             int columnCount = in.readInt();
-            boolean utf8 = columnCount == UTF8_FORMAT;
-            if (utf8) columnCount = in.readInt();
-            if (columnCount < 0 || columnCount > in.available() / 3) {
-                throw new IOException("invalid column count");
-            }
-            List<String> columnNames = new ArrayList<>(columnCount);
-            List<ColumnType> columnTypes = new ArrayList<>(columnCount);
+            if (columnCount < 0 || columnCount > in.available() / 3) throw new IOException("invalid column count");
+            ColumnType[] types = new ColumnType[columnCount];
+            ColumnType[] knownTypes = ColumnType.values();
             ResultFrame.Builder builder = ResultFrame.builder();
-            for (int index = 0; index < columnCount; index++) {
-                String name = readString(in, utf8);
-                int typeId = in.readUnsignedByte();
-                if (typeId >= ColumnType.values().length) throw new IOException("invalid column type");
-                ColumnType type = ColumnType.values()[typeId];
-                columnNames.add(name);
-                columnTypes.add(type);
-                builder.column(name, type);
+            for (int column = 0; column < columnCount; column++) {
+                String name = in.readUTF();
+                int type = in.readUnsignedByte();
+                if (type >= knownTypes.length) throw new IOException("invalid column type");
+                types[column] = knownTypes[type];
+                builder.column(name, types[column]);
             }
-            int rowCount = in.readInt();
-            if (rowCount < 0 || (long) rowCount * columnCount > in.available()
-                    || columnCount == 0 && rowCount != 0) {
+            int rows = in.readInt();
+            if (rows < 0 || (long) rows * columnCount > in.available() || columnCount == 0 && rows != 0) {
                 throw new IOException("invalid row count");
             }
-            builder.expectedRows(rowCount);
-            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                for (int column = 0; column < columnNames.size(); column++) {
-                    appendValue(in, builder, columnTypes.get(column), utf8);
+            builder.expectedRows(rows);
+            for (int row = 0; row < rows; row++) {
+                for (ColumnType type : types) {
+                    if (!in.readBoolean()) builder.appendNull();
+                    else switch (type) {
+                        case LONG -> builder.appendLong(in.readLong());
+                        case DOUBLE -> builder.appendDouble(in.readDouble());
+                        case STRING -> builder.appendString(in.readUTF());
+                        case DECIMAL -> builder.appendDecimal(new java.math.BigDecimal(in.readUTF()));
+                    }
                 }
             }
             if (in.available() != 0) throw new IOException("trailing frame data");
             return builder.build();
         } catch (IOException corrupt) {
             throw new CacheSerializationException("frame decoding failed", corrupt);
-        }
-    }
-
-    private static void writeString(DataOutputStream output, String value) throws IOException {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        output.writeInt(bytes.length);
-        output.write(bytes);
-    }
-
-    private static String readString(DataInputStream input, boolean utf8) throws IOException {
-        if (!utf8) return input.readUTF(); // Existing portable blobs remain readable.
-        int length = input.readInt();
-        if (length < 0 || length > input.available()) throw new IOException("invalid string length");
-        return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(input.readNBytes(length))).toString();
-    }
-
-    private void appendValue(DataInputStream in, ResultFrame.Builder builder, ColumnType type,
-                             boolean utf8) throws IOException {
-        if (!in.readBoolean()) {
-            builder.appendNull();
-            return;
-        }
-        switch (type) {
-            case LONG -> builder.appendLong(in.readLong());
-            case DOUBLE -> builder.appendDouble(in.readDouble());
-            case STRING -> builder.appendString(readString(in, utf8));
-            case DECIMAL -> builder.appendDecimal(new java.math.BigDecimal(readString(in, utf8)));
         }
     }
 }

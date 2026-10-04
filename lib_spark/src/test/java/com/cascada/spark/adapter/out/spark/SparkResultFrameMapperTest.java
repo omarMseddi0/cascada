@@ -88,6 +88,16 @@ class SparkResultFrameMapperTest {
         for (int column = 0; column < schema.size(); column++) {
             assertThat(frame.isNullAt(1, column)).isTrue();
         }
+
+        // Exercise the actual Spark Row -> typed frame -> migrated cache codec boundary.
+        for (var codec : java.util.List.<com.cascada.cache.application.port.out.CacheValueSerializerPort>of(
+                new com.cascada.cache.adapter.out.serialization.PortableFrameSerializer(),
+                new com.cascada.cache.adapter.out.serialization.ArrowResultFrameSerializer())) {
+            ResultFrame restored = codec.deserialize(codec.serialize(frame));
+            assertThat(restored.columnNames()).isEqualTo(frame.columnNames());
+            assertThat(restored.columnTypes()).isEqualTo(frame.columnTypes());
+            assertThat(restored.rows()).isEqualTo(frame.rows());
+        }
     }
 
     @Test
@@ -138,5 +148,17 @@ class SparkResultFrameMapperTest {
 
     private StructType schema(StructField... fields) {
         return DataTypes.createStructType(fields);
+    }
+
+    @Test
+    void rejectsComplexSparkTypesInsteadOfLosingTheirStructure() {
+        var types = List.of(DataTypes.BinaryType, DataTypes.createArrayType(DataTypes.LongType),
+                DataTypes.createMapType(DataTypes.StringType, DataTypes.LongType),
+                DataTypes.createStructType(new StructField[]{field("nested",DataTypes.LongType)}));
+        for (var type : types) {
+            assertThatThrownBy(() -> new SparkResultFrameMapper(10).map(
+                    schema(field("unsupported",type)), List.of(RowFactory.create((Object)null)).iterator()))
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
     }
 }

@@ -103,4 +103,77 @@ class PortableFrameSerializerTest {
         assertThatThrownBy(() -> new ArrowResultFrameSerializer().deserialize(blob))
                 .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
     }
+
+    @Test
+    void matchesExistingModernWireBytesForEveryTypeAndExtremeValue() throws Exception {
+        ResultFrame.Builder builder = ResultFrame.builder().column("l", ColumnType.LONG)
+                .column("d", ColumnType.DOUBLE).column("s", ColumnType.STRING).column("n", ColumnType.DECIMAL);
+        long[] longs = {Long.MIN_VALUE, Long.MAX_VALUE, 9_007_199_254_740_993L, 0};
+        double[] doubles = {-0.0, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+                Double.longBitsToDouble(0x7ff0000000000001L)};
+        String[] strings = {"", "\u0000", "\u6771\u4eac\ud83d\ude00", "x".repeat(100_000)};
+        for (int i = 0; i < longs.length; i++) {
+            builder.appendLong(longs[i]).appendDouble(doubles[i]).appendString(strings[i])
+                    .appendDecimal(new java.math.BigDecimal(i == 0 ? "1E+100" : "12345678901234567890.00000000100"));
+        }
+        for (int c = 0; c < 4; c++) builder.appendNull();
+        ResultFrame original = builder.build();
+        ByteArrayOutputStream expected = new ByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(expected)) {
+            out.writeInt(-1); out.writeInt(4);
+            for (String name : original.columnNames()) {
+                byte[] bytes = name.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                out.writeInt(bytes.length); out.write(bytes); out.writeByte(original.columnType(name).ordinal());
+            }
+            out.writeInt(original.rowCount());
+            for (int row = 0; row < original.rowCount(); row++) {
+                for (int c = 0; c < 4; c++) {
+                    boolean present = !original.isNullAt(row, c); out.writeBoolean(present);
+                    if (!present) continue;
+                    switch (original.columnTypeAt(c)) {
+                        case LONG -> out.writeLong(original.longAt(row,c));
+                        case DOUBLE -> out.writeDouble(original.doubleAt(row,c));
+                        default -> {
+                            byte[] bytes = original.valueAt(row,c).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                            out.writeInt(bytes.length); out.write(bytes);
+                        }
+                    }
+                }
+            }
+        }
+        byte[] blob = serializer.serialize(original);
+        assertThat(ZstdFrameEnvelope.decompress(blob)).containsExactly(expected.toByteArray());
+        ResultFrame decoded = serializer.deserialize(blob);
+        assertThat(decoded.rows()).isEqualTo(original.rows());
+        assertThat(Double.doubleToRawLongBits(decoded.doubleAt(0,1))).isEqualTo(Long.MIN_VALUE);
+    }
+
+    @Test
+    void rejectsMalformedUtf8TruncationDimensionsTypesAndTrailingData() throws Exception {
+        ResultFrame frame = ResultFrame.builder().column("s", ColumnType.STRING).appendString("a").build();
+        byte[] valid = ZstdFrameEnvelope.decompress(serializer.serialize(frame));
+        java.util.List<byte[]> corruptions = new java.util.ArrayList<>();
+        for (int length = 0; length < valid.length; length++) corruptions.add(java.util.Arrays.copyOf(valid,length));
+        byte[] badUtf = valid.clone(); badUtf[badUtf.length-1] = (byte) 0xff; corruptions.add(badUtf);
+        byte[] badType = valid.clone(); badType[13] = (byte) 127; corruptions.add(badType);
+        byte[] badColumns = valid.clone(); ByteBuffer.wrap(badColumns).putInt(4,Integer.MAX_VALUE); corruptions.add(badColumns);
+        byte[] badRows = valid.clone(); ByteBuffer.wrap(badRows).putInt(14,Integer.MAX_VALUE); corruptions.add(badRows);
+        corruptions.add(java.util.Arrays.copyOf(valid,valid.length+1));
+        for (byte[] corrupted : corruptions) {
+            byte[] blob = ZstdFrameEnvelope.compress(corrupted,corrupted.length,3);
+            assertThatThrownBy(() -> serializer.deserialize(blob))
+                    .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
+        }
+    }
+
+    @Test
+    void sharedSerializersRemainSafeUnderConcurrentCalls() throws Exception {
+        ResultFrame frame = sampleFrame();
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(8);
+        try {
+            var tasks = new java.util.ArrayList<java.util.concurrent.Callable<Boolean>>();
+            for (int i = 0; i < 64; i++) tasks.add(() -> serializer.deserialize(serializer.serialize(frame)).rows().equals(frame.rows()));
+            for (var result : executor.invokeAll(tasks)) assertThat(result.get()).isTrue();
+        } finally { executor.shutdownNow(); }
+    }
 }

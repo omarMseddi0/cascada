@@ -38,12 +38,11 @@ public final class SparkConfigurationDeriver {
             throw new IllegalArgumentException("RAM must be at least 2 GiB to fit the minimum supported "
                     + "executor heap and explicit Spark overhead, but was: " + randomAccessMemoryGigabytes + " GiB");
         }
+        int overhead = Math.max(1, randomAccessMemoryGigabytes / 10);
         if (!glutenOffHeapEnabled) {
-            int overhead = Math.max(1, randomAccessMemoryGigabytes / 10);
             return new SparkMemorySplit(randomAccessMemoryGigabytes - overhead, 0, overhead);
         }
         // Reserve at least 1 GiB overhead, give the majority of the remainder to Velox off-heap.
-        int overhead = Math.max(1, randomAccessMemoryGigabytes / 10);
         int remaining = randomAccessMemoryGigabytes - overhead;
         int offHeap = (int) (((long) remaining * 6) / 10);
         int heap = remaining - offHeap;

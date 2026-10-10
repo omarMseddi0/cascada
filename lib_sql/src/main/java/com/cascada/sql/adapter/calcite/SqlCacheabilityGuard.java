@@ -89,14 +89,13 @@ final class SqlCacheabilityGuard {
             return parsedOperator;
         }
 
-        for (SqlOperator standard : SqlStdOperatorTable.instance().getOperatorList()) {
-            if (standard.getName().equalsIgnoreCase(name.getSimple())
-                    && standard.getSyntax() == function.getSyntax()
-                    && standard.getOperandCountRange().isValidCount(call.getOperandList().size())) {
-                return standard;
-            }
-        }
-        throw new UnsupportedSqlException("user-defined SQL functions are not classified for caching");
+        return SqlStdOperatorTable.instance().getOperatorList().stream()
+                .filter(standard -> standard.getName().equalsIgnoreCase(name.getSimple()))
+                .filter(standard -> standard.getSyntax() == function.getSyntax())
+                .filter(standard -> standard.getOperandCountRange().isValidCount(call.getOperandList().size()))
+                .findFirst()
+                .orElseThrow(() -> new UnsupportedSqlException(
+                        "user-defined SQL functions are not classified for caching"));
     }
 
     private void rejectUnsupportedTimeGrouping(SqlSelect select, TimeDimensionMap dimensions) {
@@ -143,11 +142,7 @@ final class SqlCacheabilityGuard {
             return countTableSources(select.getFrom());
         }
         if (from instanceof SqlNodeList nodeList) {
-            int count = 0;
-            for (SqlNode child : nodeList) {
-                count += countTableSources(child);
-            }
-            return count;
+            return nodeList.stream().mapToInt(this::countTableSources).sum();
         }
         if (from instanceof SqlCall call) {
             if (call.getKind() == org.apache.calcite.sql.SqlKind.AS && call instanceof SqlBasicCall asCall) {
@@ -169,17 +164,10 @@ final class SqlCacheabilityGuard {
             return isTimeColumn(identifier, dimensions);
         }
         if (node instanceof SqlNodeList nodeList) {
-            for (SqlNode child : nodeList) {
-                if (referencesTimeColumn(child, dimensions)) {
-                    return true;
-                }
-            }
-        } else if (node instanceof SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                if (referencesTimeColumn(operand, dimensions)) {
-                    return true;
-                }
-            }
+            return nodeList.stream().anyMatch(child -> referencesTimeColumn(child, dimensions));
+        }
+        if (node instanceof SqlCall call) {
+            return call.getOperandList().stream().anyMatch(operand -> referencesTimeColumn(operand, dimensions));
         }
         return false;
     }

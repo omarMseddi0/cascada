@@ -22,6 +22,7 @@ import java.util.IdentityHashMap;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Ports the essence of {@code SmartSQLProcessorSqlglot._transform_ast} onto <b>Apache Calcite</b>:
@@ -168,14 +169,18 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
     }
 
     private Set<String> projectionAliases(SqlSelect select) {
-        Set<String> aliases = new HashSet<>();
-        for (SqlNode item : select.getSelectList()) {
-            if (item instanceof SqlBasicCall asCall && item.getKind() == SqlKind.AS
-                    && asCall.operand(1) instanceof SqlIdentifier alias) {
-                aliases.add(lastName(alias));
-            }
+        return select.getSelectList().stream()
+                .map(this::projectionAlias)
+                .flatMap(Optional::stream)
+                .collect(Collectors.toCollection(HashSet::new));
+    }
+
+    private Optional<String> projectionAlias(SqlNode item) {
+        if (item instanceof SqlBasicCall asCall && item.getKind() == SqlKind.AS
+                && asCall.operand(1) instanceof SqlIdentifier alias) {
+            return Optional.of(lastName(alias));
         }
-        return aliases;
+        return Optional.empty();
     }
 
     private Set<SqlIdentifier> aliasReferencesToPreserve(SqlSelect select, SqlNodeList orderList,
@@ -244,17 +249,10 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
             return true;
         }
         if (node instanceof org.apache.calcite.sql.SqlNodeList nodeList) {
-            for (SqlNode child : nodeList) {
-                if (containsNestedSelect(child, outerSelect)) {
-                    return true;
-                }
-            }
-        } else if (node instanceof SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                if (containsNestedSelect(operand, outerSelect)) {
-                    return true;
-                }
-            }
+            return nodeList.stream().anyMatch(child -> containsNestedSelect(child, outerSelect));
+        }
+        if (node instanceof SqlCall call) {
+            return call.getOperandList().stream().anyMatch(operand -> containsNestedSelect(operand, outerSelect));
         }
         return false;
     }
@@ -306,8 +304,11 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
     }
 
     private SqlNode bucketExpression(String physicalTime) {
+        String column = physicalTime.matches("[A-Za-z_][A-Za-z0-9_]*")
+                ? physicalTime
+                : "`" + physicalTime.replace("`", "``") + "`";
         return CalciteSql.parseExpression(
-                "CAST(FLOOR(" + (physicalTime.matches("[A-Za-z_][A-Za-z0-9_]*") ? physicalTime : "`" + physicalTime.replace("`", "``") + "`") + " / " + bucketStepSeconds + ") * " + bucketStepSeconds
+                "CAST(FLOOR(" + column + " / " + bucketStepSeconds + ") * " + bucketStepSeconds
                         + " AS BIGINT)");
     }
 

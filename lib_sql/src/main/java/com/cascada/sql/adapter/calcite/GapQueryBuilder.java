@@ -16,6 +16,8 @@ import org.apache.calcite.sql.parser.SqlParserPos;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Comparator;
+import java.util.stream.Collectors;
 
 /**
  * Surgically rewrites a query so Spark fetches <em>only</em> the gap (the buckets not in cache),
@@ -62,7 +64,7 @@ public final class GapQueryBuilder {
         }
         gapPlan.tail().ifPresent(allRanges::add);
 
-        allRanges.sort((left, right) -> Long.compare(left.startTimestampSeconds(), right.startTimestampSeconds()));
+        allRanges.sort(Comparator.comparingLong(TimeRange::startTimestampSeconds));
 
         List<TimeRange> merged = new ArrayList<>();
         merged.add(allRanges.get(0));
@@ -137,12 +139,8 @@ public final class GapQueryBuilder {
         if (containsUnion(root)) {
             return true;
         }
-        for (SqlSelect select : allSelects(root)) {
-            if (isSubquerySource(select.getFrom())) {
-                return true;
-            }
-        }
-        return false;
+        return allSelects(root).stream()
+                .anyMatch(select -> isSubquerySource(select.getFrom()));
     }
 
     private boolean containsUnion(SqlNode node) {
@@ -153,14 +151,8 @@ public final class GapQueryBuilder {
                 || node.getKind() == SqlKind.EXCEPT) {
             return true;
         }
-        if (node instanceof SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                if (containsUnion(operand)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        return node instanceof SqlCall call
+                && call.getOperandList().stream().anyMatch(this::containsUnion);
     }
 
     private boolean isSubquerySource(SqlNode from) {
@@ -172,23 +164,16 @@ public final class GapQueryBuilder {
 
     /** Ported from {@code _find_innermost_selects_with_from}: only SELECTs reading directly from a table. */
     private List<SqlSelect> findInnermostSelectsWithFrom(SqlNode root) {
-        List<SqlSelect> innermost = new ArrayList<>();
-        for (SqlSelect select : allSelects(root)) {
-            SqlNode from = select.getFrom();
-            if (from == null) {
-                continue;
-            }
-            SqlNode source = stripAlias(from);
-            if (source instanceof SqlIdentifier) {
-                innermost.add(select);
-            } else if (source != null && source.getKind() == SqlKind.JOIN) {
-                if (joinTouchesTable((SqlJoin) source)) {
-                    innermost.add(select);
-                }
-            }
-            // FROM (subquery) AS alias is a wrapper that cannot see raw columns like ts: skip.
-        }
-        return innermost;
+        return allSelects(root).stream()
+                .filter(select -> readsDirectlyFromTable(select.getFrom()))
+                .collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    private boolean readsDirectlyFromTable(SqlNode from) {
+        SqlNode source = stripAlias(from);
+        // Subquery wrappers cannot see the raw time column.
+        return source instanceof SqlIdentifier
+                || source instanceof SqlJoin join && joinTouchesTable(join);
     }
 
     private boolean joinTouchesTable(SqlJoin join) {
@@ -246,17 +231,15 @@ public final class GapQueryBuilder {
     // --- node construction -----------------------------------------------------------------------
 
     private SqlNode buildGapCondition(List<TimeRange> ranges) {
-        StringBuilder predicate = new StringBuilder();
-        for (int index = 0; index < ranges.size(); index++) {
-            if (index > 0) {
-                predicate.append(" OR ");
-            }
-            TimeRange range = ranges.get(index);
-            predicate.append('(').append(timeColumn).append(" >= ").append(range.startTimestampSeconds())
-                    .append(" AND ").append(timeColumn).append(" <= ").append(range.endTimestampSeconds())
-                    .append(')');
-        }
-        return CalciteSql.parseExpression(predicate.toString());
+        String predicate = ranges.stream()
+                .map(this::rangePredicate)
+                .collect(Collectors.joining(" OR "));
+        return CalciteSql.parseExpression(predicate);
+    }
+
+    private String rangePredicate(TimeRange range) {
+        return "(" + timeColumn + " >= " + range.startTimestampSeconds()
+                + " AND " + timeColumn + " <= " + range.endTimestampSeconds() + ")";
     }
 
     private SqlNode and(SqlNode left, SqlNode right) {
@@ -264,9 +247,6 @@ public final class GapQueryBuilder {
     }
 
     private SqlNode combine(SqlKind kind, SqlNode left, SqlNode right) {
-        if (left == null && right == null) {
-            return null;
-        }
         if (left == null) {
             return right;
         }

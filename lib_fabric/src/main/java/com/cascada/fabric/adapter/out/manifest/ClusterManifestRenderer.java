@@ -12,6 +12,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Arrays;
+import java.util.stream.Collectors;
 
 /**
  * Fills the {@code src/main/resources/fabric} YAML templates from {@link ClusterValues} and returns the
@@ -59,14 +61,9 @@ public final class ClusterManifestRenderer implements ClusterManifestRenderingPo
 
     /** The manifests joined into one multi-document YAML stream — what you would feed to {@code apply -f}. */
     public String renderCombined(ClusterValues values) {
-        StringBuilder out = new StringBuilder();
-        for (String manifest : render(values)) {
-            out.append("---\n").append(manifest);
-            if (out.charAt(out.length() - 1) != '\n') {
-                out.append('\n');
-            }
-        }
-        return out.toString();
+        return render(values).stream()
+                .map(manifest -> "---\n" + manifest + (manifest.endsWith("\n") ? "" : "\n"))
+                .collect(Collectors.joining());
     }
 
     private static String loadTemplate(String name) {
@@ -99,18 +96,9 @@ public final class ClusterManifestRenderer implements ClusterManifestRenderingPo
 
     /** Indent every non-empty line by {@code spaces}, so a file can be embedded under a YAML {@code |}. */
     static String indent(String text, int spaces) {
-        String pad = " ".repeat(spaces);
-        StringBuilder out = new StringBuilder();
-        String[] lines = text.split("\n", -1);
-        for (int i = 0; i < lines.length; i++) {
-            String line = lines[i];
-            if (!line.isEmpty()) {
-                out.append(pad).append(line);
-            }
-            if (i < lines.length - 1) {
-                out.append('\n');
-            }
-        }
-        return out.toString();
+        String padding = " ".repeat(spaces);
+        return Arrays.stream(text.split("\n", -1))
+                .map(line -> line.isEmpty() ? line : padding + line)
+                .collect(Collectors.joining("\n"));
     }
 }

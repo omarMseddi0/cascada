@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.stream.Collectors;
 
 /**
  * Extracts a {@link CanonicalQueryObject} from a SQL string using <b>Apache Calcite</b>, porting the
@@ -166,14 +167,13 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
     // --- group by --------------------------------------------------------------------------------
 
     private List<String> extractGroupBy(SqlSelect select) {
-        List<String> groupBy = new ArrayList<>();
         SqlNodeList group = select.getGroup();
-        if (group != null) {
-            for (SqlNode expression : group) {
-                groupBy.add(CalciteSql.unparse(expression));
-            }
+        if (group == null) {
+            return new ArrayList<>();
         }
-        return groupBy;
+        return group.stream()
+                .map(CalciteSql::unparse)
+                .collect(Collectors.toCollection(ArrayList::new));
     }
 
     // --- aggregates ------------------------------------------------------------------------------
@@ -349,40 +349,42 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
     }
 
     private List<OrderByClause> extractOrderBy(ParsedSqlQuery parsed) {
-        List<OrderByClause> orderBy = new ArrayList<>();
         SqlNodeList orderList = parsed.orderList();
         if (orderList == null) {
-            return orderBy;
+            return new ArrayList<>();
         }
-        for (SqlNode element : orderList) {
-            boolean ascending = true;
-            Boolean nullsFirst = null;
-            SqlNode current = element;
-            boolean unwrapping = true;
-            while (unwrapping) {
-                switch (current.getKind()) {
-                    case DESCENDING -> {
-                        ascending = false;
-                        current = ((SqlBasicCall) current).operand(0);
-                    }
-                    case NULLS_FIRST -> {
-                        nullsFirst = true;
-                        current = ((SqlBasicCall) current).operand(0);
-                    }
-                    case NULLS_LAST -> {
-                        nullsFirst = false;
-                        current = ((SqlBasicCall) current).operand(0);
-                    }
-                    default -> unwrapping = false;
+        return orderList.stream()
+                .map(this::orderByClause)
+                .collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    private OrderByClause orderByClause(SqlNode element) {
+        boolean ascending = true;
+        Boolean nullsFirst = null;
+        SqlNode current = element;
+        boolean unwrapping = true;
+        while (unwrapping) {
+            switch (current.getKind()) {
+                case DESCENDING -> {
+                    ascending = false;
+                    current = ((SqlBasicCall) current).operand(0);
                 }
-            }
-            if (current instanceof SqlIdentifier identifier) {
-                orderBy.add(OrderByClause.forColumn(simpleName(identifier), ascending, nullsFirst == null ? ascending : nullsFirst));
-            } else {
-                orderBy.add(OrderByClause.forExpression(CalciteSql.unparse(current), ascending, nullsFirst == null ? ascending : nullsFirst));
+                case NULLS_FIRST -> {
+                    nullsFirst = true;
+                    current = ((SqlBasicCall) current).operand(0);
+                }
+                case NULLS_LAST -> {
+                    nullsFirst = false;
+                    current = ((SqlBasicCall) current).operand(0);
+                }
+                default -> unwrapping = false;
             }
         }
-        return orderBy;
+        boolean resolvedNullsFirst = nullsFirst == null ? ascending : nullsFirst;
+        if (current instanceof SqlIdentifier identifier) {
+            return OrderByClause.forColumn(simpleName(identifier), ascending, resolvedNullsFirst);
+        }
+        return OrderByClause.forExpression(CalciteSql.unparse(current), ascending, resolvedNullsFirst);
     }
 
 }

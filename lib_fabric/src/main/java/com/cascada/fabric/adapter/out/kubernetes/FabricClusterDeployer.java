@@ -9,6 +9,7 @@ import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * The Kubernetes {@link ClusterOrchestratorPort}: applies, scales, restarts and deletes resources through
@@ -48,7 +49,9 @@ public final class FabricClusterDeployer implements ClusterOrchestratorPort, Aut
         for (HasMetadata item : items) {
             client.resource(item).createOrReplace();
         }
-        return items.stream().map(i -> i.getKind() + "/" + i.getMetadata().getName()).toList();
+        return items.stream()
+                .map(resource -> resource.getKind() + "/" + resource.getMetadata().getName())
+                .toList();
     }
 
     @Override
@@ -72,11 +75,10 @@ public final class FabricClusterDeployer implements ClusterOrchestratorPort, Aut
      * making the whole batch fail opaquely.
      */
     private List<HasMetadata> parse(List<String> manifestDocuments) {
-        List<HasMetadata> items = new ArrayList<>();
-        for (String document : manifestDocuments) {
-            items.addAll(client.load(new ByteArrayInputStream(document.getBytes(StandardCharsets.UTF_8))).items());
-        }
-        return items;
+        return manifestDocuments.stream()
+                .flatMap(document -> client.load(new ByteArrayInputStream(
+                        document.getBytes(StandardCharsets.UTF_8))).items().stream())
+                .collect(Collectors.toCollection(ArrayList::new));
     }
 
     @Override

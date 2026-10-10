@@ -72,11 +72,20 @@ final class CanonicalTimeSeriesAnalyzer {
         }
         SqlNode left = times.operand(0);
         SqlNode right = times.operand(1);
-        SqlNode floor = left.getKind() == SqlKind.FLOOR ? left : right.getKind() == SqlKind.FLOOR ? right : null;
-        if (floor == null || !(floor instanceof SqlBasicCall floorCall)) {
+        SqlNode floor;
+        SqlNode multiplierNode;
+        if (left.getKind() == SqlKind.FLOOR) {
+            floor = left;
+            multiplierNode = right;
+        } else if (right.getKind() == SqlKind.FLOOR) {
+            floor = right;
+            multiplierNode = left;
+        } else {
             return Optional.empty();
         }
-        SqlNode multiplierNode = floor == left ? right : left;
+        if (!(floor instanceof SqlBasicCall floorCall)) {
+            return Optional.empty();
+        }
         SqlNode divide = floorCall.operand(0);
         if (divide.getKind() != SqlKind.DIVIDE || !(divide instanceof SqlBasicCall division)) {
             return Optional.empty();

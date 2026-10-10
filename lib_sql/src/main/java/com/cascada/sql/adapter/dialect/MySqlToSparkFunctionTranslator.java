@@ -154,55 +154,61 @@ public final class MySqlToSparkFunctionTranslator {
             }
             List<String> functionArguments = splitArguments(
                     sql, code, openingParenthesis + 1, closingParenthesis);
-            switch (normalizedName) {
-                case "date_format", "str_to_date" -> {
-                    if (functionArguments.size() == 2) {
-                        String firstArgument = rewriteSupportedFunctionCalls(functionArguments.get(0).trim());
-                        String formatArgument = functionArguments.get(1).trim();
-                        if (isSingleQuotedLiteral(formatArgument)) {
-                            formatArgument = sqlStringLiteral(convertFormatTokens(
-                                    formatArgument.substring(1, formatArgument.length() - 1)));
-                        } else {
-                            throw new UnsupportedSqlException(
-                                    "dynamic MySQL date format expressions cannot be translated safely");
-                        }
-                        result.append(normalizedName).append('(').append(firstArgument).append(", ")
-                                .append(formatArgument).append(')');
-                    } else {
-                        result.append(sql, index, closingParenthesis + 1);
-                    }
-                }
-                case "log" -> {
-                    if (functionArguments.size() == 1 || functionArguments.size() == 2) {
-                        List<String> nestedArguments = functionArguments.stream()
-                                .map(argument -> rewriteSupportedFunctionCalls(argument.trim())).toList();
-                        result.append(functionArguments.size() == 1 ? "ln(" : "log(")
-                                .append(String.join(", ", nestedArguments)).append(')');
-                    } else {
-                        result.append(sql, index, closingParenthesis + 1);
-                    }
-                }
-                case "json_unquote" -> {
-                    if (functionArguments.size() != 1) {
-                        throw new UnsupportedSqlException("JSON_UNQUOTE requires exactly one argument");
-                    }
-                    List<String> extractArguments = argumentsOfCall(
-                            functionArguments.get(0).trim(), "JSON_EXTRACT");
-                    if (extractArguments == null || extractArguments.size() != 2) {
-                        throw new UnsupportedSqlException(
-                                "only JSON_UNQUOTE(JSON_EXTRACT(document, onePath)) has a safe Spark translation");
-                    }
-                    String document = rewriteSupportedFunctionCalls(extractArguments.get(0).trim());
-                    String path = rewriteSupportedFunctionCalls(extractArguments.get(1).trim());
-                    result.append("get_json_object(").append(document).append(", ").append(path).append(')');
-                }
-                case "json_extract" -> throw new UnsupportedSqlException(
-                        "JSON_EXTRACT returns a JSON value; use JSON_UNQUOTE for its string Spark equivalent");
-                default -> result.append(sql, index, closingParenthesis + 1);
-            }
+            String originalCall = sql.substring(index, closingParenthesis + 1);
+            result.append(translateFunctionCall(normalizedName, functionArguments, originalCall));
             index = closingParenthesis + 1;
         }
         return result.toString();
+    }
+
+    private String translateFunctionCall(String name, List<String> arguments, String originalCall) {
+        return switch (name) {
+            case "date_format", "str_to_date" -> translateDateFormatCall(name, arguments, originalCall);
+            case "log" -> translateLogCall(arguments, originalCall);
+            case "json_unquote" -> translateJsonUnquoteCall(arguments);
+            case "json_extract" -> throw new UnsupportedSqlException(
+                    "JSON_EXTRACT returns a JSON value; use JSON_UNQUOTE for its string Spark equivalent");
+            default -> originalCall;
+        };
+    }
+
+    private String translateDateFormatCall(String name, List<String> arguments, String originalCall) {
+        if (arguments.size() != 2) {
+            return originalCall;
+        }
+        String value = rewriteSupportedFunctionCalls(arguments.get(0).trim());
+        String format = arguments.get(1).trim();
+        if (!isSingleQuotedLiteral(format)) {
+            throw new UnsupportedSqlException(
+                    "dynamic MySQL date format expressions cannot be translated safely");
+        }
+        String translatedFormat = sqlStringLiteral(convertFormatTokens(format.substring(1, format.length() - 1)));
+        return name + "(" + value + ", " + translatedFormat + ")";
+    }
+
+    private String translateLogCall(List<String> arguments, String originalCall) {
+        if (arguments.size() != 1 && arguments.size() != 2) {
+            return originalCall;
+        }
+        List<String> translatedArguments = arguments.stream()
+                .map(argument -> rewriteSupportedFunctionCalls(argument.trim()))
+                .toList();
+        String function = arguments.size() == 1 ? "ln" : "log";
+        return function + "(" + String.join(", ", translatedArguments) + ")";
+    }
+
+    private String translateJsonUnquoteCall(List<String> arguments) {
+        if (arguments.size() != 1) {
+            throw new UnsupportedSqlException("JSON_UNQUOTE requires exactly one argument");
+        }
+        List<String> extractArguments = argumentsOfCall(arguments.get(0).trim(), "JSON_EXTRACT");
+        if (extractArguments == null || extractArguments.size() != 2) {
+            throw new UnsupportedSqlException(
+                    "only JSON_UNQUOTE(JSON_EXTRACT(document, onePath)) has a safe Spark translation");
+        }
+        String document = rewriteSupportedFunctionCalls(extractArguments.get(0).trim());
+        String path = rewriteSupportedFunctionCalls(extractArguments.get(1).trim());
+        return "get_json_object(" + document + ", " + path + ")";
     }
 
     private int skipWhitespace(String sql, boolean[] code, int index) {
@@ -351,27 +357,35 @@ public final class MySqlToSparkFunctionTranslator {
 
     private static boolean[] codePositions(String sql) {
         boolean[] code = new boolean[sql.length()];
-        int i = 0;
-        while (i < sql.length()) {
-            char c = sql.charAt(i);
-            if (c == '\'' || c == '"' || c == '`') {
-                char quote = c;
-                i++;
-                while (i < sql.length()) {
-                    char next = sql.charAt(i++);
-                    if (next == '\\' && i < sql.length()) { i++; continue; }
+        int position = 0;
+        while (position < sql.length()) {
+            char current = sql.charAt(position);
+            if (current == '\'' || current == '"' || current == '`') {
+                char quote = current;
+                position++;
+                while (position < sql.length()) {
+                    char next = sql.charAt(position++);
+                    if (next == '\\' && position < sql.length()) {
+                        position++;
+                        continue;
+                    }
                     if (next == quote) {
-                        if (i < sql.length() && sql.charAt(i) == quote) { i++; continue; }
+                        if (position < sql.length() && sql.charAt(position) == quote) {
+                            position++;
+                            continue;
+                        }
                         break;
                     }
                 }
-            } else if (sql.startsWith("--", i)) {
-                while (i < sql.length() && sql.charAt(i) != '\n') i++;
-            } else if (sql.startsWith("/*", i)) {
-                int end = sql.indexOf("*/", i + 2);
-                i = end < 0 ? sql.length() : end + 2;
+            } else if (sql.startsWith("--", position)) {
+                while (position < sql.length() && sql.charAt(position) != '\n') {
+                    position++;
+                }
+            } else if (sql.startsWith("/*", position)) {
+                int commentEnd = sql.indexOf("*/", position + 2);
+                position = commentEnd < 0 ? sql.length() : commentEnd + 2;
             } else {
-                code[i++] = true;
+                code[position++] = true;
             }
         }
         return code;

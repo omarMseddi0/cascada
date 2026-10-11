@@ -19,13 +19,30 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class WarmingQueue {
 
     private final LinkedHashSet<QueryHash> votedQueries = new LinkedHashSet<>();
+    private final int maximumQueries;
     private final ReentrantLock lock = new ReentrantLock();
+
+    public WarmingQueue() {
+        this(10_000);
+    }
+
+    public WarmingQueue(int maximumQueries) {
+        if (maximumQueries < 1) {
+            throw new IllegalArgumentException("maximumQueries must be positive");
+        }
+        this.maximumQueries = maximumQueries;
+    }
 
     /** Record a vote to warm this query. A repeat vote for a queued hash is a no-op (dedup). */
     public void vote(QueryHash queryHash) {
         lock.lock();
         try {
             votedQueries.add(queryHash);
+            if (votedQueries.size() > maximumQueries) {
+                var oldest = votedQueries.iterator();
+                oldest.next();
+                oldest.remove();
+            }
         } finally {
             lock.unlock();
         }

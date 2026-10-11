@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 /**
@@ -63,7 +62,8 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     private final long bucketSeconds;
     private final int topNQueries;
 
-    private final Map<QueryHash, CanonicalQueryObject> canonicalRegistry = new ConcurrentHashMap<>();
+    private final Map<QueryHash, CanonicalQueryObject> canonicalRegistry = new LinkedHashMap<>();
+    private final int maximumPatterns;
 
     public WarmingOrchestrator(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
@@ -79,6 +79,18 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                                QueryPopularityPort popularityTracker,
                                CoverageIndexPort coverageIndex,
                                long bucketSeconds, int topNQueries) {
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, warmingQueue, popularityTracker,
+                coverageIndex, bucketSeconds, topNQueries, 10_000);
+    }
+
+    public WarmingOrchestrator(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
+                               GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
+                               QueryPopularityPort popularityTracker, CoverageIndexPort coverageIndex,
+                               long bucketSeconds, int topNQueries, int maximumPatterns) {
+        if (maximumPatterns < 1) {
+            throw new IllegalArgumentException("maximumPatterns must be positive");
+        }
+        this.maximumPatterns = maximumPatterns;
         this.cacheBackend = cacheBackend;
         this.sparkExecutor = sparkExecutor;
         this.gapQueryRewriter = gapQueryRewriter;
@@ -95,10 +107,19 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
      * record an observation for Layer 2.
      */
     @Override
-    public void recordQuery(QueryHash queryHash, CanonicalQueryObject canonicalObject) {
+    public synchronized void recordQuery(QueryHash queryHash, CanonicalQueryObject canonicalObject) {
         canonicalRegistry.put(queryHash, canonicalObject);
+        if (canonicalRegistry.size() > maximumPatterns) {
+            var oldest = canonicalRegistry.keySet().iterator();
+            oldest.next();
+            oldest.remove();
+        }
         warmingQueue.vote(queryHash);
         popularityTracker.recordObservation(queryHash);
+    }
+
+    private synchronized CanonicalQueryObject findCanonicalQuery(QueryHash queryHash) {
+        return canonicalRegistry.get(queryHash);
     }
 
     /** One warming cycle over {@code [warmStartTs, warmEndTs]} — Layer 1 then Layer 2, de-duplicated. */
@@ -110,7 +131,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         try {
             Map<QueryHash, CanonicalQueryObject> toWarm = new LinkedHashMap<>();
             for (QueryHash hash : layer1) {
-                CanonicalQueryObject canonical = canonicalRegistry.get(hash);
+                CanonicalQueryObject canonical = findCanonicalQuery(hash);
                 if (canonical != null) {
                     toWarm.put(hash, canonical);
                 }
@@ -121,7 +142,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                 if (toWarm.containsKey(hash)) {
                     continue;
                 }
-                CanonicalQueryObject canonical = canonicalRegistry.get(hash);
+                CanonicalQueryObject canonical = findCanonicalQuery(hash);
                 if (canonical != null) {
                     toWarm.put(hash, canonical);
                 }
@@ -278,7 +299,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     }
 
     /** Diagnostic: the hashes currently known to the warmer (registered via {@link #recordQuery}). */
-    public Set<QueryHash> knownQueryHashes() {
+    public synchronized Set<QueryHash> knownQueryHashes() {
         return new LinkedHashSet<>(canonicalRegistry.keySet());
     }
 

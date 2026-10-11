@@ -25,11 +25,40 @@ public final class QueryPopularityTracker implements QueryPopularityPort {
     private final ConcurrentHashMap<QueryHash, AtomicLong>
             hitCountByQuery = new ConcurrentHashMap<>();
 
+    private final int maximumQueries;
+    private final java.util.ArrayDeque<QueryHash> insertionOrder = new java.util.ArrayDeque<>();
+
+    public QueryPopularityTracker() {
+        this(10_000);
+    }
+
+    public QueryPopularityTracker(int maximumQueries) {
+        if (maximumQueries < 1) {
+            throw new IllegalArgumentException("maximumQueries must be positive");
+        }
+        this.maximumQueries = maximumQueries;
+    }
+
     /** Record one observation of a query (a cache hit or a submission), incrementing its counter. */
     @Override
     public void recordObservation(QueryHash queryHash) {
-        hitCountByQuery.computeIfAbsent(queryHash, ignored -> new AtomicLong())
-                .incrementAndGet();
+        AtomicLong existing = hitCountByQuery.get(queryHash);
+        if (existing != null) {
+            existing.incrementAndGet();
+            return;
+        }
+        synchronized (insertionOrder) {
+            AtomicLong counter = hitCountByQuery.get(queryHash);
+            if (counter == null) {
+                if (hitCountByQuery.size() >= maximumQueries) {
+                    hitCountByQuery.remove(insertionOrder.removeFirst());
+                }
+                counter = new AtomicLong();
+                hitCountByQuery.put(queryHash, counter);
+                insertionOrder.addLast(queryHash);
+            }
+            counter.incrementAndGet();
+        }
     }
 
     @Override

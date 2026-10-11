@@ -1,9 +1,17 @@
 package com.cascada.cache.adapter.out.serialization;
 
+import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.github.luben.zstd.Zstd;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.channels.Channels;
+import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
@@ -17,17 +25,6 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
-
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.Channels;
-import java.nio.channels.WritableByteChannel;
-import java.util.ArrayList;
-import java.util.List;
-import java.nio.charset.StandardCharsets;
-import org.agrona.collections.Object2ObjectHashMap;
 
 /**
  * The language-neutral production cache serializer: encodes a {@link ResultFrame} as **Apache Arrow IPC
@@ -114,19 +111,6 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             writeColumn(vector, frame, column, frame.columnTypeAt(column));
         }
         root.setRowCount(frame.rowCount());
-    }
-
-    private static final class CountingChannel implements WritableByteChannel {
-        private long bytes;
-        private boolean open = true;
-        @Override public int write(ByteBuffer source) {
-            int size = source.remaining();
-            bytes = Math.addExact(bytes, size);
-            source.position(source.limit());
-            return size;
-        }
-        @Override public boolean isOpen() { return open; }
-        @Override public void close() { open = false; }
     }
 
     private byte[] encodeToArrowIpc(ResultFrame frame) {
@@ -229,34 +213,6 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             case LONG -> builder.appendLong(((BigIntVector) vector).get(rowIndex));
             case DOUBLE -> builder.appendDouble(((Float8Vector) vector).get(rowIndex));
             case STRING -> builder.appendString(strings.read((VarCharVector) vector, rowIndex));
-        }
-    }
-
-    /** Bounded per-column encoding reuse; predominantly distinct columns leave the cache early. */
-    private static final class Utf8EncodingCache {
-        private Object2ObjectHashMap<String, byte[]> values = new Object2ObjectHashMap<>();
-        private int reads;
-        private int hits;
-        private int bytes;
-        private boolean disabled;
-        private final int sampleSize;
-
-        private Utf8EncodingCache(int rows) { sampleSize = rows >= 4_096 ? 256 : Math.max(1, Math.min(64, rows)); }
-
-        private byte[] encode(String value) {
-            if (disabled) return value.getBytes(StandardCharsets.UTF_8);
-            reads++;
-            byte[] encoded = values.get(value);
-            if (encoded != null) { hits++; return encoded; }
-            encoded = value.getBytes(StandardCharsets.UTF_8);
-            if (reads >= sampleSize && (long) hits * 10 < reads) {
-                values = null;
-                disabled = true;
-            } else if (values.size() < 16_384 && encoded.length <= 1_048_576 - bytes) {
-                values.put(value, encoded);
-                bytes += encoded.length;
-            }
-            return encoded;
         }
     }
 

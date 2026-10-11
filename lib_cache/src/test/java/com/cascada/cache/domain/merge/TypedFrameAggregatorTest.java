@@ -13,6 +13,55 @@ import static org.assertj.core.api.Assertions.assertThat;
 class TypedFrameAggregatorTest {
 
     @Test
+    void keepsOneGlobalGroupAcrossEmptyAndNonEmptyIncrementalFramesWithNullTypedMeasures() {
+        ResultFrame empty = ResultFrame.builder()
+                .column("SUM(long_value)", ColumnType.LONG)
+                .column("SUM(double_value)", ColumnType.DOUBLE)
+                .column("MIN(label)", ColumnType.STRING)
+                .column("SUM(decimal_value)", ColumnType.DECIMAL)
+                .build();
+        ResultFrame first = ResultFrame.builder()
+                .column("SUM(long_value)", ColumnType.LONG)
+                .column("SUM(double_value)", ColumnType.DOUBLE)
+                .column("MIN(label)", ColumnType.STRING)
+                .column("SUM(decimal_value)", ColumnType.DECIMAL)
+                .row(10L, 1.5, "zeta", new BigDecimal("2.50"))
+                .row(null, null, null, null)
+                .build();
+        ResultFrame second = ResultFrame.builder()
+                .column("SUM(long_value)", ColumnType.LONG)
+                .column("SUM(double_value)", ColumnType.DOUBLE)
+                .column("MIN(label)", ColumnType.STRING)
+                .column("SUM(decimal_value)", ColumnType.DECIMAL)
+                .row(3L, -0.5, "alpha", new BigDecimal("1.25"))
+                .row(2L, 2.0, null, null)
+                .build();
+        Map<String, AggregateFunction> functions = Map.of(
+                "SUM(long_value)", AggregateFunction.SUM,
+                "SUM(double_value)", AggregateFunction.SUM,
+                "MIN(label)", AggregateFunction.MINIMUM,
+                "SUM(decimal_value)", AggregateFunction.SUM);
+
+        TypedFrameAggregator.Accumulator incremental = new TypedFrameAggregator.Accumulator(
+                empty, List.of(), functions, "ts", 300);
+        incremental.accept(empty);
+        incremental.accept(first);
+        incremental.accept(empty);
+        incremental.accept(second);
+        ResultFrame actual = incremental.finish();
+        ResultFrame bulk = TypedFrameAggregator.aggregate(List.of(empty, first, empty, second), List.of(),
+                functions, "ts", 300);
+
+        assertThat(actual.rows()).isEqualTo(bulk.rows());
+        assertThat(actual.rowCount()).isEqualTo(1);
+        assertThat(actual.rows().get(0))
+                .containsEntry("SUM(long_value)", 15L)
+                .containsEntry("SUM(double_value)", 3.0)
+                .containsEntry("MIN(label)", "alpha")
+                .containsEntry("SUM(decimal_value)", new BigDecimal("3.75"));
+    }
+
+    @Test
     void keepsNullNanSignedZeroAndScaleInsensitiveGroupingSemantics() {
         ResultFrame first = ResultFrame.builder()
                 .column("d", ColumnType.DOUBLE).column("decimal_id", ColumnType.DECIMAL)

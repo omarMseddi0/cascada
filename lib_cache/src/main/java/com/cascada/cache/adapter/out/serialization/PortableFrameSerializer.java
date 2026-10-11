@@ -1,20 +1,12 @@
 package com.cascada.cache.adapter.out.serialization;
 
+import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.github.luben.zstd.Zstd;
-
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.nio.ByteOrder;
-import org.agrona.ExpandableArrayBuffer;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.nio.charset.CharsetDecoder;
-import java.nio.charset.CharacterCodingException;
-import org.agrona.concurrent.UnsafeBuffer;
 import java.util.List;
 
 /**
@@ -48,8 +40,8 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
 
     @Override
     public byte[] serialize(ResultFrame frame) {
-        Writer out = encode(frame);
-        return ZstdFrameEnvelope.compress(out.buffer.byteArray(), out.position, compressionLevel);
+        PortableFrameWriter out = encode(frame);
+        return out.compress(compressionLevel);
     }
 
     @Override
@@ -62,8 +54,8 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         }
     }
 
-    private Writer encode(ResultFrame frame) {
-        Writer out = new Writer();
+    private PortableFrameWriter encode(ResultFrame frame) {
+        PortableFrameWriter out = new PortableFrameWriter();
         List<String> columns = frame.columnNames();
         ResultFrame.ColumnReader[] readers = new ResultFrame.ColumnReader[columns.size()];
         out.writeInt(UTF8_FORMAT);
@@ -91,30 +83,8 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         return out;
     }
 
-    /** Call-owned storage: safe concurrent use, with no retained giant thread-local buffers. */
-    private static final class Writer {
-        private final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(1_024);
-        private int position;
-
-        void writeByte(int value) {
-            buffer.putByte(position, (byte) value);
-            position = Math.addExact(position, 1);
-        }
-        void writeInt(int value) {
-            buffer.putInt(position, value, ByteOrder.BIG_ENDIAN);
-            position = Math.addExact(position, Integer.BYTES);
-        }
-        void writeLong(long value) {
-            buffer.putLong(position, value, ByteOrder.BIG_ENDIAN);
-            position = Math.addExact(position, Long.BYTES);
-        }
-        void writeString(String value) {
-            position = Math.addExact(position, buffer.putStringUtf8(position, value, ByteOrder.BIG_ENDIAN));
-        }
-    }
-
     private ResultFrame decode(byte[] encoded) {
-        Reader in = new Reader(encoded);
+        PortableFrameReader in = new PortableFrameReader(encoded);
         if (in.readInt() != UTF8_FORMAT) return decodeLegacy(encoded);
         int columns = in.readInt();
         if (columns < 0 || columns > in.remaining() / 5) throw new IllegalArgumentException("invalid column count");
@@ -146,32 +116,6 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         }
         if (in.remaining() != 0) throw new IllegalArgumentException("trailing frame data");
         return builder.build();
-    }
-
-    /** Logical bounds remain checked even if Agrona's global bounds checking is disabled. */
-    private static final class Reader {
-        private final UnsafeBuffer buffer;
-        private final ByteBuffer utf8;
-        private final CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder();
-        private int position;
-        Reader(byte[] bytes) { buffer = new UnsafeBuffer(bytes); utf8 = ByteBuffer.wrap(bytes); }
-        int remaining() { return buffer.capacity() - position; }
-        int take(int bytes) {
-            if (bytes < 0 || bytes > remaining()) throw new IllegalArgumentException("truncated frame data");
-            int offset = position;
-            position += bytes;
-            return offset;
-        }
-        int readByte() { return buffer.getByte(take(1)) & 0xff; }
-        int readInt() { return buffer.getInt(take(4), ByteOrder.BIG_ENDIAN); }
-        long readLong() { return buffer.getLong(take(8), ByteOrder.BIG_ENDIAN); }
-        String readString() {
-            int length = readInt();
-            int offset = take(length);
-            utf8.limit(position).position(offset);
-            try { return decoder.decode(utf8).toString(); }
-            catch (CharacterCodingException corrupt) { throw new IllegalArgumentException("invalid UTF-8", corrupt); }
-        }
     }
 
     /** Only pre-UTF8 portable blobs need Java's modified-UTF codec. */

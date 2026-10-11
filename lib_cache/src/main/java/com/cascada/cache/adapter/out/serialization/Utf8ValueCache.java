@@ -1,10 +1,10 @@
 package com.cascada.cache.adapter.out.serialization;
 
+import java.nio.charset.StandardCharsets;
 import org.agrona.collections.Object2ObjectHashMap;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.vector.VarCharVector;
-import java.nio.charset.StandardCharsets;
 
 /** Per-decode bounded dictionary, using Agrona's byte comparison, hashing and open-addressed map. */
 final class Utf8ValueCache {

@@ -75,8 +75,20 @@ public final class TypedFrameAggregator {
 
         public void accept(ResultFrame input) {
             validateCompatibleSchemas(List.of(schema, input));
+            if (input.rowCount() == 0) {
+                return;
+            }
             ResultFrame.ColumnReader[] columns = new ResultFrame.ColumnReader[input.columnNames().size()];
             for (int column = 0; column < columns.length; column++) columns[column] = input.columnReader(column);
+
+            if (dimensions.isEmpty()) {
+                int globalGroup = groups.findOrCreate(columns, 0);
+                for (int row = 0; row < input.rowCount(); row++) {
+                    groups.accumulate(globalGroup, columns, row);
+                }
+                return;
+            }
+
             for (int row = 0; row < input.rowCount(); row++) {
                 int group = groups.findOrCreate(columns, row);
                 groups.accumulate(group, columns, row);

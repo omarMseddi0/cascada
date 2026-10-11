@@ -2,13 +2,13 @@ package com.cascada.cache.adapter.out.serialization;
 
 import com.github.luben.zstd.EndDirective;
 import com.github.luben.zstd.ZstdCompressCtx;
-import org.apache.arrow.memory.ArrowBuf;
-import org.apache.arrow.memory.BufferAllocator;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.WritableByteChannel;
+import org.apache.arrow.memory.ArrowBuf;
+import org.apache.arrow.memory.BufferAllocator;
 
 /** Compresses direct Arrow buffers in bounded chunks, preserving the length-prefixed zstd format. */
 final class ArrowZstdChannel implements WritableByteChannel {

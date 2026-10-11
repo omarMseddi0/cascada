@@ -22,3 +22,10 @@ refactor*.md
 /scripts/Run-AgronaBenchmarks.ps1
 /scripts/Measure-AgronaResources.ps1
 /docs/performance/
+
+# Keep complete benchmark folders local.
+**/benchmark/
+**/benchmarks/
+
+# Ignore every bench/benchmark folder at any depth.
+**/bench*/

@@ -13,7 +13,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * The production {@link QueryExecutorPort}: runs a physical SQL string on a Spark 3.5.x session
+ * The production {@link QueryExecutorPort}: runs a physical SQL string on a Spark 4.1.1 session
  * with Delta Lake enabled, and maps the resulting {@code Dataset<Row>} into the cache's framework-free
  * {@link ResultFrame}. Ported from {@code SparkSessionManager.get_session} + the query path of
  * {@code query_engine.py} (the {@code SparkQueryEngine} that calls {@code spark.sql(sql)}).
@@ -23,11 +23,9 @@ import java.util.logging.Logger;
  * session and executes against it identically either way. A {@code SELECT ... FROM delta.`/path`} reads
  * a Delta table directly because the config always installs the Delta extensions + catalog.
  *
- * <p>Spark 3.5.6 officially targets Java 8/11/17. In production it runs in the pinned Spark+Gluten+Velox
- * image, so the Spark runtime is {@code provided}. This adapter therefore compiles here but its live
- * session is exercised in the cluster image / a JDK-17 integration job, not the JDK-22 unit build —
- * which is why the config builder (pure) carries the unit-test coverage and this class is a thin,
- * well-typed bridge.
+ * <p>Spark 4.1.1 supports Java 17 and 21. In production the matching Spark runtime is {@code provided}.
+ * This adapter compiles against that runtime and its live session is exercised on JDK 21, while the
+ * config builder (pure) carries unit-test coverage and this class remains a thin, well-typed bridge.
  */
 public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoCloseable {
 
@@ -35,7 +33,7 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
 
     /**
      * Hard ceiling on rows materialised into the engine's JVM per query. The cache path only ever
-     * pulls pre-aggregated frames (group-by cardinality × buckets — thousands of rows), so a result
+     * pulls pre-aggregated frames (group-by cardinality Ã— buckets â€” thousands of rows), so a result
      * beyond this is rejected before the adapter builds the full {@link ResultFrame}. Spark may still
      * materialize the largest partition while providing {@code toLocalIterator()}.
      */
@@ -46,7 +44,7 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
     private final boolean ownsSession;
     private final SparkResultFrameMapper resultFrameMapper;
 
-    /** Build (or get) a SparkSession from the resolved config — the single place a session is created. */
+    /** Build (or get) a SparkSession from the resolved config â€” the single place a session is created. */
     public SparkDeltaQueryExecutor(SparkSessionConfig config) {
         this(config, DEFAULT_MAX_RESULT_ROWS);
     }
@@ -70,7 +68,7 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
 
     /**
      * For tests / advanced wiring: wrap an already-built session (e.g. a shared one). {@link #close()}
-     * will NOT stop a session passed in this way — only the caller that created it should stop it.
+     * will NOT stop a session passed in this way â€” only the caller that created it should stop it.
      */
     public SparkDeltaQueryExecutor(SparkSession sparkSession) {
         this.sparkSession = Objects.requireNonNull(sparkSession, "sparkSession");

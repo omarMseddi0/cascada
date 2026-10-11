@@ -10,28 +10,30 @@ A lakehouse query engine with a smart bucket cache
 |---|---|
 | `lib_identity` | Framework-free value objects: `SchemaVersion`, `LineageHash`, `QueryHash`, `PolicyVersion` |
 | `lib_cache` | The cache domain + runnable engine: canonical query object, bucket math + pyramid, logic hashing, safety rules, columnar merge (`domain/merge/columnar`), AVG reconstruction, cube subsumption + consistency verifier, DataSketches HLL/KLL buckets, warming queue + popularity tracker, coverage bitmaps, `ResultFrame` + Arrow/zstd serialization, in-memory + Lettuce/Valkey backends, `CacheExecutionEngine` |
-| `lib_sql` | Calcite SQL compiler: canonical extraction (AVG→SUM/COUNT, group-by/filter/time detection, HAVING/JOIN/DISTINCT logic signature, per-alias aggregate map), MySQL→Spark dialect translation, gap-query builder, cache-correctness simulation gate |
+| `lib_sql` | Calcite SQL compiler: canonical extraction (AVGâ†’SUM/COUNT, group-by/filter/time detection, HAVING/JOIN/DISTINCT logic signature, per-alias aggregate map), MySQLâ†’Spark dialect translation, gap-query builder, cache-correctness simulation gate |
 | `lib_spark_config` | Pure three-knob (RAM/CPU/placement) Spark config derivation, golden-tested key-by-key |
 | `lib_spark` | SparkSession assembly and the Spark/Delta execution adapter |
 | `lib_fabric` | Cluster deployment: env-driven K8s YAML templates applied via Fabric8 (ServiceAccount/RBAC, ConfigMaps, executor pod template, driver Deployment), tested against the Fabric8 mock server |
-| `app` | Wiring. `mvn -Plocal-spark` bundles real Spark 3.5 + Delta for a local `local[*]` run (JDK 17 toolchain, or add-opens on newer) |
+| `app` | Wiring. `mvn -Plocal-spark` bundles Spark 4.1.1 + Delta 4.1.0 for a local `local[*]` run on JDK 21 |
 
-## Java and Agrona runtime
+## Java 21 and runtime compatibility
 
-The project targets Java 17 and uses Agrona **2.6.1** (latest stable release verified on 4 October 2026).
-Java does not need an upgrade for this Agrona release. Agrona 2.x requires these options on the JVM
-running Cascada, including the Spark driver JVM:
+The reactor targets Java 21 and Spark 4.1.1 / Scala 2.13.17 with Delta 4.1.0. Spark 3.5.6 documents Java 8/11/17 support; Spark 4.1.1 documents Java 17/21 support. A Java 21 runtime therefore uses the Spark 4.1 line. The Maven compiler release is 21, and Java 17 cannot run the resulting application.
+
+The JVM options below cover Agrona, Arrow and the Spark runtime. Maven tests add them automatically. For an application launch, set them in `JAVA_TOOL_OPTIONS` or the JVM startup arguments; for `spark-submit`, include them in `--driver-java-options` before the Spark driver starts.
 
 ```text
+--enable-native-access=ALL-UNNAMED
+-Dio.netty.tryReflectionSetAccessible=true
 --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
 --add-opens=java.base/java.util.zip=ALL-UNNAMED
+--add-opens=java.base/java.io=ALL-UNNAMED
+--add-opens=java.base/java.util=ALL-UNNAMED
+--add-opens=java.base/java.nio=ALL-UNNAMED
+--add-opens=java.base/java.lang=ALL-UNNAMED
+--add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+--add-opens=java.base/sun.util.calendar=ALL-UNNAMED
 ```
-
-Keep the existing Arrow/Spark module options as well. Maven tests and the benchmark/resource runners
-include the required options automatically. For an application launch, add them to `JAVA_TOOL_OPTIONS`
-or the JVM startup arguments; for `spark-submit`, include them in `--driver-java-options` before the
-Spark driver starts. Configuring driver JVM options after an in-process SparkSession starts is too late.
-
 ## Build and test
 
 ```bash
@@ -65,8 +67,8 @@ mvn test
 
 ## Gluten + Velox
 
-Gluten is config-layered onto the same SparkSession — no engine code change. Needs a Linux image
-with `gluten-velox-bundle-spark3.5_*.jar` and, critically, the **off-heap re-split**: Velox works
+Gluten is config-layered onto the same SparkSession â€” no engine code change. Needs a Linux image
+with a Gluten Velox bundle built for Spark 4.1 / Scala 2.13 and, critically, the **off-heap re-split**: Velox works
 off-heap, so `spark.memory.offHeap.size` takes ~60% of executor RAM and the JVM heap *shrinks* to
 ~30% (leaving heap at its vanilla size can exceed the executor memory budget). Gluten configuration
 is selected by the workload profile; the executor does not implement an automatic retry with Gluten disabled. Verify with `EXPLAIN`

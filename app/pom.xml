@@ -39,33 +39,44 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client-api</artifactId>
+            <version>${hadoop.version}</version>
+            <scope>provided</scope>
+        </dependency>
         <!-- Spark/Delta runtime is supplied by the cluster image; provided here so app compiles
              against SparkDeltaQueryExecutor's transitive Spark types but does not bundle Spark. -->
         <dependency>
             <groupId>org.apache.spark</groupId>
-            <artifactId>spark-sql_2.12</artifactId>
-            <version>3.5.6</version>
+            <artifactId>spark-sql_2.13</artifactId>
+            <version>${spark.version}</version>
             <scope>provided</scope>
         </dependency>
     </dependencies>
 
     <profiles>
         <!-- `mvn -Plocal-spark ...` bundles the REAL Spark + Delta runtime so the app runs a
-             local[*] SparkSession with Delta tables outside the cluster image. Spark 3.5.x
-             officially supports Java 17, so run this profile on a JDK 17 toolchain (or add the
-             usual add-opens flags on newer JDKs). -->
+             local[*] SparkSession with Delta tables outside the cluster image. Spark 4.1.x
+             supports Java 17 and 21; run this profile on JDK 21 (or add the
+             required module-access options for Java 21). -->
         <profile>
             <id>local-spark</id>
             <dependencies>
                 <dependency>
+                    <groupId>org.apache.hadoop</groupId>
+                    <artifactId>hadoop-client-api</artifactId>
+                    <version>${hadoop.version}</version>
+                </dependency>
+                <dependency>
                     <groupId>org.apache.spark</groupId>
-                    <artifactId>spark-sql_2.12</artifactId>
-                    <version>3.5.6</version>
+                    <artifactId>spark-sql_2.13</artifactId>
+                    <version>${spark.version}</version>
                 </dependency>
                 <dependency>
                     <groupId>io.delta</groupId>
-                    <artifactId>delta-spark_2.12</artifactId>
-                    <version>3.3.0</version>
+                    <artifactId>delta-spark_4.1_2.13</artifactId>
+                    <version>${delta.version}</version>
                 </dependency>
             </dependencies>
         </profile>

@@ -129,6 +129,19 @@ class ResultFrameTest {
     }
 
     @Test
+    void rowViewsRemainReadOnlyAndReturnNullForMissingKeys() {
+        ResultFrame frame = new ResultFrameBuilder().column("n", ColumnType.LONG).row(7L).build();
+        Map<String, Object> row = frame.rows().get(0);
+
+        assertThat(row.get("missing")).isNull();
+        assertThat(row).doesNotContainKey("missing");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> row.put("n", 8L))
+                .isInstanceOf(UnsupportedOperationException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> frame.rows().set(0, Map.of("n", 8L)))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
     void typedColumnsPreserveNullsWithoutBoxedRowsOnTheWritePath() {
         ResultFrame frame = new ResultFrameBuilder()
                 .column("bucket", ColumnType.LONG)

@@ -1,11 +1,8 @@
 package com.cascada.cache.domain.frame;
 
-import java.util.AbstractList;
-import java.util.AbstractMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * A compact, immutable, typed result table used by the cache.
@@ -42,7 +39,7 @@ public final class ResultFrame {
         this.columns = frame.columns;
         this.present = frame.present;
         this.rowCount = frame.rowCount;
-        this.rowsView = new RowsView();
+        this.rowsView = new FrameRowsView(this);
     }
 
     ResultFrame(List<String> names, Map<String, ColumnType> types, Object[] columns,
@@ -61,7 +58,7 @@ public final class ResultFrame {
         this.columns = columns;
         this.present = present;
         this.rowCount = rowCount;
-        this.rowsView = new RowsView();
+        this.rowsView = new FrameRowsView(this);
     }
 
     public static ResultFrame empty() {
@@ -196,6 +193,11 @@ public final class ResultFrame {
         };
     }
 
+    Object rowValue(int row, Object key) {
+        Integer column = columnIndexes.get(key);
+        return column == null ? null : valueAt(row, column);
+    }
+
     private boolean isPresent(int row, int column) {
         long[] bitmap = present[column];
         return bitmap == null || (bitmap[row >>> 6] & (1L << (row & 63))) != 0;
@@ -236,49 +238,6 @@ public final class ResultFrame {
             builder.row(row);
         }
         return builder.build();
-    }
-
-    private final class RowsView extends AbstractList<Map<String, Object>> {
-        @Override
-        public Map<String, Object> get(int row) {
-            if (row < 0 || row >= rowCount) {
-                throw new IndexOutOfBoundsException(row);
-            }
-            return new RowView(row);
-        }
-
-        @Override
-        public int size() {
-            return rowCount;
-        }
-    }
-
-    private final class RowView extends AbstractMap<String, Object> {
-        private final int row;
-
-        private RowView(int row) {
-            this.row = row;
-        }
-
-        @Override
-        public Object get(Object key) {
-            Integer column = columnIndexes.get(key);
-            return column == null ? null : valueAt(row, column);
-        }
-
-        @Override
-        public boolean containsKey(Object key) {
-            return columnIndexes.containsKey(key);
-        }
-
-        @Override
-        public Set<Entry<String, Object>> entrySet() {
-            LinkedHashMap<String, Object> values = new LinkedHashMap<>(columnNames.size());
-            for (int column = 0; column < columnNames.size(); column++) {
-                values.put(columnNames.get(column), valueAt(row, column));
-            }
-            return values.entrySet();
-        }
     }
 
     /** Typed column builder kept as a compatibility delegate for existing callers. */

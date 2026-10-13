@@ -9,6 +9,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ResultFrameTest {
 
     @Test
+    void nestedColumnReaderRemainsACompatibilityDelegate() {
+        ResultFrame.ColumnReader reader = new ResultFrameBuilder().column("n", ColumnType.LONG)
+                .row(7L).build().columnReader(0);
+
+        assertThat(reader.type()).isEqualTo(ColumnType.LONG);
+        assertThat(reader.longValue(0)).isEqualTo(7L);
+    }
+
+    @Test
     void nestedBuilderRemainsACompatibilityDelegate() {
         ResultFrame.Builder builder = ResultFrame.builder().column("n", ColumnType.LONG).row(7L);
 
@@ -19,7 +28,7 @@ class ResultFrameTest {
     void resolvedColumnReaderKeepsItsSnapshotAcrossBuilderReuse() {
         ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(64).column("n", ColumnType.LONG);
         for (int row = 0; row < 64; row++) builder.appendLong(row);
-        ResultFrame.ColumnReader reader = builder.build().columnReader(0);
+        FrameColumnReader reader = builder.build().frameColumnReader(0);
         builder.appendNull();
         assertThat(reader.type()).isEqualTo(ColumnType.LONG);
         for (int row = 0; row < 64; row++) {

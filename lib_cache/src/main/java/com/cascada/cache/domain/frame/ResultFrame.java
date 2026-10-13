@@ -103,40 +103,28 @@ public final class ResultFrame {
     }
 
     /** Resolves a read-only column once for an internal typed scan. No backing array is exposed. */
-    public ColumnReader columnReader(int column) {
+    public FrameColumnReader frameColumnReader(int column) {
         if (column < 0 || column >= columns.length) throw new IndexOutOfBoundsException(column);
-        return new ColumnReader(indexedTypes[column], columns[column], present[column], rowCount);
+        return new FrameColumnReader(indexedTypes[column], columns[column], present[column], rowCount);
+    }
+
+    /** Retained compatibility accessor; internal scans should use {@link #frameColumnReader(int)}. */
+    public ColumnReader columnReader(int column) {
+        return new ColumnReader(frameColumnReader(column));
     }
 
     public static final class ColumnReader {
-        private final ColumnType type;
-        private final long[] longs;
-        private final double[] doubles;
-        private final String[] strings;
-        private final java.math.BigDecimal[] decimals;
-        private final long[] validity;
-        private final int length;
+        private final FrameColumnReader delegate;
 
-        private ColumnReader(ColumnType type, Object values, long[] validity, int length) {
-            this.type = type;
-            longs = type == ColumnType.LONG ? (long[]) values : null;
-            doubles = type == ColumnType.DOUBLE ? (double[]) values : null;
-            strings = type == ColumnType.STRING ? (String[]) values : null;
-            decimals = type == ColumnType.DECIMAL ? (java.math.BigDecimal[]) values : null;
-            this.validity = validity;
-            this.length = length;
-        }
+        private ColumnReader(FrameColumnReader delegate) { this.delegate = delegate; }
 
-        public ColumnType type() { return type; }
-        public boolean isNullAt(int row) {
-            if (row < 0 || row >= length) throw new IndexOutOfBoundsException(row);
-            return validity != null && (validity[row >>> 6] & (1L << (row & 63))) == 0;
-        }
+        public ColumnType type() { return delegate.type(); }
+        public boolean isNullAt(int row) { return delegate.isNullAt(row); }
         // The scan checks kind and nullness before reading. Array access still checks row bounds.
-        public long longValue(int row) { return longs[row]; }
-        public double doubleValue(int row) { return doubles[row]; }
-        public String stringValue(int row) { return strings[row]; }
-        public java.math.BigDecimal decimalValue(int row) { return decimals[row]; }
+        public long longValue(int row) { return delegate.longValue(row); }
+        public double doubleValue(int row) { return delegate.doubleValue(row); }
+        public String stringValue(int row) { return delegate.stringValue(row); }
+        public java.math.BigDecimal decimalValue(int row) { return delegate.decimalValue(row); }
     }
 
     public boolean isEmpty() {

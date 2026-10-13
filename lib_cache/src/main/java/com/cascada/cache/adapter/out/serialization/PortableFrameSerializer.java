@@ -2,6 +2,7 @@ package com.cascada.cache.adapter.out.serialization;
 
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.github.luben.zstd.Zstd;
@@ -58,17 +59,17 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
     private PortableFrameWriter encode(ResultFrame frame) {
         PortableFrameWriter out = new PortableFrameWriter();
         List<String> columns = frame.columnNames();
-        ResultFrame.ColumnReader[] readers = new ResultFrame.ColumnReader[columns.size()];
+        FrameColumnReader[] readers = new FrameColumnReader[columns.size()];
         out.writeInt(UTF8_FORMAT);
         out.writeInt(columns.size());
         for (int column = 0; column < columns.size(); column++) {
             out.writeString(columns.get(column));
-            readers[column] = frame.columnReader(column);
+            readers[column] = frame.frameColumnReader(column);
             out.writeByte(readers[column].type().ordinal());
         }
         out.writeInt(frame.rowCount());
         for (int row = 0; row < frame.rowCount(); row++) {
-            for (ResultFrame.ColumnReader values : readers) {
+            for (FrameColumnReader values : readers) {
                 boolean present = !values.isNullAt(row);
                 out.writeByte(present ? 1 : 0);
                 if (!present) continue;

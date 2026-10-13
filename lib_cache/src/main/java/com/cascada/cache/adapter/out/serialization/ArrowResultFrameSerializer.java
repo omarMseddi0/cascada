@@ -2,6 +2,7 @@ package com.cascada.cache.adapter.out.serialization;
 
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.github.luben.zstd.Zstd;
@@ -141,7 +142,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
 
     private void writeColumn(FieldVector vector, ResultFrame frame, int column, ColumnType type) {
         vector.allocateNew();
-        ResultFrame.ColumnReader values = frame.columnReader(column);
+        FrameColumnReader values = frame.frameColumnReader(column);
         Utf8EncodingCache strings = type == ColumnType.STRING ? new Utf8EncodingCache(frame.rowCount()) : null;
         for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
             if (values.isNullAt(rowIndex)) {

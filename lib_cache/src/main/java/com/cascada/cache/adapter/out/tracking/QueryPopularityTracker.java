@@ -90,8 +90,6 @@ public final class QueryPopularityTracker implements QueryPopularityPort {
         return ranked.stream().map(RankedQuery::query).toList();
     }
 
-    private record RankedQuery(QueryHash query, long hits) { }
-
     public int distinctQueryCount() {
         return hitCountByQuery.size();
     }

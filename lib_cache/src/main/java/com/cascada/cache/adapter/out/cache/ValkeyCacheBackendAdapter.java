@@ -333,9 +333,6 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         }
     }
 
-    private record PendingMget(int startIndex, int keyCount,
-                               RedisFuture<List<KeyValue<byte[], byte[]>>> future) { }
-
     @Override
     public void close() {
         connection.close();

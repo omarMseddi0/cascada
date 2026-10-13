@@ -131,10 +131,6 @@ public final class FrameMergeService {
 
     // --- composite aliases (e.g. SUM(a) + SUM(b) AS total_bytes) ---------------------------------
 
-    /** A composite-alias term: an aggregate column reference and the +/- sign it is combined with. */
-    private record CompositeTerm(String columnReference, boolean add) {
-    }
-
     private static final Pattern COMPOSITE_TERM =
             Pattern.compile("\\s*([+-])?\\s*((?:SUM|COUNT|MIN|MAX|AVG)\\s*\\([^)]*\\)|[A-Za-z_][A-Za-z0-9_]*)",
                     Pattern.CASE_INSENSITIVE);

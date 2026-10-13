@@ -2,6 +2,7 @@ package com.cascada.spark.adapter.out.spark;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
@@ -39,7 +40,7 @@ final class SparkResultFrameMapper {
         StructField[] fields = schema.fields();
         ColumnType[] columnTypes = new ColumnType[fields.length];
         byte[] getters = new byte[fields.length];
-        ResultFrame.Builder builder = ResultFrame.builder()
+        ResultFrameBuilder builder = new ResultFrameBuilder()
                 .expectedRows(Math.min(maxResultRows, INITIAL_ROW_CAPACITY));
         for (int index = 0; index < fields.length; index++) {
             ColumnPlan column = columnPlan(fields[index].dataType());

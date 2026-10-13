@@ -2,6 +2,7 @@ package com.cascada.cache.adapter.out.serialization;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import org.junit.jupiter.api.Test;
 
@@ -21,7 +22,7 @@ class ArrowResultFrameSerializerTest {
 
     @Test
     void largeDirectCompressionPreservesTheLegacyIpcBytesAndEnvelope() throws Exception {
-        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(5_000)
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(5_000)
                 .column("id", ColumnType.LONG).column("number", ColumnType.DOUBLE)
                 .column("name", ColumnType.STRING).column("decimal", ColumnType.DECIMAL);
         for (int row = 0; row < 5_000; row++) {
@@ -52,7 +53,7 @@ class ArrowResultFrameSerializerTest {
     private final PortableFrameSerializer portable = new PortableFrameSerializer();
 
     private ResultFrame sampleFrame() {
-        return ResultFrame.builder()
+        return new ResultFrameBuilder()
                 .column("appName", ColumnType.STRING)
                 .column("COUNT(latency)", ColumnType.LONG)
                 .column("SUM(latency)", ColumnType.DOUBLE)

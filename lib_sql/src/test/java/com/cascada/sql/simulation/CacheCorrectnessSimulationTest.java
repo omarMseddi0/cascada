@@ -11,6 +11,7 @@ import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
@@ -142,7 +143,7 @@ class CacheCorrectnessSimulationTest {
     private ResultFrame reconstructAverageFrame(ResultFrame sumCountFrame, String field, String alias) {
         String sumColumn = "SUM(" + field + ")";
         String countColumn = "COUNT(" + field + ")";
-        ResultFrame.Builder builder = ResultFrame.builder();
+        ResultFrameBuilder builder = new ResultFrameBuilder();
         for (String column : sumCountFrame.columnNames()) {
             if (!column.equals(sumColumn) && !column.equals(countColumn)) {
                 builder.column(column, sumCountFrame.columnType(column));

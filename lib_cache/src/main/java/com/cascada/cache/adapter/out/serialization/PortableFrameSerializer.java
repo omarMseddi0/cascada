@@ -3,6 +3,7 @@ package com.cascada.cache.adapter.out.serialization;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.github.luben.zstd.Zstd;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -90,7 +91,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         if (columns < 0 || columns > in.remaining() / 5) throw new IllegalArgumentException("invalid column count");
         ColumnType[] types = new ColumnType[columns];
         ColumnType[] knownTypes = ColumnType.values();
-        ResultFrame.Builder builder = ResultFrame.builder();
+        ResultFrameBuilder builder = new ResultFrameBuilder();
         for (int column = 0; column < columns; column++) {
             String name = in.readString();
             int type = in.readByte();
@@ -125,7 +126,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
             if (columnCount < 0 || columnCount > in.available() / 3) throw new IOException("invalid column count");
             ColumnType[] types = new ColumnType[columnCount];
             ColumnType[] knownTypes = ColumnType.values();
-            ResultFrame.Builder builder = ResultFrame.builder();
+            ResultFrameBuilder builder = new ResultFrameBuilder();
             for (int column = 0; column < columnCount; column++) {
                 String name = in.readUTF();
                 int type = in.readUnsignedByte();

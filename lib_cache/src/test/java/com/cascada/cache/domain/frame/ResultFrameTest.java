@@ -9,8 +9,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ResultFrameTest {
 
     @Test
+    void nestedBuilderRemainsACompatibilityDelegate() {
+        ResultFrame.Builder builder = ResultFrame.builder().column("n", ColumnType.LONG).row(7L);
+
+        assertThat(builder.build().longAt(0, 0)).isEqualTo(7L);
+    }
+
+    @Test
     void resolvedColumnReaderKeepsItsSnapshotAcrossBuilderReuse() {
-        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(64).column("n", ColumnType.LONG);
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(64).column("n", ColumnType.LONG);
         for (int row = 0; row < 64; row++) builder.appendLong(row);
         ResultFrame.ColumnReader reader = builder.build().columnReader(0);
         builder.appendNull();
@@ -25,7 +32,7 @@ class ResultFrameTest {
 
     @Test
     void packedNullsCrossWordBoundariesAndRemainImmutableWhenBuilderGrows() {
-        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(65)
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(65)
                 .column("n", ColumnType.LONG).column("s", ColumnType.STRING);
         for (int row = 0; row < 65; row++) {
             if (row == 0 || row == 63 || row == 64) builder.appendNull(); else builder.appendLong(row);
@@ -50,7 +57,7 @@ class ResultFrameTest {
 
     @Test
     void lateFirstNullDoesNotChangeAnEarlierAllValidSnapshot() {
-        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(64).column("n", ColumnType.LONG);
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(64).column("n", ColumnType.LONG);
         for (int row = 0; row < 64; row++) builder.appendLong(row);
         ResultFrame beforeNull = builder.build();
         builder.appendNull();
@@ -64,7 +71,7 @@ class ResultFrameTest {
 
     @Test
     void exactlySizedBuildSharesSafelyAndDetachesBeforeBuilderGrowth() {
-        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(32).column("value", ColumnType.LONG);
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(32).column("value", ColumnType.LONG);
         for (int row = 0; row < 32; row++) builder.appendLong(row);
         ResultFrame first = builder.build(), second = builder.build();
         builder.appendLong(32);
@@ -76,10 +83,10 @@ class ResultFrameTest {
 
     @Test
     void capacityHintAndTypedCellCopyPreserveNullsExactNumbersAndSnapshots() {
-        ResultFrame source = ResultFrame.builder().expectedRows(1).column("large", ColumnType.LONG)
+        ResultFrame source = new ResultFrameBuilder().expectedRows(1).column("large", ColumnType.LONG)
                 .column("decimal", ColumnType.DECIMAL).column("missing", ColumnType.STRING)
                 .row(Long.MAX_VALUE, new java.math.BigDecimal("1.2300"), null).build();
-        ResultFrame.Builder copy = ResultFrame.builder().expectedRows(1).column("large", ColumnType.LONG)
+        ResultFrameBuilder copy = new ResultFrameBuilder().expectedRows(1).column("large", ColumnType.LONG)
                 .column("decimal", ColumnType.DECIMAL).column("missing", ColumnType.STRING);
         for (int column = 0; column < 3; column++) copy.appendCell(source, 0, column);
         ResultFrame snapshot = copy.build();
@@ -91,7 +98,7 @@ class ResultFrameTest {
 
     @Test
     void builderSnapshotDoesNotChangeWhenBuilderIsReused() {
-        ResultFrame.Builder builder = ResultFrame.builder()
+        ResultFrameBuilder builder = new ResultFrameBuilder()
                 .column("value", ColumnType.DOUBLE)
                 .row(Map.of("value", 1.0));
 
@@ -104,7 +111,7 @@ class ResultFrameTest {
 
     @Test
     void rowsReturnsTheCachedReadOnlyView() {
-        ResultFrame frame = ResultFrame.builder()
+        ResultFrame frame = new ResultFrameBuilder()
                 .column("value", ColumnType.DOUBLE)
                 .row(Map.of("value", 1.0))
                 .build();
@@ -114,7 +121,7 @@ class ResultFrameTest {
 
     @Test
     void typedColumnsPreserveNullsWithoutBoxedRowsOnTheWritePath() {
-        ResultFrame frame = ResultFrame.builder()
+        ResultFrame frame = new ResultFrameBuilder()
                 .column("bucket", ColumnType.LONG)
                 .column("value", ColumnType.DOUBLE)
                 .column("service", ColumnType.STRING)

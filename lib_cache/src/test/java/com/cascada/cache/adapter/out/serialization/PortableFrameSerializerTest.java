@@ -2,6 +2,7 @@ package com.cascada.cache.adapter.out.serialization;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import org.junit.jupiter.api.Test;
 
@@ -19,7 +20,7 @@ class PortableFrameSerializerTest {
     private final PortableFrameSerializer serializer = new PortableFrameSerializer();
 
     private ResultFrame sampleFrame() {
-        return ResultFrame.builder()
+        return new ResultFrameBuilder()
                 .column("ts", ColumnType.LONG)
                 .column("appName", ColumnType.STRING)
                 .column("sumBytes", ColumnType.DOUBLE)
@@ -53,7 +54,7 @@ class PortableFrameSerializerTest {
 
     @Test
     void compressionActuallyShrinksARepetitiveFrame() {
-        ResultFrame.Builder builder = ResultFrame.builder()
+        ResultFrameBuilder builder = new ResultFrameBuilder()
                 .column("appName", ColumnType.STRING)
                 .column("sumBytes", ColumnType.DOUBLE);
         for (int index = 0; index < 1_000; index++) {
@@ -72,7 +73,7 @@ class PortableFrameSerializerTest {
     @Test
     void roundTripsStringsBeyondModifiedUtfLimit() {
         String value = "é😀".repeat(30_000);
-        ResultFrame frame = ResultFrame.builder().column("value", ColumnType.STRING)
+        ResultFrame frame = new ResultFrameBuilder().column("value", ColumnType.STRING)
                 .row(Map.of("value", value)).build();
         assertThat(serializer.deserialize(serializer.serialize(frame)).rows()).isEqualTo(frame.rows());
     }
@@ -106,7 +107,7 @@ class PortableFrameSerializerTest {
 
     @Test
     void matchesExistingModernWireBytesForEveryTypeAndExtremeValue() throws Exception {
-        ResultFrame.Builder builder = ResultFrame.builder().column("l", ColumnType.LONG)
+        ResultFrameBuilder builder = new ResultFrameBuilder().column("l", ColumnType.LONG)
                 .column("d", ColumnType.DOUBLE).column("s", ColumnType.STRING).column("n", ColumnType.DECIMAL);
         long[] longs = {Long.MIN_VALUE, Long.MAX_VALUE, 9_007_199_254_740_993L, 0};
         double[] doubles = {-0.0, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
@@ -150,7 +151,7 @@ class PortableFrameSerializerTest {
 
     @Test
     void rejectsMalformedUtf8TruncationDimensionsTypesAndTrailingData() throws Exception {
-        ResultFrame frame = ResultFrame.builder().column("s", ColumnType.STRING).appendString("a").build();
+        ResultFrame frame = new ResultFrameBuilder().column("s", ColumnType.STRING).appendString("a").build();
         byte[] valid = ZstdFrameEnvelope.decompress(serializer.serialize(frame));
         java.util.List<byte[]> corruptions = new java.util.ArrayList<>();
         for (int length = 0; length < valid.length; length++) corruptions.add(java.util.Arrays.copyOf(valid,length));

@@ -2,6 +2,7 @@ package com.cascada.sql.simulation;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 
 import java.util.ArrayList;
@@ -103,7 +104,7 @@ final class DirectComputeOracle implements QueryExecutorPort {
             }
         }
 
-        ResultFrame.Builder builder = ResultFrame.builder();
+        ResultFrameBuilder builder = new ResultFrameBuilder();
         if (isTimeSeries) {
             builder.column("ts", ColumnType.LONG);
         }

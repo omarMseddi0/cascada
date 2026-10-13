@@ -2,6 +2,7 @@ package com.cascada.cache.application.service;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.AggregateFunctionResolver;
 import com.cascada.cache.domain.merge.AverageReconstructionService;
@@ -58,7 +59,7 @@ public final class FrameMergeService {
             try {
                 java.util.Objects.requireNonNull(frame, "frame");
                 if (schema == null) {
-                    ResultFrame.Builder descriptor = ResultFrame.builder();
+                    ResultFrameBuilder descriptor = new ResultFrameBuilder();
                     for (String column : frame.columnNames()) descriptor.column(column, frame.columnType(column));
                     schema = descriptor.build();
                     if (frame.isEmpty()) firstEmpty = frame;
@@ -166,7 +167,7 @@ public final class FrameMergeService {
             return frame;
         }
 
-        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(frame.rowCount());
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(frame.rowCount());
         for (String column : frame.columnNames()) {
             builder.column(column, frame.columnType(column));
         }
@@ -292,7 +293,7 @@ public final class FrameMergeService {
         finalColumns.addAll(averageAliasToColumn.keySet());
         finalColumns.removeIf(sumCountColumnsToDrop::contains);
 
-        ResultFrame.Builder finalBuilder = ResultFrame.builder().expectedRows(frame.rowCount());
+        ResultFrameBuilder finalBuilder = new ResultFrameBuilder().expectedRows(frame.rowCount());
         for (String column : finalColumns) {
             ColumnType type = averageAliasToColumn.containsKey(column) ? ColumnType.DOUBLE : frame.columnType(column);
             finalBuilder.column(column, type);
@@ -391,7 +392,7 @@ public final class FrameMergeService {
             if (!orderBy.isEmpty()) sortRows(rows, comparator);
         }
 
-        ResultFrame.Builder builder = ResultFrame.builder().expectedRows(limit);
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(limit);
         for (String column : frame.columnNames()) {
             builder.column(column, frame.columnType(column));
         }

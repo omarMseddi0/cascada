@@ -3,6 +3,7 @@ package com.cascada.cache.adapter.out.serialization;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.github.luben.zstd.Zstd;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -167,7 +168,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             FieldVector[] vectors = new FieldVector[fields.size()];
             ColumnType[] columnTypes = new ColumnType[fields.size()];
             Utf8ValueCache[] strings = new Utf8ValueCache[fields.size()];
-            ResultFrame.Builder builder = ResultFrame.builder();
+            ResultFrameBuilder builder = new ResultFrameBuilder();
             for (int column = 0; column < fields.size(); column++) {
                 Field field = fields.get(column);
                 ColumnType type = fromArrowType(field);
@@ -202,7 +203,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
         }
     }
 
-    private void appendValue(FieldVector vector, ColumnType type, int rowIndex, ResultFrame.Builder builder,
+    private void appendValue(FieldVector vector, ColumnType type, int rowIndex, ResultFrameBuilder builder,
                              Utf8ValueCache strings) {
         if (vector.isNull(rowIndex)) {
             builder.appendNull();

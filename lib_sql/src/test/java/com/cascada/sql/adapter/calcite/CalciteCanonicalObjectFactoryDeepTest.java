@@ -393,8 +393,8 @@ class CalciteCanonicalObjectFactoryDeepTest {
                 "SELECT SUM(x) AS total, city, city FROM traffic "
                         + "WHERE ts >= 0 AND ts <= 100 GROUP BY city");
 
-        assertThat(first.projectionSignature()).containsExactly("city", "SUM(x) total", "city");
-        assertThat(reversed.projectionSignature()).containsExactly("SUM(x) total", "city", "city");
+        assertThat(first.projectionSignature()).containsExactly("city", "SUM(x) AS total", "city");
+        assertThat(reversed.projectionSignature()).containsExactly("SUM(x) AS total", "city", "city");
     }
 
     // --- bypass guards ---------------------------------------------------------------------------

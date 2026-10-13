@@ -304,7 +304,9 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
     private List<String> extractProjectionSignature(SqlSelect select) {
         List<String> projections = new ArrayList<>();
         for (SqlNode item : select.getSelectList()) {
-            projections.add(CalciteSql.unparse(item));
+            projections.add(item instanceof SqlBasicCall call && item.getKind() == SqlKind.AS
+                    ? CalciteSql.unparse(call.operand(0)) + " AS " + CalciteSql.unparse(call.operand(1))
+                    : CalciteSql.unparse(item));
         }
         return projections;
     }

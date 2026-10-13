@@ -17,13 +17,28 @@ IMPLEMENTATION_PLAN.md
 /docs/design.md
 refactor*.md
 
-# Local-only performance benchmarks, runners and measurement reports
+# Local performance measurement reports
+/docs/performance/
+/.tmp-perf/
+/docs/PERFORMANCE.md
+/docs/performance-logging.properties
+/docs/architecture-review-*.md
+.tmp-native-validation-*/
+__pycache__/
+
+# Local native benchmark configuration and reports
+/E2E_README.md
+/config/spark-gluten-local.json
+/scripts/Complete-GlutenDeltaValidation.ps1
+/scripts/Test-DeltaTenGbBenchmark.ps1
+/scripts/Write-DeltaTenGbReport.ps1
+/scripts/Update-E2EReadme.py
+/scripts/Write-GlutenDeltaIntegrationReport.ps1
+/scripts/Test-VeloxValkey.ps1
+
 **/src/benchmark/
 /scripts/Run-AgronaBenchmarks.ps1
 /scripts/Measure-AgronaResources.ps1
-/docs/performance/
-
-# Keep complete benchmark folders local.
 **/benchmark/
 **/benchmarks/
 

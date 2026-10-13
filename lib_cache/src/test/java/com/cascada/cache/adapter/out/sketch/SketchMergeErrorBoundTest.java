@@ -15,6 +15,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SketchMergeErrorBoundTest {
 
     @Test
+    void hyperLogLogIncludesEmptyStringsButExcludesNullAndPreservesNulValuesAcrossUnion() {
+        HyperLogLogDistinctCounter first = new HyperLogLogDistinctCounter();
+        first.add((String) null);
+        first.add("");
+        first.add("");
+
+        HyperLogLogDistinctCounter second = new HyperLogLogDistinctCounter();
+        second.add("\u0000");
+        second.add("a");
+
+        double estimate = HyperLogLogDistinctCounter.unionOf(List.of(first, second)).estimateDistinctCount();
+        assertThat(estimate).isCloseTo(3.0, org.assertj.core.data.Offset.offset(0.001));
+    }
+
+    @Test
     void hyperLogLogDistinctCountAcrossMergedDaysIsWithinTwoPercent() {
         int trueCardinality = 200_000;
         // Three per-day sketches, each seeing a disjoint third of the universe.

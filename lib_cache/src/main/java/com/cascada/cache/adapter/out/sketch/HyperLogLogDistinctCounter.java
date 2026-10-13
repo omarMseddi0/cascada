@@ -30,7 +30,11 @@ public final class HyperLogLogDistinctCounter {
     }
 
     public void add(String value) {
-        sketch.update(value);
+        // DataSketches ignores empty strings; SQL COUNT(DISTINCT) excludes NULL but includes "".
+        // Prefix each non-null value to keep the string encoding injective, including embedded NULs.
+        if (value != null) {
+            sketch.update("\u0000" + value);
+        }
     }
 
     public void add(long value) {

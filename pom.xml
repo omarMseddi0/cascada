@@ -41,7 +41,7 @@
         <jqwik.version>1.8.4</jqwik.version>
         <archunit.version>1.4.2</archunit.version>
         <jackson.version>2.20.0</jackson.version>
-        <datasketches.version>6.0.0</datasketches.version>
+        <datasketches.version>6.2.0</datasketches.version>
         <calcite.version>1.37.0</calcite.version>
         <arrow.version>18.3.0</arrow.version>
         <zstd.version>1.5.6-3</zstd.version>

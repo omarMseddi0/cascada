@@ -43,7 +43,7 @@ final class SparkResultFrameMapper {
         ResultFrameBuilder builder = new ResultFrameBuilder()
                 .expectedRows(Math.min(maxResultRows, INITIAL_ROW_CAPACITY));
         for (int index = 0; index < fields.length; index++) {
-            ColumnPlan column = columnPlan(fields[index].dataType());
+            SparkColumnPlan column = columnPlan(fields[index].dataType());
             columnTypes[index] = column.type();
             getters[index] = column.getter();
             builder.column(fields[index].name(), columnTypes[index]);
@@ -80,42 +80,41 @@ final class SparkResultFrameMapper {
         return builder.build();
     }
 
-    private ColumnPlan columnPlan(DataType dataType) {
+    private SparkColumnPlan columnPlan(DataType dataType) {
         if (dataType.equals(DataTypes.ByteType)) {
-            return new ColumnPlan(ColumnType.LONG, READ_BYTE);
+            return new SparkColumnPlan(ColumnType.LONG, READ_BYTE);
         }
         if (dataType.equals(DataTypes.ShortType)) {
-            return new ColumnPlan(ColumnType.LONG, READ_SHORT);
+            return new SparkColumnPlan(ColumnType.LONG, READ_SHORT);
         }
         if (dataType.equals(DataTypes.IntegerType)) {
-            return new ColumnPlan(ColumnType.LONG, READ_INT);
+            return new SparkColumnPlan(ColumnType.LONG, READ_INT);
         }
         if (dataType.equals(DataTypes.LongType)) {
-            return new ColumnPlan(ColumnType.LONG, READ_LONG);
+            return new SparkColumnPlan(ColumnType.LONG, READ_LONG);
         }
         if (dataType.equals(DataTypes.FloatType)) {
-            return new ColumnPlan(ColumnType.DOUBLE, READ_FLOAT);
+            return new SparkColumnPlan(ColumnType.DOUBLE, READ_FLOAT);
         }
         if (dataType.equals(DataTypes.DoubleType)) {
-            return new ColumnPlan(ColumnType.DOUBLE, READ_DOUBLE);
+            return new SparkColumnPlan(ColumnType.DOUBLE, READ_DOUBLE);
         }
         if (dataType instanceof DecimalType) {
-            return new ColumnPlan(ColumnType.DECIMAL, READ_DECIMAL);
+            return new SparkColumnPlan(ColumnType.DECIMAL, READ_DECIMAL);
         }
         if (dataType.equals(DataTypes.StringType)) {
-            return new ColumnPlan(ColumnType.STRING, READ_STRING);
+            return new SparkColumnPlan(ColumnType.STRING, READ_STRING);
         }
         if (dataType.equals(DataTypes.BooleanType)) {
-            return new ColumnPlan(ColumnType.STRING, READ_BOOLEAN);
+            return new SparkColumnPlan(ColumnType.STRING, READ_BOOLEAN);
         }
         if (dataType.equals(DataTypes.DateType) || dataType.equals(DataTypes.TimestampType)
                 || dataType.equals(DataTypes.TimestampNTZType) || dataType.equals(DataTypes.NullType)) {
             // Preserve Spark's external date/time representation (java.sql or java.time) exactly.
-            return new ColumnPlan(ColumnType.STRING, READ_EXTERNAL_STRING);
+            return new SparkColumnPlan(ColumnType.STRING, READ_EXTERNAL_STRING);
         }
         throw new UnsupportedOperationException("Spark result type '" + dataType.catalogString()
                 + "' cannot be represented by a cache result frame");
     }
 
-    private record ColumnPlan(ColumnType type, byte getter) { }
 }

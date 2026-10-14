@@ -52,7 +52,10 @@ class ApplicationIntegrationTest {
                 List.of(new TableSettings("traffic", "/tmp/traffic", Map.of("ts", "ts", "bytes", "C6"), Set.of("ts"))));
         try (var runtime = new CascadaRuntime(settings, () -> sql -> {
             assertThat(sql).contains("delta.`/tmp/traffic`").contains("C6"); executions.incrementAndGet();
-            return ResultFrame.builder().column("n", ColumnType.DOUBLE).row(10.0).build();
+            // Like Spark, a bucket-labelled gap query returns its label column (day 0 here).
+            return sql.contains("cascada_bucket_start")
+                    ? ResultFrame.builder().column("n", ColumnType.DOUBLE).column("cascada_bucket_start", ColumnType.LONG).row(10.0, 0L).build()
+                    : ResultFrame.builder().column("n", ColumnType.DOUBLE).row(10.0).build();
         }, application, new ClusterLifecycleService(new ClusterManifestRenderer(), orchestrator))) {
             runtime.start(); HttpClient client = HttpClient.newHttpClient();
             String body = "{\"sql\":\"SELECT SUM(bytes) AS n FROM traffic WHERE ts >= 0 AND ts <= 86399\"}";
@@ -61,7 +64,9 @@ class ApplicationIntegrationTest {
             assertThat(executions).hasValue(1);
             var warmed = post(client, runtime.httpPort(), "/cache/warm", "{\"start\":0,\"end\":86399}");
             assertThat(warmed.statusCode()).isEqualTo(200);
-            assertThat(JSON.readTree(warmed.body()).get("bucketsWarmed").asInt()).isEqualTo(1);
+            // The cold read already stored the complete day bucket, so warming finds it present.
+            assertThat(JSON.readTree(warmed.body()).get("bucketsWarmed").asInt()).isZero();
+            assertThat(JSON.readTree(warmed.body()).get("bucketsSkipped").asInt()).isEqualTo(1);
             var size = client.send(HttpRequest.newBuilder(URI.create("http://localhost:" + runtime.httpPort() + "/cache/size")).build(), HttpResponse.BodyHandlers.ofString());
             assertThat(JSON.readTree(size.body()).get("bucketCount").asInt()).isEqualTo(1);
             ManagedChannel channel = ManagedChannelBuilder.forAddress("localhost", runtime.grpcPort()).usePlaintext().build();
@@ -72,13 +77,13 @@ class ApplicationIntegrationTest {
                 var query = QueryServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS).query(QueryRequest.newBuilder()
                         .setSql("SELECT SUM(bytes) AS n FROM traffic WHERE ts >= 0 AND ts <= 86399").build());
                 query.forEachRemaining(chunk -> { });
-                assertThat(executions).hasValue(3);
+                assertThat(executions).hasValue(2);
                 var clusters = ClusterServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
                 assertThat(clusters.changeCluster(ClusterRequest.newBuilder().setOperation(ClusterOperation.DEPLOY).build()).getResourcesCount()).isEqualTo(1);
                 clusters.changeCluster(ClusterRequest.newBuilder().setOperation(ClusterOperation.STOP).build());
                 assertThat(post(client, runtime.httpPort(), "/cluster/start", "{}").statusCode()).isEqualTo(200);
                 assertThat(clusterActions).containsExactly("deploy", "scale=0", "scale=1");
-                assertThat(cache.flushCache(FlushCacheRequest.getDefaultInstance()).getBucketsPurged()).isZero();
+                assertThat(cache.flushCache(FlushCacheRequest.getDefaultInstance()).getBucketsPurged()).isEqualTo(1);
             } finally { channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS); }
             assertThat(post(client, runtime.httpPort(), "/query", "{\"sql\":\"SELECT t.ts FROM traffic t JOIN traffic u ON t.ts=u.ts\"}").statusCode()).isEqualTo(422);
         }

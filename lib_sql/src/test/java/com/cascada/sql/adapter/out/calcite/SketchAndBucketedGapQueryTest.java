@@ -50,6 +50,40 @@ class SketchAndBucketedGapQueryTest {
     }
 
     @Test
+    void bucketedGapGroupsByEpochAlignedBucketStart() {
+        Optional<String> bucketed = builder.buildBucketedGapQuery(
+                "SELECT CAST(FLOOR(ts / 3600) * 3600 AS BIGINT) AS ts, SUM(amount) AS total FROM events "
+                        + "WHERE ts >= 100 AND ts <= 259199 AND region = 'a' "
+                        + "GROUP BY CAST(FLOOR(ts / 3600) * 3600 AS BIGINT)",
+                new GapPlan(Optional.of(new com.cascada.cache.domain.time.TimeRange(100, DAY - 1)),
+                        List.of(DAY, 2 * DAY), Optional.empty()),
+                "cascada_bucket_start");
+
+        assertThat(bucketed).isPresent();
+        assertThat(bucketed.get())
+                .contains("CAST(ts - PMOD(ts, 86400) AS BIGINT) cascada_bucket_start")
+                .contains("GROUP BY CAST(FLOOR(ts / 3600) * 3600 AS BIGINT), CAST(ts - PMOD(ts, 86400) AS BIGINT)")
+                .contains("region = 'a'")
+                .contains("(ts >= 100 AND ts <= 259199)");
+    }
+
+    @Test
+    void globalAggregateGainsABucketGroup() {
+        Optional<String> bucketed = builder.buildBucketedGapQuery(
+                "SELECT COUNT(*) AS n FROM events WHERE ts >= 0 AND ts <= 172799",
+                new GapPlan(Optional.empty(), List.of(0L, DAY), Optional.empty()), "cascada_bucket_start");
+
+        assertThat(bucketed.orElseThrow()).endsWith("GROUP BY CAST(ts - PMOD(ts, 86400) AS BIGINT)");
+    }
+
+    @Test
+    void bucketLabelThatShadowsAnOutputColumnIsRefused() {
+        assertThat(builder.buildBucketedGapQuery("SELECT COUNT(*) AS cascada_bucket_start FROM events "
+                        + "WHERE ts >= 0 AND ts <= 86399",
+                new GapPlan(Optional.empty(), List.of(0L), Optional.empty()), "cascada_bucket_start")).isEmpty();
+    }
+
+    @Test
     void sketchWithAQuantifierIsRejected() {
         assertThatThrownBy(() -> builder.buildGapQuery("SELECT APPROX_COUNT_DISTINCT(user_id, 0.01) AS users FROM events "
                         + "WHERE ts >= 0 AND ts <= 86399",

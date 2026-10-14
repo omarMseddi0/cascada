@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.port.out.DistinctSketchPort;
 import com.cascada.cache.application.service.merge.AggregateFunctionResolver;
 import com.cascada.cache.application.service.merge.AverageReconstructionService;
 import com.cascada.cache.application.service.merge.SparkAverage;
@@ -34,10 +35,17 @@ public final class FrameMergeService {
     private final AverageReconstructionService averageReconstructionService = new AverageReconstructionService();
     private final int fixedStepSeconds;
     private final String timeColumnName;
+    private final DistinctSketchPort distinctSketches;
 
     public FrameMergeService(int fixedStepSeconds, String timeColumnName) {
+        this(fixedStepSeconds, timeColumnName, null);
+    }
+
+    /** {@code distinctSketches} may be null; APPROX_COUNT_DISTINCT merges then fail and are answered directly. */
+    public FrameMergeService(int fixedStepSeconds, String timeColumnName, DistinctSketchPort distinctSketches) {
         this.fixedStepSeconds = fixedStepSeconds;
         this.timeColumnName = timeColumnName;
+        this.distinctSketches = distinctSketches;
     }
 
     /** Same ordered merge and final reconstruction, without retaining each completed input frame. */
@@ -84,7 +92,8 @@ public final class FrameMergeService {
         if (timeSeries) dimensions.add(timeColumnName);
         dimensions.addAll(dimensionColumns(schema, canonicalObject, timeSeries));
         int step = timeSeries ? timeSeriesStep(canonicalObject) : fixedStepSeconds;
-        return new TypedFrameAccumulator(schema, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step);
+        return new TypedFrameAccumulator(schema, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step,
+                distinctSketches);
     }
 
     ResultFrame finishMergedFrame(ResultFrame merged, CanonicalQueryObject canonicalObject) {

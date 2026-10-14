@@ -326,6 +326,12 @@ class LocalSparkConsistencyIntegrationTest {
                 assertDescendingLastColumn(result.frame());
                 return;
             }
+            if (i == 5) {
+                // Aliased APPROX_COUNT_DISTINCT is cached through mergeable HLL sketches. Its estimate is
+                // not Spark's HLL++ value, so it is checked against tolerance in BucketLabelledSparkIntegrationTest.
+                assertThat(new Harness(true).service.query(sql).servedThroughCache()).isTrue();
+                return;
+            }
             // Spark 4.2 itself fails to canonicalize this correlated CTE against InMemoryRelation
             // (NoSuchElementException id#9L). Run both independent executions without Spark table caching.
             if (i >= 15) spark.catalog().uncacheTable("events");

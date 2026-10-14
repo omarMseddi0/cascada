@@ -197,7 +197,7 @@ public final class ColumnarHashAggregator {
                 yield Math.min(left, right);
             }
             case MAXIMUM -> Double.isNaN(left) || Double.isNaN(right) ? Double.NaN : Math.max(left, right);
-            case AVERAGE -> throw new IllegalArgumentException("derived measures are not rolled up");
+            case DISTINCT_SKETCH, AVERAGE -> throw new IllegalArgumentException("derived measures are not rolled up");
         };
     }
 

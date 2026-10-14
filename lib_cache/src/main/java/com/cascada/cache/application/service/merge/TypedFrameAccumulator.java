@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.merge;
 
+import com.cascada.cache.application.port.out.DistinctSketchPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -23,6 +24,13 @@ public final class TypedFrameAccumulator {
 
     public TypedFrameAccumulator(ResultFrame inputSchema, List<String> dimensions,
                        Map<String, AggregateFunction> functions, String timeColumn, int step) {
+        this(inputSchema, dimensions, functions, timeColumn, step, null);
+    }
+
+    /** {@code sketches} merges APPROX_COUNT_DISTINCT measures; it may be null when none are present. */
+    public TypedFrameAccumulator(ResultFrame inputSchema, List<String> dimensions,
+                       Map<String, AggregateFunction> functions, String timeColumn, int step,
+                       DistinctSketchPort sketches) {
         ResultFrameBuilder descriptor = ResultFrame.builder();
         for (String column : inputSchema.columnNames()) descriptor.column(column, inputSchema.columnType(column));
         this.schema = descriptor.build();
@@ -45,16 +53,28 @@ public final class TypedFrameAccumulator {
         int[] measureColumns = new int[measures.size()];
         ColumnType[] measureTypes = new ColumnType[measures.size()];
         AggregateOperation[] measureFunctions = new AggregateOperation[measures.size()];
+        boolean[] sketchMeasures = new boolean[measures.size()];
         for (int measure = 0; measure < measures.size(); measure++) {
             String name = measures.get(measure);
             measureColumns[measure] = schema.columnIndex(name);
             measureTypes[measure] = schema.columnType(name);
             // Name normalization and aggregate resolution belong outside the row/measure hot loop.
-            measureFunctions[measure] = AggregateOperation.fromFunction(AggregateFunctionResolver.resolve(name, functions));
+            AggregateFunction function = AggregateFunctionResolver.resolve(name, functions);
+            if (function == AggregateFunction.DISTINCT_SKETCH) {
+                if (measureTypes[measure] != ColumnType.STRING) {
+                    throw new IllegalArgumentException("distinct sketch column '" + name + "' must be an encoded STRING");
+                }
+                if (sketches == null) {
+                    throw new IllegalStateException("no distinct sketch merger is configured for column '" + name + "'");
+                }
+                sketchMeasures[measure] = true;
+            } else {
+                measureFunctions[measure] = AggregateOperation.fromFunction(function);
+            }
         }
 
         groups = new TypedAggregationGroups(schema, dimensionColumns, dimensionTypes, timeDimensions, step,
-                measureColumns, measureTypes, measureFunctions);
+                measureColumns, measureTypes, measureFunctions, sketchMeasures, sketches);
     }
 
     public void accept(ResultFrame input) {
@@ -80,14 +100,14 @@ public final class TypedFrameAccumulator {
     }
 
     public ResultFrame finish() {
-            ResultFrameBuilder result = ResultFrame.builder().expectedRows(groups.groupCount);
+        ResultFrameBuilder result = ResultFrame.builder().expectedRows(groups.groupCount);
         int[] outputDimensions = new int[schema.columnNames().size()];
         int[] outputMeasures = new int[schema.columnNames().size()];
         Arrays.fill(outputDimensions, -1);
         Arrays.fill(outputMeasures, -1);
         for (int column = 0; column < schema.columnNames().size(); column++) {
             String name = schema.columnNames().get(column);
-            result.column(name, schema.columnType(name));
+            ColumnType outputType = schema.columnType(name);
             for (int dimension = 0; dimension < dimensions.size(); dimension++) {
                 if (dimensions.get(dimension).equals(name)) {
                     outputDimensions[column] = dimension;
@@ -98,10 +118,12 @@ public final class TypedFrameAccumulator {
                 for (int measure = 0; measure < measures.size(); measure++) {
                     if (measures.get(measure).equals(name)) {
                         outputMeasures[column] = measure;
+                        outputType = groups.outputType(measure);
                         break;
                     }
                 }
             }
+            result.column(name, outputType);
         }
 
         int[] order = groups.sortedGroupIds(dimensions, dimensionColumns, dimensionTypes, timeDimensions, step);

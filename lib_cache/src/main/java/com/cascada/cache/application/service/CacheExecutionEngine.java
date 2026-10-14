@@ -4,6 +4,7 @@ import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
+import com.cascada.cache.application.port.out.DistinctSketchPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
@@ -82,13 +83,22 @@ public final class CacheExecutionEngine {
                 ForkJoinPool.commonPool());
     }
 
-    /**
-     * The full constructor accepts the executor owned by the composition root so concurrent requests share
-     * one bounded work queue. Existing overloads retain their behavior through the JDK common pool.
-     */
     public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
                                 CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor) {
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, coverageIndex, cubeCatalog, executor,
+                null);
+    }
+
+    /**
+     * The full constructor accepts the executor owned by the composition root, and the sketch merger
+     * that makes {@code APPROX_COUNT_DISTINCT} buckets mergeable. Without a merger such queries are
+     * answered by the physical SQL whenever a merge would be needed.
+     */
+    public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
+                                GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
+                                CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor,
+                                DistinctSketchPort distinctSketches) {
         this.cacheBackend = Objects.requireNonNull(cacheBackend, "cacheBackend");
         this.sparkExecutor = Objects.requireNonNull(sparkExecutor, "sparkExecutor");
         this.gapQueryRewriter = Objects.requireNonNull(gapQueryRewriter, "gapQueryRewriter");
@@ -97,8 +107,8 @@ public final class CacheExecutionEngine {
         this.configuration = Objects.requireNonNull(configuration, "configuration");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.timeBucketCalculator = new TimeBucketCalculator(configuration.bucketSeconds());
-        this.frameMergeService =
-                new FrameMergeService(configuration.fixedStepSeconds(), configuration.timeColumnName());
+        this.frameMergeService = new FrameMergeService(configuration.fixedStepSeconds(),
+                configuration.timeColumnName(), distinctSketches);
     }
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
@@ -331,14 +341,17 @@ public final class CacheExecutionEngine {
                 executeDirect(canonicalObject));
     }
 
-    /** AVG is fetched as SUM and COUNT ingredients and divided by the merge. */
+    /** AVG and APPROX_COUNT_DISTINCT are fetched as ingredients and finished by the merge. */
     private static boolean hasDerivedMeasures(CanonicalQueryObject canonicalObject) {
-        return canonicalObject.metadata().measureAggregates().containsValue(AggregateFunction.AVERAGE);
+        var functions = canonicalObject.metadata().measureAggregates().values();
+        return functions.contains(AggregateFunction.DISTINCT_SKETCH)
+                || functions.contains(AggregateFunction.AVERAGE);
     }
 
     /**
      * Runs the query without cached ingredients. AVG is still fetched as SUM and COUNT and divided by
-     * the merge, so the answer is computed the same way whether or not any bucket was cached.
+     * the merge, and distinct-count sketches are still unioned and estimated, so the answer is computed
+     * the same way whether or not any bucket was cached.
      */
     private ResultFrame executeDirect(CanonicalQueryObject canonicalObject) {
         if (!hasDerivedMeasures(canonicalObject)) {

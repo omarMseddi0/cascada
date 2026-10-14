@@ -38,7 +38,8 @@ public final class TypedFrameAggregator {
                 continue;
             }
             AggregateFunction declaredFunction = declaredFunction(column, functions);
-            if (declaredFunction == AggregateFunction.MINIMUM || declaredFunction == AggregateFunction.MAXIMUM) {
+            if (declaredFunction == AggregateFunction.MINIMUM || declaredFunction == AggregateFunction.MAXIMUM
+                    || declaredFunction == AggregateFunction.DISTINCT_SKETCH) {
                 measures.add(column);
                 continue;
             }

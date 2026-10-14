@@ -177,7 +177,7 @@ class LocalSparkConsistencyIntegrationTest {
                 "SUM(absent) AS total, COUNT(absent) AS present, MIN(absent) AS lo, MAX(absent) AS hi")) {
             queries.add(new Scenario("global-" + queries.size(), "SELECT region, " + selection
                     + " FROM events WHERE ts >= " + BASE + " AND ts <= " + END + " GROUP BY region",
-                    !selection.startsWith("AVG")));
+                    true));
         }
         for (String order : List.of("total DESC NULLS LAST, region ASC NULLS FIRST",
                 "present ASC, region DESC NULLS LAST", "region DESC NULLS FIRST")) {
@@ -310,6 +310,20 @@ class LocalSparkConsistencyIntegrationTest {
             String sql = sqls.get(i);
             if (i == 12) {
                 checkPaths(new Scenario("uncorrelated-IN-subquery", sql, true));
+                return;
+            }
+            if (i == 2) {
+                // AVG is cached as SUM and COUNT ingredients and divided after the merge.
+                // The query orders by its last column only, so tied rows have no defined order:
+                // compare the rows as a set and check that the ordered column descends.
+                Harness h = new Harness(true);
+                var result = h.service.query(sql);
+                assertThat(result.servedThroughCache()).isTrue();
+                String unordered = sql.substring(0, sql.indexOf(" ORDER BY"));
+                ResultFrame expected = direct.execute(sql);
+                same(result.frame(), expected, unordered, "complex-cached");
+                same(h.service.query(sql).frame(), expected, unordered, "complex-cached-repeat");
+                assertDescendingLastColumn(result.frame());
                 return;
             }
             // Spark 4.2 itself fails to canonicalize this correlated CTE against InMemoryRelation
@@ -731,6 +745,15 @@ class LocalSparkConsistencyIntegrationTest {
         }
         @Override public boolean supportsBlockSize() { return false; }
         @Override public long defaultBlockSize() { return 0; }
+    }
+
+    private static void assertDescendingLastColumn(ResultFrame frame) {
+        int column = frame.columnNames().size() - 1;
+        for (int row = 1; row < frame.rowCount(); row++) {
+            double previous = ((Number) frame.valueAt(row - 1, column)).doubleValue();
+            double current = ((Number) frame.valueAt(row, column)).doubleValue();
+            assertThat(current).as("row " + row + " of the ORDER BY ... DESC column").isLessThanOrEqualTo(previous);
+        }
     }
 
     private void same(ResultFrame actual, ResultFrame expected, String sql, String context) {

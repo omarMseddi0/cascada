@@ -2,12 +2,14 @@ package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.service.merge.AggregateFunctionResolver;
 import com.cascada.cache.application.service.merge.AverageReconstructionService;
+import com.cascada.cache.application.service.merge.SparkAverage;
 import com.cascada.cache.application.service.merge.TypedFrameAccumulator;
 import com.cascada.cache.application.service.merge.TypedFrameAggregator;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.merge.AverageIngredients;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.OrderByClause;
 import java.util.ArrayList;
@@ -86,7 +88,12 @@ public final class FrameMergeService {
     }
 
     ResultFrame finishMergedFrame(ResultFrame merged, CanonicalQueryObject canonicalObject) {
-        ResultFrame reconstructed = reconstructAverages(merged, canonicalObject);
+        List<String> averages = averageAliases(canonicalObject);
+        // Cached AVG measures carry their own SUM/COUNT ingredients; the legacy SUM(col)/COUNT(col)
+        // folding would otherwise also consume a user's explicit SUM(col) and COUNT(col) columns.
+        ResultFrame reconstructed = averages.isEmpty()
+                ? reconstructAverages(merged, canonicalObject)
+                : SparkAverage.finish(merged, averages);
         ResultFrame composites = reconstructCompositeAliases(reconstructed, canonicalObject);
         return applyPostProcessing(composites, canonicalObject);
     }
@@ -224,8 +231,25 @@ public final class FrameMergeService {
         Map<String, AggregateFunction> functions = new LinkedHashMap<>(
                 AggregateFunctionResolver.fromAggregateSpecs(canonicalObject.metadata().aggregateSpecs()));
         canonicalObject.metadata().measureAggregates().forEach((column, function) ->
-                functions.put(column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT), function));
+                functions.put(normalizedName(column), function));
+        for (String alias : averageAliases(canonicalObject)) {
+            functions.put(normalizedName(AverageIngredients.sumColumn(alias)), AggregateFunction.SUM);
+            functions.put(normalizedName(AverageIngredients.countColumn(alias)), AggregateFunction.COUNT);
+            functions.put(normalizedName(AverageIngredients.typeColumn(alias)), AggregateFunction.MINIMUM);
+        }
         return functions;
+    }
+
+    private static List<String> averageAliases(CanonicalQueryObject canonicalObject) {
+        List<String> aliases = new ArrayList<>();
+        canonicalObject.metadata().measureAggregates().forEach((column, function) -> {
+            if (function == AggregateFunction.AVERAGE) aliases.add(column);
+        });
+        return aliases;
+    }
+
+    private static String normalizedName(String column) {
+        return column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT);
     }
 
     // --- AVG reconstruction (RC4) ----------------------------------------------------------------

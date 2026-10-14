@@ -1,6 +1,7 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.port.out.DistinctSketchPort;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.merge.AggregateFunctionResolver;
 import com.cascada.cache.application.service.merge.AverageReconstructionService;
 import com.cascada.cache.application.service.merge.SparkAverage;
@@ -11,13 +12,16 @@ import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.AverageIngredients;
+import com.cascada.cache.domain.merge.CompositeIngredients;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.OrderByClause;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.IntBinaryOperator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -36,16 +40,23 @@ public final class FrameMergeService {
     private final int fixedStepSeconds;
     private final String timeColumnName;
     private final DistinctSketchPort distinctSketches;
+    private final QueryExecutorPort expressionEvaluator;
 
     public FrameMergeService(int fixedStepSeconds, String timeColumnName) {
-        this(fixedStepSeconds, timeColumnName, null);
+        this(fixedStepSeconds, timeColumnName, null, null);
     }
 
-    /** {@code distinctSketches} may be null; APPROX_COUNT_DISTINCT merges then fail and are answered directly. */
-    public FrameMergeService(int fixedStepSeconds, String timeColumnName, DistinctSketchPort distinctSketches) {
+    /**
+     * {@code distinctSketches} unions APPROX_COUNT_DISTINCT terms and {@code expressionEvaluator}
+     * evaluates expressions over merged aggregate terms. Either may be null: a merge that needs a
+     * missing collaborator fails, and the engine then answers the query directly.
+     */
+    public FrameMergeService(int fixedStepSeconds, String timeColumnName,
+                             DistinctSketchPort distinctSketches, QueryExecutorPort expressionEvaluator) {
         this.fixedStepSeconds = fixedStepSeconds;
         this.timeColumnName = timeColumnName;
         this.distinctSketches = distinctSketches;
+        this.expressionEvaluator = expressionEvaluator;
     }
 
     /** Same ordered merge and final reconstruction, without retaining each completed input frame. */
@@ -100,11 +111,110 @@ public final class FrameMergeService {
         List<String> averages = averageAliases(canonicalObject);
         // Cached AVG measures carry their own SUM/COUNT ingredients; the legacy SUM(col)/COUNT(col)
         // folding would otherwise also consume a user's explicit SUM(col) and COUNT(col) columns.
+        Map<String, String> averageInputTypes = new LinkedHashMap<>();
+        for (String alias : averages) {
+            averageInputTypes.put(alias, SparkAverage.inputTypeName(merged, alias));
+        }
         ResultFrame reconstructed = averages.isEmpty()
                 ? reconstructAverages(merged, canonicalObject)
                 : SparkAverage.finish(merged, averages);
-        ResultFrame composites = reconstructCompositeAliases(reconstructed, canonicalObject);
+        ResultFrame expressions = finishExpressions(reconstructed, canonicalObject, averageInputTypes);
+        ResultFrame composites = reconstructCompositeAliases(expressions, canonicalObject);
         return applyPostProcessing(composites, canonicalObject);
+    }
+
+    // --- expressions over aggregates (e.g. SUM(a) / COUNT(b) AS ratio) ----------------------------
+
+    /**
+     * Each expression's aggregate terms were merged like any other measure. The expression itself is
+     * then evaluated once over the merged rows by the executor, so arithmetic, decimal precision,
+     * NULL handling and division by zero follow the engine's own SQL semantics. The expression takes
+     * the position of its first term column; term and term-type columns are dropped.
+     */
+    private ResultFrame finishExpressions(ResultFrame frame, CanonicalQueryObject canonicalObject,
+                                          Map<String, String> averageInputTypes) {
+        Map<String, AggregateFunction> measures = canonicalObject.metadata().measureAggregates();
+        List<String> expressions = new ArrayList<>();
+        for (Map.Entry<String, AggregateFunction> measure : measures.entrySet()) {
+            if (measure.getValue() == AggregateFunction.COMPOSITE) {
+                expressions.add(measure.getKey());
+            }
+        }
+        if (expressions.isEmpty()) {
+            return frame;
+        }
+        if (expressionEvaluator == null) {
+            throw new IllegalStateException("no executor is configured to evaluate expressions over aggregates");
+        }
+
+        Map<String, String> expressionOfTerm = new LinkedHashMap<>();
+        Map<String, String> declaredTypes = new LinkedHashMap<>();
+        Set<String> typeColumns = new HashSet<>();
+        for (Map.Entry<String, AggregateFunction> measure : measures.entrySet()) {
+            String term = measure.getKey();
+            String expression = expressionOwning(term, expressions);
+            if (expression == null) {
+                continue;
+            }
+            expressionOfTerm.put(term, expression);
+            String type;
+            if (measure.getValue() == AggregateFunction.AVERAGE) {
+                type = SparkAverage.resultTypeName(averageInputTypes.get(term));
+            } else if (measure.getValue() == AggregateFunction.DISTINCT_SKETCH) {
+                type = "bigint";
+            } else {
+                String typeColumn = CompositeIngredients.typeColumn(term);
+                typeColumns.add(typeColumn);
+                type = firstText(frame, typeColumn);
+            }
+            if (type != null) {
+                declaredTypes.put(term, type);
+            }
+        }
+
+        List<String> projections = new ArrayList<>();
+        Set<String> projectedExpressions = new HashSet<>();
+        for (String column : frame.columnNames()) {
+            String expression = expressionOfTerm.get(column);
+            if (expression != null) {
+                if (projectedExpressions.add(expression)) {
+                    String formula = canonicalObject.metadata().compositeAliases().get(expression);
+                    projections.add(formula + " AS " + quoted(expression));
+                }
+            } else if (!typeColumns.contains(column)) {
+                projections.add(quoted(column));
+            }
+        }
+        return expressionEvaluator.project(frame, declaredTypes, projections);
+    }
+
+    /** The expression a term column belongs to: its name is the expression's term prefix plus a number. */
+    private static String expressionOwning(String term, List<String> expressions) {
+        for (String expression : expressions) {
+            String prefix = CompositeIngredients.termPrefix(expression);
+            String suffix = term.startsWith(prefix) ? term.substring(prefix.length()) : "";
+            if (!suffix.isEmpty() && suffix.chars().allMatch(Character::isDigit)) {
+                return expression;
+            }
+        }
+        return null;
+    }
+
+    private static String firstText(ResultFrame frame, String column) {
+        if (!frame.columnNames().contains(column)) {
+            return null;
+        }
+        int index = frame.columnIndex(column);
+        for (int row = 0; row < frame.rowCount(); row++) {
+            if (!frame.isNullAt(row, index)) {
+                return frame.stringAt(row, index);
+            }
+        }
+        return null;
+    }
+
+    private static String quoted(String column) {
+        return "`" + column.replace("`", "``") + "`";
     }
 
     // --- composite aliases (e.g. SUM(a) + SUM(b) AS total_bytes) ---------------------------------
@@ -245,6 +355,15 @@ public final class FrameMergeService {
             functions.put(normalizedName(AverageIngredients.sumColumn(alias)), AggregateFunction.SUM);
             functions.put(normalizedName(AverageIngredients.countColumn(alias)), AggregateFunction.COUNT);
             functions.put(normalizedName(AverageIngredients.typeColumn(alias)), AggregateFunction.MINIMUM);
+        }
+        for (Map.Entry<String, AggregateFunction> measure : canonicalObject.metadata().measureAggregates().entrySet()) {
+            boolean plainTerm = measure.getKey().contains(CompositeIngredients.termPrefix(""))
+                    && measure.getValue() != AggregateFunction.AVERAGE
+                    && measure.getValue() != AggregateFunction.DISTINCT_SKETCH;
+            if (plainTerm) {
+                String typeColumn = CompositeIngredients.typeColumn(measure.getKey());
+                functions.put(normalizedName(typeColumn), AggregateFunction.MINIMUM);
+            }
         }
         return functions;
     }

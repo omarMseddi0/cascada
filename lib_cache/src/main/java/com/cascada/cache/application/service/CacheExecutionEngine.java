@@ -115,7 +115,7 @@ public final class CacheExecutionEngine {
         this.executor = Objects.requireNonNull(executor, "executor");
         this.timeBucketCalculator = new TimeBucketCalculator(configuration.bucketSeconds());
         this.frameMergeService = new FrameMergeService(configuration.fixedStepSeconds(),
-                configuration.timeColumnName(), distinctSketches);
+                configuration.timeColumnName(), distinctSketches, sparkExecutor);
     }
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
@@ -423,11 +423,12 @@ public final class CacheExecutionEngine {
         return canonicalObject.hashComponents().groupBy().isEmpty();
     }
 
-    /** AVG and APPROX_COUNT_DISTINCT are fetched as ingredients and finished by the merge. */
+    /** AVG, APPROX_COUNT_DISTINCT and expressions over aggregates are fetched as ingredients. */
     private static boolean hasDerivedMeasures(CanonicalQueryObject canonicalObject) {
         var functions = canonicalObject.metadata().measureAggregates().values();
         return functions.contains(AggregateFunction.DISTINCT_SKETCH)
-                || functions.contains(AggregateFunction.AVERAGE);
+                || functions.contains(AggregateFunction.AVERAGE)
+                || functions.contains(AggregateFunction.COMPOSITE);
     }
 
     /**

@@ -42,9 +42,8 @@ class SqlCorrectnessRegressionTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-            "SELECT AVG(x) FROM t WHERE ts>=0 AND ts<=172799",
-            "SELECT SUM(x)/COUNT(x) AS mean FROM t WHERE ts>=0 AND ts<=172799",
-            "SELECT MAX(x)-MIN(x) AS spread FROM t WHERE ts>=0 AND ts<=172799",
+            "SELECT SUM(x)/COUNT(x) + x AS mean FROM t WHERE ts>=0 AND ts<=172799",
+            "SELECT AVG(DISTINCT x) AS mean FROM t WHERE ts>=0 AND ts<=172799",
             "SELECT country AS c,SUM(x) FROM t WHERE ts>=0 AND ts<=172799 GROUP BY country",
             "SELECT country,SUM(x) AS n FROM t WHERE ts>=0 AND ts<=172799 GROUP BY country ORDER BY n+1 LIMIT 1",
             "SELECT country,SUM(x) AS n FROM t WHERE ts>=0 AND ts<=172799 GROUP BY country ORDER BY n LIMIT 1 OFFSET 1"
@@ -54,8 +53,16 @@ class SqlCorrectnessRegressionTest {
         assertThat(SafetyRuleRegistry.defaultRegistry().evaluate(canonical, CacheConfiguration.defaults()).isBypass()).isTrue();
     }
 
-    @Test void aliasedAverageIsCachedThroughSumAndCountIngredients() {
-        var canonical = factory.canonicalize("SELECT AVG(x) AS mean FROM t WHERE ts>=0 AND ts<=172799");
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT AVG(x) AS mean FROM t WHERE ts>=0 AND ts<=172799",
+            "SELECT AVG(x) FROM t WHERE ts>=0 AND ts<=172799",
+            "SELECT SUM(x)/COUNT(x) AS mean FROM t WHERE ts>=0 AND ts<=172799",
+            "SELECT MAX(x)-MIN(x) AS spread FROM t WHERE ts>=0 AND ts<=172799",
+            "SELECT ROUND(100.0 * SUM(x) / SUM(y), 2) AS share FROM t WHERE ts>=0 AND ts<=172799"
+    })
+    void averagesAndExpressionsOverAggregatesAreCached(String sql) {
+        var canonical = factory.canonicalize(sql);
         assertThat(SafetyRuleRegistry.defaultRegistry().evaluate(canonical, CacheConfiguration.defaults()).isBypass()).isFalse();
     }
 

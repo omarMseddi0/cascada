@@ -123,6 +123,22 @@ public final class SparkAverage {
         return average.precision() - average.scale() > resultPrecision - resultScale ? null : average;
     }
 
+    /** Spark's AVG result type for an input type: {@code decimal(p+4,s+4)} or {@code double}. */
+    public static String resultTypeName(String inputType) {
+        Matcher decimal = DECIMAL_TYPE.matcher(inputType.toLowerCase(Locale.ROOT));
+        if (!decimal.matches()) {
+            resultType(inputType.toLowerCase(Locale.ROOT));
+            return "double";
+        }
+        return "decimal(" + Math.min(Integer.parseInt(decimal.group(1)) + 4, MAX_PRECISION) + ","
+                + Math.min(Integer.parseInt(decimal.group(2)) + 4, MAX_PRECISION) + ")";
+    }
+
+    /** Spark's typeof(x) recorded in the AVG type ingredient, or "double" when no row carries it. */
+    public static String inputTypeName(ResultFrame merged, String alias) {
+        return inputType(merged, merged.columnIndex(AverageIngredients.typeColumn(alias)));
+    }
+
     private static String inputType(ResultFrame merged, int typeColumn) {
         for (int row = 0; row < merged.rowCount(); row++) {
             if (!merged.isNullAt(row, typeColumn)) return merged.stringAt(row, typeColumn).toLowerCase(Locale.ROOT);

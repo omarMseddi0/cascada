@@ -139,7 +139,7 @@ class BucketLabelledExecutionTest {
                         List.of("APPROX_COUNT_DISTINCT(user_id) AS users"),
                         Map.of("users", AggregateFunction.DISTINCT_SKETCH)),
                 "SQL", List.of("events"), List.of());
-        FrameMergeService merging = new FrameMergeService(300, "ts", new DataSketchesDistinctSketchAdapter());
+        FrameMergeService merging = new FrameMergeService(300, "ts", new DataSketchesDistinctSketchAdapter(), null);
 
         IncrementalFrameMerge merge = merging.incremental(distinctUsers);
         merge.add(sketchFrame("a", 0, 6_000));      // day one: users 0..5999

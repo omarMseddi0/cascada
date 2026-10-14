@@ -1,6 +1,7 @@
 package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.cache.domain.merge.AverageIngredients;
+import com.cascada.cache.domain.merge.CompositeIngredients;
 import com.cascada.cache.domain.merge.DistinctSketchPrecision;
 import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.time.TimeRange;
@@ -123,6 +124,19 @@ public final class GapQueryBuilder {
         return Optional.of(CalciteSql.unparse(select));
     }
 
+    /**
+     * True for {@code APPROX_COUNT_DISTINCT(...)}. Gap queries compute it as a mergeable HLL sketch;
+     * the cache unions the per-bucket sketches and reports the estimate.
+     */
+    static boolean isDistinctSketchCall(SqlBasicCall call) {
+        return call.getOperator().getName().equalsIgnoreCase(APPROX_COUNT_DISTINCT);
+    }
+
+    /** True for {@code AVG(...)}. Gap queries fetch its SUM and COUNT ingredients instead. */
+    static boolean isAverageCall(SqlBasicCall call) {
+        return call.getOperator().getName().equalsIgnoreCase(AVERAGE);
+    }
+
     private SqlNode rewriteGap(String originalSql, List<TimeRange> gapRanges) {
         SqlNode parsed = CalciteSql.parseQuery(originalSql);
         // Drop ORDER BY / LIMIT from the gap fetch (Python removes exp.Order / exp.Limit).
@@ -146,6 +160,79 @@ public final class GapQueryBuilder {
         return root;
     }
 
+    /**
+     * Rewrites select items the cache rebuilds from ingredients. Unaliased items keep Spark's own
+     * column name (see {@link SparkColumnNames}).
+     * <ul>
+     *   <li>{@code AVG(x)} becomes {@code SUM(x)}, {@code COUNT(x)} and {@code MIN(TYPEOF(x))} under
+     *       {@link AverageIngredients} names; the cache merges them and divides at read time.</li>
+     *   <li>{@code APPROX_COUNT_DISTINCT(x)} becomes a Base64 DataSketches HLL sketch. The value is
+     *       prefixed because DataSketches ignores empty strings while SQL counts '' as a distinct
+     *       value; NULL stays NULL and is ignored, as in SQL.</li>
+     *   <li>An expression over aggregates, such as {@code SUM(a) / COUNT(b)}, stores each aggregate as
+     *       a numbered {@link CompositeIngredients} term with its {@code TYPEOF}; the cache evaluates
+     *       the expression after merging the terms.</li>
+     * </ul>
+     */
+    private void replaceDerivedMeasures(SqlSelect select) {
+        SqlNodeList rewritten = new SqlNodeList(SqlParserPos.ZERO);
+        for (SqlNode item : select.getSelectList()) {
+            SqlNode expression = item;
+            String alias = null;
+            if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall as) {
+                expression = as.operand(0);
+                alias = CalciteSql.unparse(as.operand(1)).replace("`", "");
+            }
+            List<SqlBasicCall> terms = AggregateTerms.of(expression);
+            boolean singleAggregate = terms.size() == 1 && terms.get(0) == expression;
+            boolean rebuilt = !terms.isEmpty() && (!singleAggregate
+                    || isAverageCall(terms.get(0)) || isDistinctSketchCall(terms.get(0)));
+            Optional<String> name = alias != null ? Optional.of(alias) : SparkColumnNames.autoName(expression);
+            if (!rebuilt || name.isEmpty()) {
+                rewritten.add(item);
+                continue;
+            }
+            if (singleAggregate) {
+                addIngredients(rewritten, terms.get(0), name.get(), false);
+                continue;
+            }
+            for (int index = 0; index < terms.size(); index++) {
+                addIngredients(rewritten, terms.get(index), CompositeIngredients.termColumn(name.get(), index), true);
+            }
+        }
+        select.setSelectList(rewritten);
+    }
+
+    private static void addIngredients(SqlNodeList rewritten, SqlBasicCall aggregate, String column, boolean typed) {
+        if (isAverageCall(aggregate) || isDistinctSketchCall(aggregate)) {
+            if (aggregate.operandCount() != 1 || aggregate.getFunctionQuantifier() != null) {
+                throw new com.cascada.sql.exception.UnsupportedSqlException(
+                        aggregate.getOperator().getName() + " takes exactly one plain argument in cached queries");
+            }
+        }
+        if (isAverageCall(aggregate)) {
+            String argument = CalciteSql.unparse(aggregate.operand(0));
+            rewritten.add(aliased("SUM(" + argument + ")", AverageIngredients.sumColumn(column)));
+            rewritten.add(aliased("COUNT(" + argument + ")", AverageIngredients.countColumn(column)));
+            rewritten.add(aliased("MIN(TYPEOF(" + argument + "))", AverageIngredients.typeColumn(column)));
+        } else if (isDistinctSketchCall(aggregate)) {
+            String argument = CalciteSql.unparse(aggregate.operand(0));
+            rewritten.add(aliased("BASE64(HLL_SKETCH_AGG(CONCAT('v', CAST(" + argument + " AS STRING)), "
+                    + DistinctSketchPrecision.LOG_CONFIG_K + "))", column));
+        } else {
+            String call = CalciteSql.unparse(aggregate);
+            rewritten.add(aliased(call, column));
+            if (typed) {
+                rewritten.add(aliased("TYPEOF(" + call + ")", CompositeIngredients.typeColumn(column)));
+            }
+        }
+    }
+
+    private static SqlNode aliased(String expression, String name) {
+        return SqlStdOperatorTable.AS.createCall(SqlParserPos.ZERO, CalciteSql.parseExpression(expression),
+                new SqlIdentifier(name, SqlParserPos.ZERO));
+    }
+
     private Set<String> outputNames(SqlSelect select) {
         Set<String> names = new HashSet<>();
         for (SqlNode item : select.getSelectList()) {
@@ -160,65 +247,6 @@ public final class GapQueryBuilder {
 
     private String quotedTimeColumn() {
         return timeColumn.matches("[A-Za-z_][A-Za-z0-9_]*") ? timeColumn : "`" + timeColumn.replace("`", "``") + "`";
-    }
-
-    /**
-     * True for {@code APPROX_COUNT_DISTINCT(...)}. Gap queries compute it as a mergeable HLL sketch;
-     * the cache unions the per-bucket sketches and reports the estimate.
-     */
-    static boolean isDistinctSketchCall(SqlBasicCall call) {
-        return call.getOperator().getName().equalsIgnoreCase(APPROX_COUNT_DISTINCT);
-    }
-
-    /** True for {@code AVG(...)}. Gap queries fetch its SUM and COUNT ingredients instead. */
-    static boolean isAverageCall(SqlBasicCall call) {
-        return call.getOperator().getName().equalsIgnoreCase(AVERAGE);
-    }
-
-    /**
-     * Rewrites measures the cache rebuilds from ingredients:
-     * <ul>
-     *   <li>{@code AVG(x) AS a} becomes {@code SUM(x)}, {@code COUNT(x)} and {@code MIN(TYPEOF(x))}
-     *       under {@link AverageIngredients} names; the cache merges them and divides at read time,
-     *       because an average of per-bucket averages is not the average.</li>
-     *   <li>{@code APPROX_COUNT_DISTINCT(x) AS a} becomes a Base64 DataSketches HLL sketch under the
-     *       same alias. The value is prefixed because DataSketches ignores empty strings while SQL
-     *       counts '' as a distinct value; NULL stays NULL and is ignored, as in SQL.</li>
-     * </ul>
-     */
-    private void replaceDerivedMeasures(SqlSelect select) {
-        SqlNodeList rewritten = new SqlNodeList(SqlParserPos.ZERO);
-        for (SqlNode item : select.getSelectList()) {
-            boolean derived = item.getKind() == SqlKind.AS && item instanceof SqlBasicCall alias
-                    && alias.operand(0) instanceof SqlBasicCall call
-                    && (isAverageCall(call) || isDistinctSketchCall(call));
-            if (!derived) {
-                rewritten.add(item);
-                continue;
-            }
-            SqlBasicCall alias = (SqlBasicCall) item;
-            SqlBasicCall measure = (SqlBasicCall) alias.operand(0);
-            if (measure.operandCount() != 1 || measure.getFunctionQuantifier() != null) {
-                throw new com.cascada.sql.exception.UnsupportedSqlException(
-                        measure.getOperator().getName() + " takes exactly one plain argument in cached queries");
-            }
-            String argument = CalciteSql.unparse(measure.operand(0));
-            String name = CalciteSql.unparse(alias.operand(1)).replace("`", "");
-            if (isAverageCall(measure)) {
-                rewritten.add(aliased("SUM(" + argument + ")", AverageIngredients.sumColumn(name)));
-                rewritten.add(aliased("COUNT(" + argument + ")", AverageIngredients.countColumn(name)));
-                rewritten.add(aliased("MIN(TYPEOF(" + argument + "))", AverageIngredients.typeColumn(name)));
-            } else {
-                rewritten.add(aliased("BASE64(HLL_SKETCH_AGG(CONCAT('v', CAST(" + argument + " AS STRING)), "
-                        + DistinctSketchPrecision.LOG_CONFIG_K + "))", name));
-            }
-        }
-        select.setSelectList(rewritten);
-    }
-
-    private static SqlNode aliased(String expression, String name) {
-        return SqlStdOperatorTable.AS.createCall(SqlParserPos.ZERO, CalciteSql.parseExpression(expression),
-                new SqlIdentifier(name, SqlParserPos.ZERO));
     }
 
     /** Ported from {@code strip_time_conditions}: drop time predicates so a new range can be injected. */

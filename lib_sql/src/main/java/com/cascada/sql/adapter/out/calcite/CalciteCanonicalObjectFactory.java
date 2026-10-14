@@ -3,6 +3,7 @@ package com.cascada.sql.adapter.out.calcite;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.merge.CompositeIngredients;
 import com.cascada.cache.domain.merge.DistinctSketchPrecision;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.OrderByClause;
@@ -139,12 +140,11 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                 expression = as.operand(0);
                 alias = ((SqlIdentifier) as.operand(1)).getSimple();
             }
-            if (expression instanceof SqlBasicCall call && isAggregateName(call)) {
-                if (combineFunctionFor(call.getOperator().getName()) == null || call.getFunctionQuantifier() != null) return false;
-                // Sketch and AVG columns are rebuilt from renamed ingredients; only an explicit alias
-                // keeps the cached and direct result schemas identical.
-                if ((GapQueryBuilder.isDistinctSketchCall(call) || GapQueryBuilder.isAverageCall(call))
-                        && (alias == null || call.operandCount() != 1)) return false;
+            List<SqlBasicCall> terms = AggregateTerms.of(expression);
+            if (!terms.isEmpty()) {
+                if (!isMergeableMeasure(expression, alias, terms)) {
+                    return false;
+                }
                 continue;
             }
             String rendered = CalciteSql.unparse(expression);
@@ -158,6 +158,64 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             } else return false;
         }
         return projectedGroups.containsAll(grouped);
+    }
+
+    /**
+     * A select item containing aggregates is cacheable when every aggregate merges across buckets
+     * (SUM, COUNT, MIN, MAX, AVG as SUM and COUNT, APPROX_COUNT_DISTINCT as a sketch). An expression
+     * over aggregates may not read a column outside them or use a window, because it is evaluated
+     * only after the buckets are merged. Rebuilt columns need a name: the alias, or Spark's own.
+     */
+    private boolean isMergeableMeasure(SqlNode expression, String alias, List<SqlBasicCall> terms) {
+        for (SqlBasicCall term : terms) {
+            if (combineFunctionFor(term.getOperator().getName()) == null || term.getFunctionQuantifier() != null) {
+                return false;
+            }
+            boolean rebuiltFromIngredients = GapQueryBuilder.isDistinctSketchCall(term) || GapQueryBuilder.isAverageCall(term);
+            if (rebuiltFromIngredients && term.operandCount() != 1) {
+                return false;
+            }
+        }
+        boolean singleAggregate = isSingleAggregateCall(expression);
+        if (!singleAggregate && readsOutsideAggregates(expression)) {
+            return false;
+        }
+        boolean renamed = !singleAggregate
+                || GapQueryBuilder.isDistinctSketchCall((SqlBasicCall) expression)
+                || GapQueryBuilder.isAverageCall((SqlBasicCall) expression);
+        return !renamed || outputName(expression, alias).isPresent();
+    }
+
+    /** True when the expression reads a column or uses a window outside its aggregate calls. */
+    private boolean readsOutsideAggregates(SqlNode node) {
+        if (node instanceof SqlIdentifier) {
+            return true;
+        }
+        if (node instanceof SqlBasicCall call && isAggregateName(call)) {
+            return false;
+        }
+        if (node instanceof SqlCall call) {
+            if (call.getKind() == SqlKind.OVER) {
+                return true;
+            }
+            for (SqlNode operand : call.getOperandList()) {
+                if (operand != null && readsOutsideAggregates(operand)) {
+                    return true;
+                }
+            }
+        }
+        if (node instanceof SqlNodeList list) {
+            for (SqlNode child : list) {
+                if (readsOutsideAggregates(child)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static Optional<String> outputName(SqlNode expression, String alias) {
+        return alias != null ? Optional.of(alias) : SparkColumnNames.autoName(expression);
     }
 
     // --- parsing ---------------------------------------------------------------------------------
@@ -209,9 +267,11 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
 
             rawAggregateCalls.addAll(aggregatesInItem);
 
-            boolean isComposite = aggregatesInItem.size() > 1 || !isSingleAggregateCall(expression);
-            if (isComposite && aliasName != null) {
-                compositeAliasesOut.put(aliasName, CalciteSql.unparse(expression));
+            boolean isComposite = !isSingleAggregateCall(expression);
+            Optional<String> outputName = outputName(expression, aliasName);
+            if (isComposite && outputName.isPresent()) {
+                recordExpressionTerms(expression, outputName.get(), aggregatesInItem,
+                        compositeAliasesOut, measureAggregatesOut);
             }
 
             // README caveat 4: record the PARSED aggregate function per output column while the AST
@@ -220,7 +280,10 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             // SUMmed across buckets.
             if (!isComposite && expression instanceof SqlBasicCall single) {
                 AggregateFunction function = combineFunctionFor(single.getOperator().getName());
-                if (function != null) {
+                boolean renamed = function == AggregateFunction.AVERAGE || function == AggregateFunction.DISTINCT_SKETCH;
+                if (function != null && renamed && outputName.isPresent()) {
+                    measureAggregatesOut.put(outputName.get(), function);
+                } else if (function != null && !renamed) {
                     String outputColumn = aliasName != null ? aliasName : CalciteSql.unparse(expression);
                     measureAggregatesOut.put(outputColumn, function);
                 }
@@ -232,6 +295,26 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             aggregateSpecsOut.add(spec);
         }
         return rawAggregateCalls;
+    }
+
+    /**
+     * An expression over aggregates stores each aggregate as a numbered term column. The formula
+     * recorded for the merge is the expression with those terms replaced by their column names.
+     */
+    private void recordExpressionTerms(SqlNode expression, String outputName, List<SqlBasicCall> terms,
+                                       Map<String, String> formulasOut,
+                                       Map<String, AggregateFunction> measureAggregatesOut) {
+        List<String> termColumns = new ArrayList<>();
+        for (int index = 0; index < terms.size(); index++) {
+            String termColumn = CompositeIngredients.termColumn(outputName, index);
+            termColumns.add(termColumn);
+            AggregateFunction function = combineFunctionFor(terms.get(index).getOperator().getName());
+            if (function != null) {
+                measureAggregatesOut.put(termColumn, function);
+            }
+        }
+        measureAggregatesOut.put(outputName, AggregateFunction.COMPOSITE);
+        formulasOut.put(outputName, CalciteSql.unparse(AggregateTerms.replaceWithColumns(expression, termColumns)));
     }
 
     private boolean isSingleAggregateCall(SqlNode expression) {

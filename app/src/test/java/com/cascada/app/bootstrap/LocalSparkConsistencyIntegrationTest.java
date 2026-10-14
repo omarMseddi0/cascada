@@ -85,15 +85,7 @@ class LocalSparkConsistencyIntegrationTest {
             spark.sparkContext().hadoopConfiguration().setBoolean("fs.file.impl.disable.cache", true);
         }
         if (physicalAdapter == null) physicalAdapter = new SparkDeltaQueryExecutor(spark);
-        direct = new QueryExecutorPort() {
-            @Override public ResultFrame execute(String sql) {
-                physicalQueries.incrementAndGet();
-                return physicalAdapter.execute(sql);
-            }
-            @Override public ResultFrame project(ResultFrame input, Map<String, String> types, List<String> projections) {
-                return physicalAdapter.project(input, types, projections);
-            }
-        };
+        direct = sql -> { physicalQueries.incrementAndGet(); return physicalAdapter.execute(sql); };
         long rows = Long.getLong("cascada.consistency.rows", 1_000_000L);
         if (rows < 10000) throw new IllegalArgumentException("Use at least 10000 rows for the distribution checks");
         // Different populations per day, repeated users across days, nullable groups/measurements,
@@ -138,15 +130,7 @@ class LocalSparkConsistencyIntegrationTest {
         final List<String> executed = Collections.synchronizedList(new ArrayList<>());
         final InMemoryBlobCacheBackendAdapter cache = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
         final InMemoryCoverageIndexAdapter coverage = new InMemoryCoverageIndexAdapter();
-        final QueryExecutorPort tracked = new QueryExecutorPort() {
-            @Override public ResultFrame execute(String sql) {
-                executed.add(sql);
-                return direct.execute(sql);
-            }
-            @Override public ResultFrame project(ResultFrame input, Map<String, String> types, List<String> projections) {
-                return direct.project(input, types, projections);
-            }
-        };
+        final QueryExecutorPort tracked = sql -> { executed.add(sql); return direct.execute(sql); };
         final CacheExecutionEngine engine;
         final ExecuteLogicalQueryService service;
         Harness(boolean cube) {
@@ -328,9 +312,9 @@ class LocalSparkConsistencyIntegrationTest {
                 checkPaths(new Scenario("uncorrelated-IN-subquery", sql, true));
                 return;
             }
-            if (i == 2 || i == 3 || i == 4) {
-                // AVG and expressions over aggregates are cached as merged ingredients and finished after the merge.
-                // These queries order by their last column only, so tied rows have no defined order:
+            if (i == 2) {
+                // AVG is cached as SUM and COUNT ingredients and divided after the merge.
+                // The query orders by its last column only, so tied rows have no defined order:
                 // compare the rows as a set and check that the ordered column descends.
                 Harness h = new Harness(true);
                 var result = h.service.query(sql);

@@ -63,8 +63,7 @@ class HugeComplexSqlCanonicalTest {
         CanonicalQueryObject canonical = factory.extractCanonicalObjectFromSql(HUGE_TIME_SERIES);
         assertThat(canonical.metadata().compositeAliases()).containsKey("totalBytes");
         assertThat(canonical.metadata().compositeAliases().get("totalBytes"))
-                .contains("totalBytes__cascada_term0").contains("totalBytes__cascada_term1");
-        assertThat(canonical.hashComponents().aggregates()).contains("SUM(bytesIn)", "SUM(bytesOut)");
+                .contains("SUM(bytesIn)").contains("SUM(bytesOut)");
     }
 
     @Test

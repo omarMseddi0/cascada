@@ -30,12 +30,9 @@ class SketchAndBucketedGapQueryTest {
     }
 
     @Test
-    void unaliasedSketchUsesSparksNameAndExactDistinctStaysUnmergeable() {
-        CanonicalQueryObject unaliased = canonicalizer.canonicalize("SELECT APPROX_COUNT_DISTINCT(user_id) FROM events "
-                + "WHERE ts >= 0 AND ts <= 172799");
-        assertThat(unaliased.logicSignature()).isEmpty();
-        assertThat(unaliased.metadata().measureAggregates())
-                .containsEntry("approx_count_distinct(user_id)", AggregateFunction.DISTINCT_SKETCH);
+    void unaliasedOrExactDistinctCountsStayUnmergeable() {
+        assertThat(canonicalizer.canonicalize("SELECT APPROX_COUNT_DISTINCT(user_id) FROM events "
+                + "WHERE ts >= 0 AND ts <= 172799").logicSignature()).contains("UNSUPPORTED_MERGE_SHAPE");
         assertThat(canonicalizer.canonicalize("SELECT COUNT(DISTINCT user_id) AS users FROM events "
                 + "WHERE ts >= 0 AND ts <= 172799").logicSignature()).contains("UNSUPPORTED_MERGE_SHAPE");
     }
@@ -92,61 +89,6 @@ class SketchAndBucketedGapQueryTest {
                         + "WHERE ts >= 0 AND ts <= 86399",
                 new GapPlan(Optional.empty(), List.of(0L), Optional.empty())))
                 .isInstanceOf(UnsupportedSqlException.class);
-    }
-
-    @Test
-    void aliasedAverageIsCachedAsSumAndCountIngredients() {
-        CanonicalQueryObject canonical = canonicalizer.canonicalize(
-                "SELECT region, AVG(latency) AS mean FROM events WHERE ts >= 0 AND ts <= 172799 GROUP BY region");
-
-        assertThat(canonical.logicSignature()).isEmpty();
-        assertThat(canonical.metadata().measureAggregates()).containsEntry("mean", AggregateFunction.AVERAGE);
-        assertThat(canonical.hashComponents().aggregates()).contains("SUM(latency)", "COUNT(latency)");
-        CanonicalQueryObject unaliased = canonicalizer.canonicalize(
-                "SELECT AVG(latency) FROM events WHERE ts >= 0 AND ts <= 172799");
-        assertThat(unaliased.logicSignature()).isEmpty();
-        assertThat(unaliased.metadata().measureAggregates())
-                .as("an unaliased AVG keeps Spark's own column name").containsEntry("avg(latency)", AggregateFunction.AVERAGE);
-    }
-
-    @Test
-    void expressionOverAggregatesIsStoredAsNumberedTerms() {
-        CanonicalQueryObject canonical = canonicalizer.canonicalize("SELECT region, SUM(amount) / COUNT(*) AS ratio, "
-                + "MAX(amount) - MIN(amount) FROM events WHERE ts >= 0 AND ts <= 172799 GROUP BY region");
-
-        assertThat(canonical.logicSignature()).isEmpty();
-        assertThat(canonical.metadata().measureAggregates())
-                .containsEntry("ratio", AggregateFunction.COMPOSITE)
-                .containsEntry("ratio__cascada_term0", AggregateFunction.SUM)
-                .containsEntry("ratio__cascada_term1", AggregateFunction.COUNT)
-                .containsEntry("(max(amount) - min(amount))", AggregateFunction.COMPOSITE);
-        assertThat(canonical.metadata().compositeAliases().get("ratio"))
-                .isEqualTo("ratio__cascada_term0 / ratio__cascada_term1");
-
-        String gap = builder.buildGapQuery(canonical.physicalSql(), new GapPlan(Optional.empty(), List.of(0L), Optional.empty()));
-        assertThat(gap).contains("SUM(amount) ratio__cascada_term0")
-                .contains("TYPEOF(SUM(amount)) ratio__cascada_term0__cascada_type")
-                .contains("COUNT(*) ratio__cascada_term1")
-                .contains("MAX(amount) `(max(amount) - min(amount))__cascada_term0`");
-    }
-
-    @Test
-    void expressionReadingAColumnOutsideItsAggregatesIsNotCached() {
-        assertThat(canonicalizer.canonicalize("SELECT region, SUM(amount) / MAX(price) + price AS odd FROM events "
-                + "WHERE ts >= 0 AND ts <= 172799 GROUP BY region").logicSignature()).contains("UNSUPPORTED_MERGE_SHAPE");
-    }
-
-    @Test
-    void gapQueryFetchesAverageIngredientsInsteadOfPerBucketAverages() {
-        String gap = builder.buildGapQuery("SELECT region, AVG(latency) AS mean, SUM(amount) AS total FROM events "
-                        + "WHERE ts >= 0 AND ts <= 172799 GROUP BY region ORDER BY mean DESC",
-                new GapPlan(Optional.empty(), List.of(DAY), Optional.empty()));
-
-        assertThat(gap).contains("SUM(latency) mean__cascada_avg_sum")
-                .contains("COUNT(latency) mean__cascada_avg_count")
-                .containsIgnoringCase("MIN(TYPEOF(latency)) mean__cascada_avg_type")
-                .contains("SUM(amount) total")
-                .doesNotContainIgnoringCase("AVG(");
     }
 
     @Test

@@ -5,7 +5,6 @@ import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.spark.domain.SparkSessionConfig;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.logging.Level;
@@ -100,11 +99,6 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
         // serialized result is larger than spark.driver.maxResultSize.
         return resultFrameMapper.map(dataset.schema(),
                 resultCollector.collect(dataset).orElseGet(dataset::toLocalIterator));
-    }
-
-    @Override
-    public ResultFrame project(ResultFrame input, Map<String, String> declaredTypes, List<String> projections) {
-        return new MergedFrameProjection(sparkSession, resultFrameMapper).project(input, declaredTypes, projections);
     }
 
     @Override

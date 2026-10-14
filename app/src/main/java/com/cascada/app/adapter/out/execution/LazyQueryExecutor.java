@@ -2,8 +2,6 @@ package com.cascada.app.adapter.out.execution;
 
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.frame.ResultFrame;
-import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
@@ -25,16 +23,6 @@ public final class LazyQueryExecutor implements QueryExecutorPort, AutoCloseable
         lifecycle.readLock().lock();
         try {
             return initializedExecutor().execute(physicalSql);
-        } finally {
-            lifecycle.readLock().unlock();
-        }
-    }
-
-    @Override
-    public ResultFrame project(ResultFrame input, Map<String, String> declaredTypes, List<String> projections) {
-        lifecycle.readLock().lock();
-        try {
-            return initializedExecutor().project(input, declaredTypes, projections);
         } finally {
             lifecycle.readLock().unlock();
         }

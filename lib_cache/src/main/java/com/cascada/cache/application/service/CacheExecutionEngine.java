@@ -6,7 +6,7 @@ import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.domain.cube.CubeShapeCatalog;
+import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.time.TimeBucketCalculator;
 import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -174,7 +174,7 @@ public final class CacheExecutionEngine {
 
         GapPlan gapPlan = new GapPlan(buckets.head(), missingDays, buckets.tail());
 
-        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
+        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
         List<Long> vanishedDays = new ArrayList<>();
         CompletableFuture<Void> cacheFuture = CompletableFuture.runAsync(QueryExecutionScope.propagate(() -> {
                 int[] delivered = {0};
@@ -263,7 +263,7 @@ public final class CacheExecutionEngine {
      */
     private ResultFrame computeAndStoreColdBuckets(CanonicalQueryObject canonicalObject, QueryHash queryHash,
                                                     DailyBuckets buckets, List<String> keys) {
-        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
+        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
         for (int index = 0; index < buckets.body().size(); index++) {
             long bucketStart = buckets.body().get(index);
             ResultFrame frame = executeSql(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),

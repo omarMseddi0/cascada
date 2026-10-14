@@ -9,7 +9,7 @@ import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.domain.hashing.QueryHashGenerator;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.time.TimeBucketCalculator;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;

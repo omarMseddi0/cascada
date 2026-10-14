@@ -15,7 +15,7 @@ import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.QueryHashGenerator;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.domain.safety.CacheConfiguration;

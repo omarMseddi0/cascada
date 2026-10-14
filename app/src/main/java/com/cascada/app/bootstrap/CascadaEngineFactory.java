@@ -26,7 +26,7 @@ import com.cascada.cache.application.service.ExecuteCachedQueryService;
 import com.cascada.cache.application.service.ExecuteLogicalQueryService;
 import com.cascada.cache.application.service.WarmingOrchestrator;
 import com.cascada.cache.domain.cube.CubeShapeCatalog;
-import com.cascada.cache.domain.hashing.QueryHashGenerator;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.safety.CacheConfiguration;
 import com.cascada.cache.domain.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.warming.WarmingQueue;

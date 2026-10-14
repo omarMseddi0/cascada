@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.hashing;
+package com.cascada.cache.application.service.hashing;
 
 import java.util.List;
 import java.util.Map;

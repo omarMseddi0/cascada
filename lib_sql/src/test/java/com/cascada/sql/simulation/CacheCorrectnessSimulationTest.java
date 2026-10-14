@@ -13,7 +13,7 @@ import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.frame.ColumnType;
-import com.cascada.cache.domain.hashing.QueryHashGenerator;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.identity.domain.QueryHash;
 import com.cascada.sql.adapter.calcite.GapQueryRewriterAdapter;

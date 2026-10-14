@@ -11,7 +11,7 @@ import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.QueryHashGenerator;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import org.junit.jupiter.api.Test;

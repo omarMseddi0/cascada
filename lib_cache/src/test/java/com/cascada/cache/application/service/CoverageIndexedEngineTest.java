@@ -14,7 +14,7 @@ import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.QueryHashGenerator;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;

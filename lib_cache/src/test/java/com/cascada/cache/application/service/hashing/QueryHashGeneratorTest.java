@@ -1,4 +1,6 @@
-package com.cascada.cache.domain.hashing;
+package com.cascada.cache.application.service.hashing;
+
+import com.cascada.cache.domain.hashing.HashComponents;
 
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.PostProcessing;

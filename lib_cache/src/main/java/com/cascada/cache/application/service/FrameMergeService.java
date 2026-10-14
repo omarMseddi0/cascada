@@ -5,7 +5,9 @@ import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.AggregateFunctionResolver;
+import com.cascada.cache.domain.merge.AverageIngredients;
 import com.cascada.cache.domain.merge.AverageReconstructionService;
+import com.cascada.cache.domain.merge.SparkAverage;
 import com.cascada.cache.domain.merge.TypedFrameAggregator;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.OrderByClause;
@@ -86,7 +88,7 @@ public final class FrameMergeService {
             boolean monitor = LOGGER.isLoggable(Level.FINE);
             long started = monitor ? System.nanoTime() : 0L;
             ResultFrame merged = accumulator.finish();
-            ResultFrame reconstructed = reconstructAverages(merged, canonical);
+            ResultFrame reconstructed = finishAverages(merged, canonical);
             ResultFrame composites = reconstructCompositeAliases(reconstructed, canonical);
             ResultFrame answer = applyPostProcessing(composites, canonical);
             if (monitor) LOGGER.fine("Incremental cache merge: input_rows=" + inputRows
@@ -116,7 +118,7 @@ public final class FrameMergeService {
                 : mergeGlobalAggregate(nonEmpty, canonicalObject);
 
         long aggregated = monitor ? System.nanoTime() : 0L;
-        ResultFrame reconstructed = reconstructAverages(merged, canonicalObject);
+        ResultFrame reconstructed = finishAverages(merged, canonicalObject);
         ResultFrame withComposites = reconstructCompositeAliases(reconstructed, canonicalObject);
         ResultFrame result = applyPostProcessing(withComposites, canonicalObject);
         if (monitor) {
@@ -257,8 +259,36 @@ public final class FrameMergeService {
         Map<String, AggregateFunction> functions = new LinkedHashMap<>(
                 AggregateFunctionResolver.fromAggregateSpecs(canonicalObject.metadata().aggregateSpecs()));
         canonicalObject.metadata().measureAggregates().forEach((column, function) ->
-                functions.put(column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT), function));
+                functions.put(normalizedName(column), function));
+        for (String alias : averageAliases(canonicalObject)) {
+            functions.put(normalizedName(AverageIngredients.sumColumn(alias)), AggregateFunction.SUM);
+            functions.put(normalizedName(AverageIngredients.countColumn(alias)), AggregateFunction.COUNT);
+            functions.put(normalizedName(AverageIngredients.typeColumn(alias)), AggregateFunction.MINIMUM);
+        }
         return functions;
+    }
+
+    /**
+     * Cached AVG measures carry their own SUM/COUNT ingredients; the legacy SUM(col)/COUNT(col)
+     * folding would otherwise also consume a user's explicit SUM(col) and COUNT(col) columns.
+     */
+    private ResultFrame finishAverages(ResultFrame merged, CanonicalQueryObject canonicalObject) {
+        List<String> averages = averageAliases(canonicalObject);
+        return averages.isEmpty()
+                ? reconstructAverages(merged, canonicalObject)
+                : SparkAverage.finish(merged, averages);
+    }
+
+    private static List<String> averageAliases(CanonicalQueryObject canonicalObject) {
+        List<String> aliases = new ArrayList<>();
+        canonicalObject.metadata().measureAggregates().forEach((column, function) -> {
+            if (function == AggregateFunction.AVERAGE) aliases.add(column);
+        });
+        return aliases;
+    }
+
+    private static String normalizedName(String column) {
+        return column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT);
     }
 
     // --- AVG reconstruction (RC4) ----------------------------------------------------------------

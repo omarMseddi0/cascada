@@ -397,6 +397,8 @@ public final class TypedFrameAggregator {
                 case SUM, COUNT -> Math.addExact(previous, incoming);
                 case MINIMUM -> Math.min(previous, incoming);
                 case MAXIMUM -> Math.max(previous, incoming);
+                case AVERAGE -> throw new IllegalArgumentException(
+                        "AVG is merged through its stored ingredients, not by an arithmetic combine");
             };
         }
 
@@ -421,6 +423,8 @@ public final class TypedFrameAggregator {
                 case MAXIMUM -> compareSparkStrings(previous, incoming) >= 0 ? previous : incoming;
                 case SUM, COUNT -> throw new IllegalArgumentException(
                         "STRING aggregate column requires MIN or MAX, got " + measureFunctions[measure]);
+                case AVERAGE -> throw new IllegalArgumentException(
+                        "AVG is merged through its stored ingredients, not by an arithmetic combine");
             };
         }
 
@@ -440,6 +444,8 @@ public final class TypedFrameAggregator {
                         schema.columnNames().get(measureColumns[measure]));
                 case MINIMUM -> previous.min(incoming);
                 case MAXIMUM -> previous.max(incoming);
+                case AVERAGE -> throw new IllegalArgumentException(
+                        "AVG is merged through its stored ingredients, not by an arithmetic combine");
             };
         }
 

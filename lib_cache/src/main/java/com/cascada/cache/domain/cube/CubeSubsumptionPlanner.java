@@ -457,6 +457,7 @@ public final class CubeSubsumptionPlanner {
                     case SUM, COUNT -> Math.addExact(leftValue, rightValue);
                     case MINIMUM -> Math.min(leftValue, rightValue);
                     case MAXIMUM -> Math.max(leftValue, rightValue);
+                    case AVERAGE -> throw new CubeRollUpUnavailableException("derived measures are not rolled up");
                 };
             }
             case DOUBLE -> function.combine(((Number) left).doubleValue(), ((Number) right).doubleValue());
@@ -467,6 +468,7 @@ public final class CubeSubsumptionPlanner {
                     case SUM, COUNT -> leftValue.add(rightValue);
                     case MINIMUM -> leftValue.min(rightValue);
                     case MAXIMUM -> leftValue.max(rightValue);
+                    case AVERAGE -> throw new CubeRollUpUnavailableException("derived measures are not rolled up");
                 };
                 validateDecimalValue(type, combined);
                 yield combined;

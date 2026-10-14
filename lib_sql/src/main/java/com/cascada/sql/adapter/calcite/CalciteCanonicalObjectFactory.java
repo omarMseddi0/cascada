@@ -135,6 +135,9 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             }
             if (expression instanceof SqlBasicCall call && isAggregateName(call)) {
                 if (combineFunctionFor(call.getOperator().getName()) == null || call.getFunctionQuantifier() != null) return false;
+                // AVG is rebuilt from renamed SUM/COUNT ingredients; only an explicit alias keeps the
+                // cached and direct result schemas identical.
+                if (GapQueryBuilder.isAverageCall(call) && (alias == null || call.operandCount() != 1)) return false;
                 continue;
             }
             String rendered = CalciteSql.unparse(expression);
@@ -207,8 +210,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             // README caveat 4: record the PARSED aggregate function per output column while the AST
             // is still in hand. The merge path must never re-derive the combine op from the column
             // name — an alias like MAX(latency) AS peak_latency hides the max signal and would be
-            // SUMmed across buckets. AVG is deliberately absent: it is decomposed into SUM/COUNT
-            // ingredient columns whose names carry their (additive) combine op exactly.
+            // SUMmed across buckets.
             if (!isComposite && expression instanceof SqlBasicCall single) {
                 AggregateFunction function = combineFunctionFor(single.getOperator().getName());
                 if (function != null) {
@@ -255,6 +257,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             case "COUNT" -> AggregateFunction.COUNT;
             case "MIN" -> AggregateFunction.MINIMUM;
             case "MAX" -> AggregateFunction.MAXIMUM;
+            case "AVG" -> AggregateFunction.AVERAGE;
             default -> null;
         };
     }

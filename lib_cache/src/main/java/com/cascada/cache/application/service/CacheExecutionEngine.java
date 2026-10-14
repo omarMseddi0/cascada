@@ -12,6 +12,7 @@ import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.time.DailyBuckets;
 import com.cascada.cache.domain.time.GapPlan;
@@ -108,7 +109,8 @@ public final class CacheExecutionEngine {
         boolean cubeEligible = cubeCatalog != null
                 && !canonicalObject.metadata().isTimeSeries()
                 && !canonicalObject.postProcessing().hasLimit()
-                && !canonicalObject.postProcessing().hasOrderBy();
+                && !canonicalObject.postProcessing().hasOrderBy()
+                && !hasDerivedMeasures(canonicalObject);
         QueryShape queryShape = cubeEligible
                 ? CubeShapeCatalog.shapeOf(canonicalObject)
                 : null;
@@ -140,7 +142,7 @@ public final class CacheExecutionEngine {
         // Fast path 1: nothing cacheable -> run the physical SQL directly.
         if (requiredKeys.isEmpty()) {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    executeSql(canonicalObject.physicalSql()));
+                    executeDirect(canonicalObject));
         }
 
         List<Boolean> presenceMask;
@@ -166,7 +168,7 @@ public final class CacheExecutionEngine {
         if (cachedKeys.isEmpty()) {
             if (!canonicalObject.metadata().isTimeSeries()) {
                 return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                        executeSql(canonicalObject.physicalSql()));
+                        executeDirect(canonicalObject));
             }
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
                     computeAndStoreColdBuckets(canonicalObject, queryHash, buckets, requiredKeys));
@@ -291,7 +293,7 @@ public final class CacheExecutionEngine {
             propagateCancellation(mergeFailure);
             // Only the cache-derived merge is retried. Spark failures above propagate directly, while
             // an incompatible/corrupt cache ingredient falls back to one authoritative full query.
-            return executeSql(canonicalObject.physicalSql());
+            return executeDirect(canonicalObject);
         }
     }
 
@@ -326,7 +328,32 @@ public final class CacheExecutionEngine {
     private ResultFrame executeAuthoritatively(boolean cubeEligible, CanonicalQueryObject canonicalObject,
                                                QueryShape queryShape) {
         return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                executeSql(canonicalObject.physicalSql()));
+                executeDirect(canonicalObject));
+    }
+
+    /** AVG is fetched as SUM and COUNT ingredients and divided by the merge. */
+    private static boolean hasDerivedMeasures(CanonicalQueryObject canonicalObject) {
+        return canonicalObject.metadata().measureAggregates().containsValue(AggregateFunction.AVERAGE);
+    }
+
+    /**
+     * Runs the query without cached ingredients. AVG is still fetched as SUM and COUNT and divided by
+     * the merge, so the answer is computed the same way whether or not any bucket was cached.
+     */
+    private ResultFrame executeDirect(CanonicalQueryObject canonicalObject) {
+        if (!hasDerivedMeasures(canonicalObject)) {
+            return executeSql(canonicalObject.physicalSql());
+        }
+        ResultFrame ingredients = executeSql(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
+                new GapPlan(Optional.of(canonicalObject.timeRange()), List.of(), Optional.empty())));
+        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
+        merge.add(ingredients);
+        try {
+            return merge.finish();
+        } catch (RuntimeException mergeFailure) {
+            propagateCancellation(mergeFailure);
+            return executeSql(canonicalObject.physicalSql());
+        }
     }
 
     private ResultFrame executeSql(String sql) {

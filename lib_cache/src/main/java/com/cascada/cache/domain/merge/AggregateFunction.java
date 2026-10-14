@@ -7,6 +7,9 @@ package com.cascada.cache.domain.merge;
  *
  * <p>Holistic aggregates ({@code COUNT(DISTINCT)}, exact {@code MEDIAN}) are deliberately absent:
  * they cannot be combined exactly and are handled by the bypass rule or the sketch path (plan §8.13).
+ *
+ * <p>{@code AVERAGE} is stored as SUM, COUNT and input-type ingredients and rebuilt with Spark's
+ * result rules; it is never combined arithmetically.
  */
 public enum AggregateFunction {
 
@@ -42,6 +45,14 @@ public enum AggregateFunction {
             // NaN sorts after every numeric value in Spark, so it wins MAX and loses MIN.
             if (Double.isNaN(left) || Double.isNaN(right)) return Double.NaN;
             return Math.max(left, right);
+        }
+    },
+
+    AVERAGE {
+        @Override
+        public double combine(double left, double right) {
+            throw new IllegalArgumentException(
+                    this + " is merged through its stored ingredients, not by an arithmetic combine");
         }
     };
 

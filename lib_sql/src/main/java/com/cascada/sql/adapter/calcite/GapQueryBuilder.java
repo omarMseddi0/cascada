@@ -1,13 +1,16 @@
 package com.cascada.sql.adapter.calcite;
 
+import com.cascada.cache.domain.merge.AverageIngredients;
 import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.sql.domain.UnsupportedSqlException;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlJoin;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOrderBy;
 import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
@@ -42,6 +45,8 @@ import java.util.stream.Collectors;
  * an identifier only when required), which downstream Spark and the cache-correctness oracle both read.
  */
 public final class GapQueryBuilder {
+
+    private static final String AVERAGE = "AVG";
 
     private final String timeColumn;
     private final long bucketSeconds;
@@ -98,11 +103,50 @@ public final class GapQueryBuilder {
             injectGapIntoInnerWhere(root, gapCondition);
         } else if (root instanceof SqlSelect select) {
             applyFlatGap(select, gapCondition);
+            replaceAverages(select);
         } else {
             injectGapIntoInnerWhere(root, gapCondition);
         }
 
         return CalciteSql.unparse(root);
+    }
+
+    /** True for {@code AVG(...)}. Gap queries fetch its SUM and COUNT ingredients instead. */
+    static boolean isAverageCall(SqlBasicCall call) {
+        return call.getOperator().getName().equalsIgnoreCase(AVERAGE);
+    }
+
+    /**
+     * {@code AVG(x) AS a} becomes {@code SUM(x)}, {@code COUNT(x)} and {@code MIN(TYPEOF(x))} under
+     * {@link AverageIngredients} names. Buckets store these ingredients; the cache merges them and
+     * divides at read time, because an average of per-bucket averages is not the average.
+     */
+    private void replaceAverages(SqlSelect select) {
+        SqlNodeList rewritten = new SqlNodeList(SqlParserPos.ZERO);
+        for (SqlNode item : select.getSelectList()) {
+            boolean aliasedAverage = item.getKind() == SqlKind.AS && item instanceof SqlBasicCall alias
+                    && alias.operand(0) instanceof SqlBasicCall call && isAverageCall(call);
+            if (!aliasedAverage) {
+                rewritten.add(item);
+                continue;
+            }
+            SqlBasicCall alias = (SqlBasicCall) item;
+            SqlBasicCall average = (SqlBasicCall) alias.operand(0);
+            if (average.operandCount() != 1 || average.getFunctionQuantifier() != null) {
+                throw new UnsupportedSqlException("AVG takes exactly one plain argument in cached queries");
+            }
+            String argument = CalciteSql.unparse(average.operand(0));
+            String name = CalciteSql.unparse(alias.operand(1)).replace("`", "");
+            rewritten.add(aliased("SUM(" + argument + ")", AverageIngredients.sumColumn(name)));
+            rewritten.add(aliased("COUNT(" + argument + ")", AverageIngredients.countColumn(name)));
+            rewritten.add(aliased("MIN(TYPEOF(" + argument + "))", AverageIngredients.typeColumn(name)));
+        }
+        select.setSelectList(rewritten);
+    }
+
+    private static SqlNode aliased(String expression, String name) {
+        return SqlStdOperatorTable.AS.createCall(SqlParserPos.ZERO, CalciteSql.parseExpression(expression),
+                new SqlIdentifier(name, SqlParserPos.ZERO));
     }
 
     /** Ported from {@code strip_time_conditions}: drop time predicates so a new range can be injected. */

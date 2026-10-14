@@ -177,8 +177,7 @@ final class TypedAggregationGroups {
             case LONG -> frame[column].longValue(row);
             case DOUBLE -> (long) frame[column].doubleValue(row);
             case DECIMAL -> (frame[column].decimalValue(row)).longValue();
-            // Numeric epoch text is accepted; other text fails the merge and the engine answers directly.
-            case STRING -> Long.parseLong(frame[column].stringValue(row).trim());
+            case STRING -> ((Number) (Object) frame[column].stringValue(row)).longValue();
         };
         return Math.floorDiv(timestamp, step) * (long) step;
     }

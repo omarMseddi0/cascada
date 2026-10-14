@@ -4,23 +4,28 @@ import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
+import com.cascada.cache.application.port.out.DistinctSketchPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.domain.cube.CubeShapeCatalog;
+import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.time.TimeBucketCalculator;
 import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.time.DailyBuckets;
 import com.cascada.cache.domain.time.GapPlan;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.identity.domain.QueryHash;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
@@ -29,17 +34,22 @@ import java.util.concurrent.ForkJoinPool;
  * The workhorse of the cache, ported from {@code cache_execution_engine.py}: gap analysis, a two-phase
  * EXISTS-then-MGET access pattern, a parallel cache-fetch / Spark-gap fetch, and a final merge.
  *
- * <p>The three fast-path short-circuits of the reference engine are preserved exactly:
+ * <p>Execution paths:
  * <ol>
  *   <li>no cacheable body buckets → run the physical SQL directly;</li>
- *   <li>zero buckets present in cache → bypass all cache machinery and run the physical SQL directly;</li>
- *   <li>partial hit → fetch cached buckets and the Spark gap in parallel, then merge.</li>
+ *   <li>zero buckets present in cache → time series and global aggregates compute every bucket in one
+ *       bucket-labelled Spark job and store them; other grouped queries run the physical SQL directly;</li>
+ *   <li>partial hit → fetch cached buckets and the Spark gap in parallel, then merge. When the gap can
+ *       be labelled by bucket, the missing complete buckets are stored for the next request.</li>
  * </ol>
  *
  * <p>Cache reads and gap queries run on the injected executor. The composition root owns its
  * capacity and lifecycle; convenience constructors use the shared JDK common pool.
  */
 public final class CacheExecutionEngine {
+
+    /** Name of the bucket-start column added to bucket-labelled gap queries. */
+    static final String BUCKET_COLUMN = "cascada_bucket_start";
 
     private final BucketCachePort cacheBackend;
     private final QueryExecutorPort sparkExecutor;
@@ -69,10 +79,9 @@ public final class CacheExecutionEngine {
     }
 
     /**
-     * With a cube catalog (plan §8.12): full-window answers are registered by shape, and a later finer
-     * query over the same window is served by verified roll-up before any bucket or Spark work. The
-     * catalog is advisory — when {@code null} or when it has no verified subsumer, behaviour is
-     * byte-identical to the reference engine.
+     * With a cube catalog: full-window answers are registered by shape, and a later finer query over
+     * the same window is served by verified roll-up before any bucket or Spark work. The catalog is
+     * advisory — when {@code null} or when it has no verified subsumer, behaviour is unchanged.
      */
     public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
@@ -81,13 +90,22 @@ public final class CacheExecutionEngine {
                 ForkJoinPool.commonPool());
     }
 
-    /**
-     * The full constructor accepts the executor owned by the composition root so concurrent requests share
-     * one bounded work queue. Existing overloads retain their behavior through the JDK common pool.
-     */
     public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
                                 CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor) {
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, coverageIndex, cubeCatalog, executor,
+                null);
+    }
+
+    /**
+     * The full constructor accepts the executor owned by the composition root, and the sketch merger
+     * that makes {@code APPROX_COUNT_DISTINCT} buckets mergeable. Without a merger such queries are
+     * answered by the physical SQL whenever a merge would be needed.
+     */
+    public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
+                                GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
+                                CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor,
+                                DistinctSketchPort distinctSketches) {
         this.cacheBackend = Objects.requireNonNull(cacheBackend, "cacheBackend");
         this.sparkExecutor = Objects.requireNonNull(sparkExecutor, "sparkExecutor");
         this.gapQueryRewriter = Objects.requireNonNull(gapQueryRewriter, "gapQueryRewriter");
@@ -96,19 +114,20 @@ public final class CacheExecutionEngine {
         this.configuration = Objects.requireNonNull(configuration, "configuration");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.timeBucketCalculator = new TimeBucketCalculator(configuration.bucketSeconds());
-        this.frameMergeService =
-                new FrameMergeService(configuration.fixedStepSeconds(), configuration.timeColumnName());
+        this.frameMergeService = new FrameMergeService(configuration.fixedStepSeconds(),
+                configuration.timeColumnName(), distinctSketches, sparkExecutor);
     }
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
         requireActive();
-        // Cube path (plan §8.12): only global aggregates with no deferred ORDER BY/LIMIT — a LIMIT
-        // would register a truncated frame and a roll-up would not reapply the ordering. The lookup
-        // is exact-time-window only, and every roll-up is verified before it is served.
+        // Cube path: only global aggregates with no deferred ORDER BY/LIMIT — a LIMIT would register
+        // a truncated frame and a roll-up would not reapply the ordering. Sketch and AVG measures
+        // are not rolled up. The lookup is exact-time-window only, and every roll-up is verified first.
         boolean cubeEligible = cubeCatalog != null
                 && !canonicalObject.metadata().isTimeSeries()
                 && !canonicalObject.postProcessing().hasLimit()
-                && !canonicalObject.postProcessing().hasOrderBy();
+                && !canonicalObject.postProcessing().hasOrderBy()
+                && !hasDerivedMeasures(canonicalObject);
         QueryShape queryShape = cubeEligible
                 ? CubeShapeCatalog.shapeOf(canonicalObject)
                 : null;
@@ -134,13 +153,13 @@ public final class CacheExecutionEngine {
 
         List<String> requiredKeys = new ArrayList<>(bodyDays.size());
         for (long dayStart : bodyDays) {
-            requiredKeys.add(CacheKeyFactory.buildBucketKey(queryHash, dayStart, configuration.bucketSeconds()));
+            requiredKeys.add(bucketKey(queryHash, dayStart));
         }
 
         // Fast path 1: nothing cacheable -> run the physical SQL directly.
         if (requiredKeys.isEmpty()) {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    executeSql(canonicalObject.physicalSql()));
+                    executeDirect(canonicalObject));
         }
 
         List<Boolean> presenceMask;
@@ -162,19 +181,20 @@ public final class CacheExecutionEngine {
             }
         }
 
-        // Fast path 2: zero cache hits -> bypass all cache machinery.
+        // Fast path 2: zero cache hits.
         if (cachedKeys.isEmpty()) {
-            if (!canonicalObject.metadata().isTimeSeries()) {
-                return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                        executeSql(canonicalObject.physicalSql()));
-            }
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    computeAndStoreColdBuckets(canonicalObject, queryHash, buckets, requiredKeys));
+                    computeColdWindow(canonicalObject, queryHash, buckets, requiredKeys));
         }
 
         GapPlan gapPlan = new GapPlan(buckets.head(), missingDays, buckets.tail());
+        // A labelled gap lets the missing complete buckets be stored. It is used only where labelling
+        // cannot multiply the rows Spark returns (see bucketLabellingIsCheap).
+        Optional<String> labelledGapSql = !missingDays.isEmpty() && bucketLabellingIsCheap(canonicalObject)
+                ? gapQueryRewriter.buildBucketedGapQuery(canonicalObject.physicalSql(), gapPlan, BUCKET_COLUMN)
+                : Optional.empty();
 
-        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
+        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
         List<Long> vanishedDays = new ArrayList<>();
         CompletableFuture<Void> cacheFuture = CompletableFuture.runAsync(QueryExecutionScope.propagate(() -> {
                 int[] delivered = {0};
@@ -191,8 +211,8 @@ public final class CacheExecutionEngine {
 
         CompletableFuture<ResultFrame> sparkFuture = gapPlan.hasGaps()
                 ? CompletableFuture.supplyAsync(
-                        QueryExecutionScope.propagate(() -> executeSql(gapQueryRewriter.buildGapQuery(
-                                canonicalObject.physicalSql(), gapPlan))), executor)
+                        QueryExecutionScope.propagate(() -> executeSql(labelledGapSql.orElseGet(() ->
+                                gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(), gapPlan)))), executor)
                 : CompletableFuture.completedFuture(ResultFrame.empty());
 
         try {
@@ -222,7 +242,15 @@ public final class CacheExecutionEngine {
                                 new GapPlan(Optional.empty(), vanishedDays, Optional.empty())))), executor);
 
         ResultFrame sparkFrame = sparkFuture.join();
-        if (gapPlan.hasGaps()) {
+        if (labelledGapSql.isPresent()) {
+            try {
+                addLabelledGap(canonicalObject, queryHash, gapPlan, sparkFrame, merge);
+            } catch (RuntimeException invalidLabels) {
+                propagateCancellation(invalidLabels);
+                vanishedFuture.cancel(false);
+                return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+            }
+        } else if (gapPlan.hasGaps()) {
             merge.add(sparkFrame);
         }
 
@@ -242,6 +270,42 @@ public final class CacheExecutionEngine {
         }
     }
 
+    private void addLabelledGap(CanonicalQueryObject canonicalObject, QueryHash queryHash, GapPlan gapPlan,
+                                ResultFrame labelled, IncrementalFrameMerge merge) {
+        storeAndMergeLabelledRows(canonicalObject, queryHash, gapPlan.body(), gapPlan.head(), gapPlan.tail(),
+                labelled, merge);
+    }
+
+    /**
+     * Splits a bucket-labelled Spark result, stores each requested complete bucket, and feeds every
+     * row, including the partial head and tail edges, to the merge.
+     */
+    private void storeAndMergeLabelledRows(CanonicalQueryObject canonicalObject, QueryHash queryHash,
+                                           List<Long> completeBuckets, Optional<TimeRange> head,
+                                           Optional<TimeRange> tail, ResultFrame labelled,
+                                           IncrementalFrameMerge merge) {
+        BucketSplit split = BucketSplit.of(labelled, BUCKET_COLUMN);
+        Set<Long> complete = new HashSet<>(completeBuckets);
+        requireExpectedBuckets(split, complete, head, tail);
+        boolean global = isGlobalAggregate(canonicalObject);
+        for (long bucketStart : completeBuckets) {
+            // A global aggregate over an empty bucket still returns one SQL row, which a labelled
+            // query cannot produce. Such a bucket is simply left uncached.
+            boolean emptyGlobalBucket = global && !split.hasRowsFor(bucketStart);
+            if (emptyGlobalBucket) {
+                continue;
+            }
+            ResultFrame frame = split.frameFor(bucketStart);
+            storeBucket(queryHash, bucketStart, frame);
+            merge.add(frame);
+        }
+        for (long bucketStart : split.bucketStarts()) {
+            if (!complete.contains(bucketStart)) {
+                merge.add(split.frameFor(bucketStart));
+            }
+        }
+    }
+
     /** A complete full-window answer becomes a cube candidate for finer queries over the same window. */
     private ResultFrame catalogFullWindowAnswer(boolean cubeEligible, CanonicalQueryObject canonicalObject,
                                                 QueryShape queryShape, ResultFrame answer) {
@@ -257,26 +321,52 @@ public final class CacheExecutionEngine {
     }
 
     /**
-     * A cold cache is filled with complete bucket ingredients, never with a full-window aggregate
-     * under a bucket key. This makes the next request a genuine cache hit while preserving head/tail
-     * correctness for partial boundary buckets.
+     * A cold window is filled with complete bucket ingredients, never with a full-window aggregate
+     * under a bucket key, so the next request is a genuine cache hit while partial head/tail buckets
+     * stay correct. One bucket-labelled Spark job computes every bucket when the rewriter supports it.
      */
-    private ResultFrame computeAndStoreColdBuckets(CanonicalQueryObject canonicalObject, QueryHash queryHash,
-                                                    DailyBuckets buckets, List<String> keys) {
-        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
+    private ResultFrame computeColdWindow(CanonicalQueryObject canonicalObject, QueryHash queryHash,
+                                          DailyBuckets buckets, List<String> keys) {
+        if (bucketLabellingIsCheap(canonicalObject)) {
+            Optional<String> labelledSql = gapQueryRewriter.buildBucketedGapQuery(canonicalObject.physicalSql(),
+                    new GapPlan(buckets.head(), buckets.body(), buckets.tail()), BUCKET_COLUMN);
+            if (labelledSql.isPresent()) {
+                return computeColdWindowInOneQuery(canonicalObject, queryHash, buckets, labelledSql.get());
+            }
+        }
+        if (canonicalObject.metadata().isTimeSeries()) {
+            return computeColdBucketsOneByOne(canonicalObject, queryHash, buckets, keys);
+        }
+        return executeDirect(canonicalObject);
+    }
+
+    private ResultFrame computeColdWindowInOneQuery(CanonicalQueryObject canonicalObject, QueryHash queryHash,
+                                                    DailyBuckets buckets, String labelledSql) {
+        ResultFrame labelled = executeSql(labelledSql);
+        if (isGlobalAggregate(canonicalObject) && labelled.isEmpty()) {
+            // No row in the window: SQL still returns one global row (COUNT = 0, SUM = NULL, ...).
+            return executeDirect(canonicalObject);
+        }
+        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
+        try {
+            storeAndMergeLabelledRows(canonicalObject, queryHash, buckets.body(), buckets.head(), buckets.tail(),
+                    labelled, merge);
+            return merge.finish();
+        } catch (RuntimeException invalidOrUnmergeable) {
+            propagateCancellation(invalidOrUnmergeable);
+            return executeDirect(canonicalObject);
+        }
+    }
+
+    /** Used only when the rewriter cannot label rows by bucket: one Spark job per complete bucket. */
+    private ResultFrame computeColdBucketsOneByOne(CanonicalQueryObject canonicalObject, QueryHash queryHash,
+                                                   DailyBuckets buckets, List<String> keys) {
+        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
         for (int index = 0; index < buckets.body().size(); index++) {
             long bucketStart = buckets.body().get(index);
             ResultFrame frame = executeSql(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
                     new GapPlan(Optional.empty(), List.of(bucketStart), Optional.empty())));
-            try {
-                cacheBackend.store(keys.get(index), frame);
-                if (coverageIndex != null) {
-                    coverageIndex.markCached(queryHash, configuration.bucketSeconds(), bucketStart);
-                }
-            } catch (RuntimeException ignored) {
-                propagateCancellation(ignored);
-                // Cache storage is best-effort. Keep the freshly computed authoritative frame below.
-            }
+            storeBucket(queryHash, bucketStart, frame);
             merge.add(frame);
         }
         GapPlan boundaries = new GapPlan(buckets.head(), List.of(), buckets.tail());
@@ -291,8 +381,54 @@ public final class CacheExecutionEngine {
             propagateCancellation(mergeFailure);
             // Only the cache-derived merge is retried. Spark failures above propagate directly, while
             // an incompatible/corrupt cache ingredient falls back to one authoritative full query.
-            return executeSql(canonicalObject.physicalSql());
+            return executeDirect(canonicalObject);
         }
+    }
+
+    /** Cache storage is best-effort: a failed write never discards the freshly computed frame. */
+    private void storeBucket(QueryHash queryHash, long bucketStart, ResultFrame frame) {
+        try {
+            cacheBackend.store(bucketKey(queryHash, bucketStart), frame);
+            if (coverageIndex != null) {
+                coverageIndex.markCached(queryHash, configuration.bucketSeconds(), bucketStart);
+            }
+        } catch (RuntimeException ignored) {
+            propagateCancellation(ignored);
+        }
+    }
+
+    /** Every label must be a requested complete bucket or the bucket containing the head/tail edge. */
+    private void requireExpectedBuckets(BucketSplit split, Set<Long> complete,
+                                        Optional<TimeRange> head, Optional<TimeRange> tail) {
+        Set<Long> allowed = new HashSet<>(complete);
+        head.ifPresent(range -> allowed.add(bucketStartOf(range.startTimestampSeconds())));
+        tail.ifPresent(range -> allowed.add(bucketStartOf(range.startTimestampSeconds())));
+        for (long bucketStart : split.bucketStarts()) {
+            if (!allowed.contains(bucketStart)) {
+                throw new IllegalStateException("gap query returned rows for unrequested bucket " + bucketStart);
+            }
+        }
+    }
+
+    /**
+     * Labelling rows by bucket keeps the Spark result the same size for a time series (each row
+     * already belongs to one step inside one bucket) and for a global aggregate (one row per bucket).
+     * Other GROUP BY queries would return one row per group per bucket instead of one per group.
+     */
+    private static boolean bucketLabellingIsCheap(CanonicalQueryObject canonicalObject) {
+        return canonicalObject.metadata().isTimeSeries() || isGlobalAggregate(canonicalObject);
+    }
+
+    private static boolean isGlobalAggregate(CanonicalQueryObject canonicalObject) {
+        return canonicalObject.hashComponents().groupBy().isEmpty();
+    }
+
+    /** AVG, APPROX_COUNT_DISTINCT and expressions over aggregates are fetched as ingredients. */
+    private static boolean hasDerivedMeasures(CanonicalQueryObject canonicalObject) {
+        var functions = canonicalObject.metadata().measureAggregates().values();
+        return functions.contains(AggregateFunction.DISTINCT_SKETCH)
+                || functions.contains(AggregateFunction.AVERAGE)
+                || functions.contains(AggregateFunction.COMPOSITE);
     }
 
     /**
@@ -326,7 +462,36 @@ public final class CacheExecutionEngine {
     private ResultFrame executeAuthoritatively(boolean cubeEligible, CanonicalQueryObject canonicalObject,
                                                QueryShape queryShape) {
         return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                executeSql(canonicalObject.physicalSql()));
+                executeDirect(canonicalObject));
+    }
+
+    /**
+     * Runs the query without cached ingredients. AVG is still fetched as SUM and COUNT and divided by
+     * the merge, and distinct-count sketches are still unioned and estimated, so the answer is computed
+     * the same way whether or not any bucket was cached.
+     */
+    private ResultFrame executeDirect(CanonicalQueryObject canonicalObject) {
+        if (!hasDerivedMeasures(canonicalObject)) {
+            return executeSql(canonicalObject.physicalSql());
+        }
+        ResultFrame sketches = executeSql(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
+                new GapPlan(Optional.of(canonicalObject.timeRange()), List.of(), Optional.empty())));
+        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
+        merge.add(sketches);
+        try {
+            return merge.finish();
+        } catch (RuntimeException mergeFailure) {
+            propagateCancellation(mergeFailure);
+            return executeSql(canonicalObject.physicalSql());
+        }
+    }
+
+    private String bucketKey(QueryHash queryHash, long bucketStart) {
+        return CacheKeyFactory.buildBucketKey(queryHash, bucketStart, configuration.bucketSeconds());
+    }
+
+    private long bucketStartOf(long timestampSeconds) {
+        return Math.floorDiv(timestampSeconds, configuration.bucketSeconds()) * configuration.bucketSeconds();
     }
 
     private ResultFrame executeSql(String sql) {

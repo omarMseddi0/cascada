@@ -1,0 +1,486 @@
+package com.cascada.sql.adapter.out.calcite;
+
+import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
+import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.merge.CompositeIngredients;
+import com.cascada.cache.domain.merge.DistinctSketchPrecision;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.query.OrderByClause;
+import com.cascada.cache.domain.query.PostProcessing;
+import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.sql.domain.TimeDimensionMap;
+import com.cascada.sql.exception.UnsupportedSqlException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.stream.Collectors;
+import org.apache.calcite.sql.SqlBasicCall;
+import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlNodeList;
+import org.apache.calcite.sql.SqlOrderBy;
+import org.apache.calcite.sql.SqlSelect;
+
+/**
+ * Extracts a {@link CanonicalQueryObject} from a SQL string using <b>Apache Calcite</b>, porting the
+ * logic the Python {@code smart_sql_processor} (sqlglot) + {@code create_canonical_object}
+ * ({@code cache_component_adapter.py}) performed: pull group-by, aggregates, filters, time range,
+ * ordering and limit; expand {@code AVG} via {@link AggregateNormalizer}; detect time-series and the
+ * user's bucket step; and record composite aliases so they can be rebuilt after merge.
+ *
+ * <p>Calcite is the Java analogue of sqlglot — a full navigable {@code SqlNode} tree and a dialect
+ * unparser — replacing the previous JSqlParser implementation. Following the bypass-on-unsupported
+ * policy, anything Calcite cannot parse, anything that is not a simple {@code SELECT}, and anything
+ * without an extractable time range raises {@link UnsupportedSqlException} so the caller bypasses to
+ * Spark rather than caching a guess.
+ */
+public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort {
+
+    /**
+     * The {@link SqlCanonicalizerPort} entry point — this is the seam the cache actually depends on.
+     * All one-argument entry points use this factory's configured time dimensions; the two-argument
+     * overload permits an explicit per-call override.
+     */
+    @Override
+    public CanonicalQueryObject canonicalize(String physicalSql) {
+        return extractCanonicalObjectFromSql(physicalSql, configuredTimeDimensions);
+    }
+
+    private final TimeDimensionMap configuredTimeDimensions;
+
+    public CalciteCanonicalObjectFactory() { this(TimeDimensionMap.defaults()); }
+
+    public CalciteCanonicalObjectFactory(TimeDimensionMap timeDimensions) {
+        this.configuredTimeDimensions = java.util.Objects.requireNonNull(timeDimensions);
+    }
+
+    private static final Set<String> AGGREGATE_FUNCTION_NAMES =
+            Set.of("SUM", "COUNT", "AVG", "MIN", "MAX", "APPROX_COUNT_DISTINCT");
+
+    private final AggregateNormalizer aggregateNormalizer = new AggregateNormalizer();
+    private final SqlCacheabilityGuard cacheabilityGuard = new SqlCacheabilityGuard();
+    private final CanonicalTimeSeriesAnalyzer timeSeriesAnalyzer = new CanonicalTimeSeriesAnalyzer();
+
+    public CanonicalQueryObject extractCanonicalObjectFromSql(String sql) {
+        return extractCanonicalObjectFromSql(sql, configuredTimeDimensions);
+    }
+
+    public CanonicalQueryObject extractCanonicalObjectFromSql(String sql, TimeDimensionMap timeDimensionMap) {
+        ParsedSqlQuery parsed = parse(sql);
+        SqlSelect select = parsed.select();
+        cacheabilityGuard.validate(parsed.root(), select, timeDimensionMap);
+
+        List<String> groupBy = extractGroupBy(select);
+        Map<String, String> compositeAliases = new LinkedHashMap<>();
+        List<String> aggregateSpecs = new ArrayList<>();
+        Map<String, AggregateFunction> measureAggregates = new LinkedHashMap<>();
+        List<SqlBasicCall> rawAggregateCalls =
+                extractAggregates(select, aggregateSpecs, compositeAliases, measureAggregates);
+        List<String> projectionSignature = extractProjectionSignature(select);
+        List<String> logicSignature = extractLogicSignature(select);
+        if (!hasMergeableProjection(parsed, timeDimensionMap)) {
+            logicSignature.add("UNSUPPORTED_MERGE_SHAPE");
+        }
+
+        CanonicalTimeRangeExtraction timeExtraction =
+                timeSeriesAnalyzer.extractTimeRangeAndFilters(select, timeDimensionMap);
+        if (timeExtraction.timeRange().isEmpty()) {
+            throw new UnsupportedSqlException("query has no extractable time range; bypassing cache");
+        }
+
+        CanonicalTimeSeriesShape shape = timeSeriesAnalyzer.detectTimeSeries(select, timeDimensionMap);
+
+        NormalizedAggregates normalized = aggregateNormalizer.normalize(rawAggregateCalls);
+        List<String> hashedAggregates = new ArrayList<>(normalized.normalizedForHash());
+        if (measureAggregates.containsValue(AggregateFunction.DISTINCT_SKETCH)) {
+            // Stored sketches are only unioned with sketches of the same precision.
+            hashedAggregates.add(DistinctSketchPrecision.HASH_MARKER);
+        }
+
+        HashComponents hashComponents = new HashComponents(
+                new ArrayList<>(new TreeSet<>(groupBy)),
+                hashedAggregates,
+                timeExtraction.filters(),
+                0);
+
+        QueryMetadata metadata = new QueryMetadata(
+                shape.isTimeSeries(),
+                0L,
+                normalized.originalAggregates(),
+                compositeAliases,
+                shape.userStepSeconds(),
+                shape.preserveRawTimeSeries(),
+                aggregateSpecs,
+                measureAggregates);
+
+        PostProcessing postProcessing = new PostProcessing(extractLimit(parsed), extractOrderBy(parsed));
+
+        return new CanonicalQueryObject(hashComponents, timeExtraction.timeRange().orElseThrow(), postProcessing,
+                metadata, sql, extractSourceSignature(select), projectionSignature, logicSignature);
+    }
+
+    private boolean hasMergeableProjection(ParsedSqlQuery parsed, TimeDimensionMap dimensions) {
+        SqlSelect select = parsed.select();
+        if ((parsed.orderBy() != null && parsed.orderBy().offset != null) || select.getOffset() != null) return false;
+        if (extractOrderBy(parsed).stream().anyMatch(order -> order.expression().isPresent())) return false;
+        List<String> grouped = extractGroupBy(select);
+        Set<String> projectedGroups = new java.util.HashSet<>();
+        for (SqlNode item : select.getSelectList()) {
+            SqlNode expression = item;
+            String alias = null;
+            if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall as) {
+                expression = as.operand(0);
+                alias = ((SqlIdentifier) as.operand(1)).getSimple();
+            }
+            List<SqlBasicCall> terms = AggregateTerms.of(expression);
+            if (!terms.isEmpty()) {
+                if (!isMergeableMeasure(expression, alias, terms)) {
+                    return false;
+                }
+                continue;
+            }
+            String rendered = CalciteSql.unparse(expression);
+            if (!grouped.contains(rendered)) return false;
+            if (expression instanceof SqlIdentifier id && id.isSimple()
+                    && (alias == null || alias.equals(id.getSimple()))) {
+                projectedGroups.add(rendered);
+            } else if (CanonicalTimeSeriesAnalyzer.floorBucketStep(expression, dimensions).isPresent()
+                    && alias != null && dimensions.isTimeColumn(alias)) {
+                projectedGroups.add(rendered);
+            } else return false;
+        }
+        return projectedGroups.containsAll(grouped);
+    }
+
+    /**
+     * A select item containing aggregates is cacheable when every aggregate merges across buckets
+     * (SUM, COUNT, MIN, MAX, AVG as SUM and COUNT, APPROX_COUNT_DISTINCT as a sketch). An expression
+     * over aggregates may not read a column outside them or use a window, because it is evaluated
+     * only after the buckets are merged. Rebuilt columns need a name: the alias, or Spark's own.
+     */
+    private boolean isMergeableMeasure(SqlNode expression, String alias, List<SqlBasicCall> terms) {
+        for (SqlBasicCall term : terms) {
+            if (combineFunctionFor(term.getOperator().getName()) == null || term.getFunctionQuantifier() != null) {
+                return false;
+            }
+            boolean rebuiltFromIngredients = GapQueryBuilder.isDistinctSketchCall(term) || GapQueryBuilder.isAverageCall(term);
+            if (rebuiltFromIngredients && term.operandCount() != 1) {
+                return false;
+            }
+        }
+        boolean singleAggregate = isSingleAggregateCall(expression);
+        if (!singleAggregate && readsOutsideAggregates(expression)) {
+            return false;
+        }
+        boolean renamed = !singleAggregate
+                || GapQueryBuilder.isDistinctSketchCall((SqlBasicCall) expression)
+                || GapQueryBuilder.isAverageCall((SqlBasicCall) expression);
+        return !renamed || outputName(expression, alias).isPresent();
+    }
+
+    /** True when the expression reads a column or uses a window outside its aggregate calls. */
+    private boolean readsOutsideAggregates(SqlNode node) {
+        if (node instanceof SqlIdentifier) {
+            return true;
+        }
+        if (node instanceof SqlBasicCall call && isAggregateName(call)) {
+            return false;
+        }
+        if (node instanceof SqlCall call) {
+            if (call.getKind() == SqlKind.OVER) {
+                return true;
+            }
+            for (SqlNode operand : call.getOperandList()) {
+                if (operand != null && readsOutsideAggregates(operand)) {
+                    return true;
+                }
+            }
+        }
+        if (node instanceof SqlNodeList list) {
+            for (SqlNode child : list) {
+                if (readsOutsideAggregates(child)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static Optional<String> outputName(SqlNode expression, String alias) {
+        return alias != null ? Optional.of(alias) : SparkColumnNames.autoName(expression);
+    }
+
+    // --- parsing ---------------------------------------------------------------------------------
+
+    private ParsedSqlQuery parse(String sql) {
+        SqlNode node = CalciteSql.parseQuery(sql);
+        if (node instanceof SqlOrderBy orderBy && orderBy.query instanceof SqlSelect select) {
+            return new ParsedSqlQuery(select, orderBy);
+        }
+        if (node instanceof SqlSelect select) {
+            return new ParsedSqlQuery(select, null);
+        }
+        throw new UnsupportedSqlException("only a simple SELECT can be canonicalised, got: "
+                + node.getKind());
+    }
+
+    // --- group by --------------------------------------------------------------------------------
+
+    private List<String> extractGroupBy(SqlSelect select) {
+        SqlNodeList group = select.getGroup();
+        if (group == null) {
+            return new ArrayList<>();
+        }
+        return group.stream()
+                .map(CalciteSql::unparse)
+                .collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    // --- aggregates ------------------------------------------------------------------------------
+
+    private List<SqlBasicCall> extractAggregates(SqlSelect select, List<String> aggregateSpecsOut,
+                                                 Map<String, String> compositeAliasesOut,
+                                                 Map<String, AggregateFunction> measureAggregatesOut) {
+        List<SqlBasicCall> rawAggregateCalls = new ArrayList<>();
+        for (SqlNode item : select.getSelectList()) {
+            SqlNode expression = item;
+            String aliasName = null;
+            if (item.getKind() == SqlKind.AS) {
+                SqlBasicCall asCall = (SqlBasicCall) item;
+                expression = asCall.operand(0);
+                aliasName = ((SqlIdentifier) asCall.operand(1)).getSimple();
+            }
+
+            List<SqlBasicCall> aggregatesInItem = new ArrayList<>();
+            collectAggregateFunctions(expression, aggregatesInItem);
+            if (aggregatesInItem.isEmpty()) {
+                continue;
+            }
+
+            rawAggregateCalls.addAll(aggregatesInItem);
+
+            boolean isComposite = !isSingleAggregateCall(expression);
+            Optional<String> outputName = outputName(expression, aliasName);
+            if (isComposite && outputName.isPresent()) {
+                recordExpressionTerms(expression, outputName.get(), aggregatesInItem,
+                        compositeAliasesOut, measureAggregatesOut);
+            }
+
+            // README caveat 4: record the PARSED aggregate function per output column while the AST
+            // is still in hand. The merge path must never re-derive the combine op from the column
+            // name — an alias like MAX(latency) AS peak_latency hides the max signal and would be
+            // SUMmed across buckets.
+            if (!isComposite && expression instanceof SqlBasicCall single) {
+                AggregateFunction function = combineFunctionFor(single.getOperator().getName());
+                boolean renamed = function == AggregateFunction.AVERAGE || function == AggregateFunction.DISTINCT_SKETCH;
+                if (function != null && renamed && outputName.isPresent()) {
+                    measureAggregatesOut.put(outputName.get(), function);
+                } else if (function != null && !renamed) {
+                    String outputColumn = aliasName != null ? aliasName : CalciteSql.unparse(expression);
+                    measureAggregatesOut.put(outputColumn, function);
+                }
+            }
+
+            String spec = aliasName != null
+                    ? CalciteSql.unparse(expression) + " AS " + aliasName
+                    : CalciteSql.unparse(expression);
+            aggregateSpecsOut.add(spec);
+        }
+        return rawAggregateCalls;
+    }
+
+    /**
+     * An expression over aggregates stores each aggregate as a numbered term column. The formula
+     * recorded for the merge is the expression with those terms replaced by their column names.
+     */
+    private void recordExpressionTerms(SqlNode expression, String outputName, List<SqlBasicCall> terms,
+                                       Map<String, String> formulasOut,
+                                       Map<String, AggregateFunction> measureAggregatesOut) {
+        List<String> termColumns = new ArrayList<>();
+        for (int index = 0; index < terms.size(); index++) {
+            String termColumn = CompositeIngredients.termColumn(outputName, index);
+            termColumns.add(termColumn);
+            AggregateFunction function = combineFunctionFor(terms.get(index).getOperator().getName());
+            if (function != null) {
+                measureAggregatesOut.put(termColumn, function);
+            }
+        }
+        measureAggregatesOut.put(outputName, AggregateFunction.COMPOSITE);
+        formulasOut.put(outputName, CalciteSql.unparse(AggregateTerms.replaceWithColumns(expression, termColumns)));
+    }
+
+    private boolean isSingleAggregateCall(SqlNode expression) {
+        return expression instanceof SqlBasicCall call && isAggregateName(call);
+    }
+
+    private boolean isAggregateName(SqlBasicCall call) {
+        return AGGREGATE_FUNCTION_NAMES.contains(call.getOperator().getName().toUpperCase(Locale.ROOT));
+    }
+
+    private void collectAggregateFunctions(SqlNode expression, List<SqlBasicCall> collector) {
+        if (!(expression instanceof SqlCall call)) {
+            return;
+        }
+        if (call instanceof SqlBasicCall basicCall && isAggregateName(basicCall)) {
+            collector.add(basicCall);
+            return;
+        }
+        for (SqlNode operand : call.getOperandList()) {
+            if (operand != null) {
+                collectAggregateFunctions(operand, collector);
+            }
+        }
+    }
+
+    /** Maps a parsed aggregate keyword to its cross-bucket combine op; {@code null} when not simple. */
+    private AggregateFunction combineFunctionFor(String operatorName) {
+        return switch (operatorName.toUpperCase(Locale.ROOT)) {
+            case "SUM" -> AggregateFunction.SUM;
+            case "COUNT" -> AggregateFunction.COUNT;
+            case "MIN" -> AggregateFunction.MINIMUM;
+            case "MAX" -> AggregateFunction.MAXIMUM;
+            case "APPROX_COUNT_DISTINCT" -> AggregateFunction.DISTINCT_SKETCH;
+            case "AVG" -> AggregateFunction.AVERAGE;
+            default -> null;
+        };
+    }
+
+    // --- logic signature (HAVING / JOIN ON / DISTINCT) --------------------------------------------
+
+    /**
+     * Extracts the logic markers that are neither group-by, aggregate, filter nor projection but
+     * still change the answer (README caveats 5 and 6): the {@code HAVING} expression, every
+     * {@code JOIN ... ON} condition, and the {@code DISTINCT} flag. These feed the logic hash via
+     * {@link CanonicalQueryObject#logicSignature()} — without them a query with {@code HAVING}
+     * (or different join keys, or {@code SELECT DISTINCT}) collides on the cache key of its
+     * unfiltered sibling and one of the two is served the other's rows. Full canonicalization of
+     * the HAVING/ON expressions is not required for correctness here: the normalized unparse is
+     * deterministic, so equal intents share a key and different intents never do (the unparse may
+     * split hairs two semantically equal spellings apart, which only costs a recompute, never a
+     * wrong answer).
+     */
+    private List<String> extractLogicSignature(SqlSelect select) {
+        List<String> logicSignature = new ArrayList<>();
+        if (select.isDistinct()) {
+            logicSignature.add("DISTINCT");
+        }
+        if (select.getHaving() != null) {
+            logicSignature.add("HAVING " + CalciteSql.unparse(select.getHaving()));
+        }
+        if (select.getFrom() != null) {
+            collectJoinConditions(select.getFrom(), logicSignature);
+        }
+        return new ArrayList<>(new TreeSet<>(logicSignature));
+    }
+
+    private void collectJoinConditions(SqlNode from, List<String> logicSignatureOut) {
+        if (from.getKind() != SqlKind.JOIN) {
+            return;
+        }
+        org.apache.calcite.sql.SqlJoin join = (org.apache.calcite.sql.SqlJoin) from;
+        collectJoinConditions(join.getLeft(), logicSignatureOut);
+        collectJoinConditions(join.getRight(), logicSignatureOut);
+        if (join.getCondition() != null) {
+            logicSignatureOut.add("JOIN ON " + CalciteSql.unparse(join.getCondition()));
+        }
+    }
+
+    // --- projection / source signatures ----------------------------------------------------------
+
+    private List<String> extractProjectionSignature(SqlSelect select) {
+        List<String> projections = new ArrayList<>();
+        for (SqlNode item : select.getSelectList()) {
+            projections.add(item instanceof SqlBasicCall call && item.getKind() == SqlKind.AS
+                    ? CalciteSql.unparse(call.operand(0)) + " AS " + CalciteSql.unparse(call.operand(1))
+                    : CalciteSql.unparse(item));
+        }
+        return projections;
+    }
+
+    private List<String> extractSourceSignature(SqlSelect select) {
+        Set<String> sources = new TreeSet<>();
+        SqlNode from = select.getFrom();
+        if (from != null) {
+            collectSources(from, sources);
+        }
+        return new ArrayList<>(sources);
+    }
+
+    private void collectSources(SqlNode from, Set<String> sources) {
+        switch (from.getKind()) {
+            case JOIN -> {
+                org.apache.calcite.sql.SqlJoin join = (org.apache.calcite.sql.SqlJoin) from;
+                collectSources(join.getLeft(), sources);
+                collectSources(join.getRight(), sources);
+            }
+            case AS -> sources.add(CalciteSql.unparse(((SqlBasicCall) from).operand(0)));
+            default -> sources.add(CalciteSql.unparse(from));
+        }
+    }
+
+    private String simpleName(SqlIdentifier identifier) {
+        return identifier.names.get(identifier.names.size() - 1);
+    }
+
+    // --- order by / limit ------------------------------------------------------------------------
+
+    private Optional<Integer> extractLimit(ParsedSqlQuery parsed) {
+        SqlNode fetch = parsed.fetch();
+        if (fetch == null) {
+            return Optional.empty();
+        }
+        Long value = SqlNumericLiteralValue.asLong(fetch);
+        if (value == null || value < 0 || value > Integer.MAX_VALUE) {
+            throw new UnsupportedSqlException("LIMIT/FETCH must be a non-negative 32-bit integer literal");
+        }
+        return Optional.of(value.intValue());
+    }
+
+    private List<OrderByClause> extractOrderBy(ParsedSqlQuery parsed) {
+        SqlNodeList orderList = parsed.orderList();
+        if (orderList == null) {
+            return new ArrayList<>();
+        }
+        return orderList.stream()
+                .map(this::orderByClause)
+                .collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    private OrderByClause orderByClause(SqlNode element) {
+        boolean ascending = true;
+        Boolean nullsFirst = null;
+        SqlNode current = element;
+        boolean unwrapping = true;
+        while (unwrapping) {
+            switch (current.getKind()) {
+                case DESCENDING -> {
+                    ascending = false;
+                    current = ((SqlBasicCall) current).operand(0);
+                }
+                case NULLS_FIRST -> {
+                    nullsFirst = true;
+                    current = ((SqlBasicCall) current).operand(0);
+                }
+                case NULLS_LAST -> {
+                    nullsFirst = false;
+                    current = ((SqlBasicCall) current).operand(0);
+                }
+                default -> unwrapping = false;
+            }
+        }
+        boolean resolvedNullsFirst = nullsFirst == null ? ascending : nullsFirst;
+        if (current instanceof SqlIdentifier identifier) {
+            return OrderByClause.forColumn(simpleName(identifier), ascending, resolvedNullsFirst);
+        }
+        return OrderByClause.forExpression(CalciteSql.unparse(current), ascending, resolvedNullsFirst);
+    }
+
+}

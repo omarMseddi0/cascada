@@ -1,10 +1,9 @@
 package com.cascada.sql.simulation;
 
+import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
-import com.cascada.cache.application.port.out.QueryExecutorPort;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,6 +27,9 @@ final class DirectComputeOracle implements QueryExecutorPort {
     static final int FIXED_STEP_SECONDS = 300;
     private static final Pattern TS_RANGE =
             Pattern.compile("ts\\s*>=\\s*(\\d+)\\s+AND\\s+ts\\s*<=\\s*(\\d+)");
+    /** A bucket-labelled gap query projects {@code CAST(ts - PMOD(ts, width) AS BIGINT) label}. */
+    private static final Pattern BUCKET_LABEL =
+            Pattern.compile("CAST\\(ts - PMOD\\(ts, (\\d+)\\) AS BIGINT\\) (\\w+)");
 
     record TrafficEvent(long timestampSeconds, String appName, String deviceType, double bytes, double latency) {
     }
@@ -54,7 +56,10 @@ final class DirectComputeOracle implements QueryExecutorPort {
     public ResultFrame execute(String physicalSql) {
         List<long[]> ranges = extractRanges(physicalSql);
         List<TrafficEvent> selected = filterByRanges(ranges);
-        return aggregate(selected, FIXED_STEP_SECONDS);
+        Matcher label = BUCKET_LABEL.matcher(physicalSql);
+        return label.find()
+                ? aggregate(selected, FIXED_STEP_SECONDS, Long.parseLong(label.group(1)), label.group(2))
+                : aggregate(selected, FIXED_STEP_SECONDS);
     }
 
     /** Compute one whole day's bucket frame at the fixed step (used to prime the cache backend). */
@@ -92,24 +97,36 @@ final class DirectComputeOracle implements QueryExecutorPort {
     }
 
     private ResultFrame aggregate(List<TrafficEvent> selected, int stepSeconds) {
+        return aggregate(selected, stepSeconds, 0, null);
+    }
+
+    /** With a label column, rows are additionally grouped by their epoch-aligned bucket start. */
+    private ResultFrame aggregate(List<TrafficEvent> selected, int stepSeconds, long labelWidth, String labelColumn) {
         Map<String, Map<String, Object>> groups = new TreeMap<>();
         for (TrafficEvent event : selected) {
             Long bucketStart = isTimeSeries
                     ? Math.floorDiv(event.timestampSeconds(), stepSeconds) * (long) stepSeconds
                     : null;
-            String key = (bucketStart == null ? "" : bucketStart + "|") + dimensionKey(event);
-            Map<String, Object> group = groups.computeIfAbsent(key, ignored -> newGroup(event, bucketStart));
+            Long label = labelColumn == null ? null : Math.floorDiv(event.timestampSeconds(), labelWidth) * labelWidth;
+            String key = (label == null ? "" : label + "#") + (bucketStart == null ? "" : bucketStart + "|")
+                    + dimensionKey(event);
+            Map<String, Object> group = groups.computeIfAbsent(key, ignored -> {
+                Map<String, Object> created = newGroup(event, bucketStart);
+                if (labelColumn != null) created.put(labelColumn, label);
+                return created;
+            });
             for (MeasureSpec measure : measures) {
                 accumulate(group, measure, event);
             }
         }
 
-        ResultFrameBuilder builder = new ResultFrameBuilder();
+        ResultFrameBuilder builder = ResultFrame.builder();
         if (isTimeSeries) {
             builder.column("ts", ColumnType.LONG);
         }
         dimensions.forEach(dimension -> builder.column(dimension, ColumnType.STRING));
         measures.forEach(measure -> builder.column(measure.outputColumn(), ColumnType.DOUBLE));
+        if (labelColumn != null) builder.column(labelColumn, ColumnType.LONG);
         for (Map<String, Object> group : groups.values()) {
             builder.row(group);
         }

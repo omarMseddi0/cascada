@@ -1,5 +1,7 @@
 package com.cascada.sql.simulation;
 
+import com.cascada.cache.application.result.WarmingReport;
+
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
@@ -126,7 +128,7 @@ class WarmingConsistencySimulationTest {
                 new WarmingQueue(), new QueryPopularityTracker(), DAY, 10);
         warmer.recordQuery(hash, canonical);
 
-        WarmCacheUseCase.Report report = warmer.warmCycle(START, END, false);
+        WarmingReport report = warmer.warmCycle(START, END, false);
         assertThat(report.bucketsWarmed()).isEqualTo(3); // exactly the three body days
         assertThat(backend.storedBucketCount()).isEqualTo(3);
     }

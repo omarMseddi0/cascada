@@ -1,5 +1,9 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.result.PatternWarmingResult;
+
+import com.cascada.cache.application.result.WarmingReport;
+
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
@@ -66,7 +70,7 @@ class WarmingOrchestratorTest {
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
         orchestrator.recordQuery(B, canonical("SELECT appName, SUM(bytes) FROM other WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
 
-        WarmCacheUseCase.Report report = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        WarmingReport report = orchestrator.warmCycle(0, 3 * DAY - 1, false);
 
         assertThat(report.patternsWarmed()).isEqualTo(2);
         assertThat(report.bucketsWarmed()).isEqualTo(6); // 3 days x 2 patterns
@@ -84,7 +88,7 @@ class WarmingOrchestratorTest {
         sparkCalls.set(0);
 
         // Second cycle: queue is drained, but Layer 2 (top-N) re-selects A; every bucket already exists.
-        WarmCacheUseCase.Report second = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        WarmingReport second = orchestrator.warmCycle(0, 3 * DAY - 1, false);
         assertThat(second.bucketsWarmed()).isZero();
         assertThat(second.bucketsSkipped()).isEqualTo(3);
         assertThat(sparkCalls.get()).isZero(); // nothing recomputed
@@ -98,7 +102,7 @@ class WarmingOrchestratorTest {
         orchestrator.warmCycle(0, 3 * DAY - 1, false);
         sparkCalls.set(0);
 
-        WarmCacheUseCase.Report forced = orchestrator.warmCycle(0, 3 * DAY - 1, true);
+        WarmingReport forced = orchestrator.warmCycle(0, 3 * DAY - 1, true);
         assertThat(forced.bucketsWarmed()).isEqualTo(3);
         assertThat(sparkCalls.get()).isEqualTo(3); // all re-computed
     }
@@ -111,7 +115,7 @@ class WarmingOrchestratorTest {
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
 
-        WarmCacheUseCase.Report report = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        WarmingReport report = orchestrator.warmCycle(0, 3 * DAY - 1, false);
         assertThat(report.patternsWarmed()).isEqualTo(1); // not warmed twice
         assertThat(report.bucketsWarmed()).isEqualTo(3);
     }
@@ -125,7 +129,7 @@ class WarmingOrchestratorTest {
 
         orchestrator.warmSinglePattern(A, canonical, 0, DAY - 1, false); // warm only day 0
         sparkCalls.set(0);
-        WarmingOrchestrator.PatternWarmingResult result =
+        PatternWarmingResult result =
                 orchestrator.warmSinglePattern(A, canonical, 0, 2 * DAY - 1, false); // days 0 and 1
 
         assertThat(result.bucketsSkipped()).isEqualTo(1); // day 0 already warm
@@ -145,7 +149,7 @@ class WarmingOrchestratorTest {
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
         long midThirdBucket = 2 * DAY + 12_345; // "now" is inside day 2
-        WarmingOrchestrator.PatternWarmingResult result =
+        PatternWarmingResult result =
                 orchestrator.warmSinglePattern(A, canonical, 0, midThirdBucket, false);
 
         assertThat(result.bucketsWarmed()).isEqualTo(2); // days 0 and 1 only — day 2 is incomplete
@@ -158,7 +162,7 @@ class WarmingOrchestratorTest {
     void reversedWarmWindowDoesNoWork() {
         WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), new QueryPopularityTracker());
 
-        WarmingOrchestrator.PatternWarmingResult result = orchestrator.warmSinglePattern(
+        PatternWarmingResult result = orchestrator.warmSinglePattern(
                 A, canonical("SELECT SUM(bytes) FROM traffic"), DAY, 0, false);
 
         assertThat(result.bucketsWarmed()).isZero();
@@ -173,7 +177,7 @@ class WarmingOrchestratorTest {
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
-        WarmingOrchestrator.PatternWarmingResult result =
+        PatternWarmingResult result =
                 orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, false); // inclusive boundary
 
         assertThat(result.bucketsWarmed()).isEqualTo(3); // all three buckets are complete
@@ -193,7 +197,7 @@ class WarmingOrchestratorTest {
         sparkCalls.set(0);
         long existsCallsBefore = backend.existsCallCount();
 
-        WarmingOrchestrator.PatternWarmingResult next =
+        PatternWarmingResult next =
                 orchestrator.warmSinglePattern(A, canonical, 0, 56 * DAY - 1, false); // one new day
 
         assertThat(next.bucketsSkipped()).isEqualTo(55);
@@ -213,7 +217,7 @@ class WarmingOrchestratorTest {
         backend.flush(com.cascada.cache.domain.admin.CacheScope.everything());
         sparkCalls.set(0);
 
-        WarmingOrchestrator.PatternWarmingResult result = orchestrator.warmSinglePattern(A, canonical, 0, DAY - 1, false);
+        PatternWarmingResult result = orchestrator.warmSinglePattern(A, canonical, 0, DAY - 1, false);
 
         assertThat(result.bucketsWarmed()).isEqualTo(1);
         assertThat(sparkCalls.get()).isEqualTo(1);
@@ -231,7 +235,7 @@ class WarmingOrchestratorTest {
         orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, false);
         sparkCalls.set(0);
 
-        WarmingOrchestrator.PatternWarmingResult forced =
+        PatternWarmingResult forced =
                 orchestrator.warmSinglePattern(A, canonical, 0, 3 * DAY - 1, true);
         assertThat(forced.bucketsWarmed()).isEqualTo(3); // data-change signal recomputes everything
         assertThat(sparkCalls.get()).isEqualTo(3);
@@ -263,13 +267,13 @@ class WarmingOrchestratorTest {
         orchestrator.recordQuery(A, canonical("SELECT SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100"));
         orchestrator.recordQuery(B, canonical("SELECT SUM(bytes) FROM other WHERE ts >= 0 AND ts <= 100"));
 
-        WarmCacheUseCase.Report first = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        WarmingReport first = orchestrator.warmCycle(0, 3 * DAY - 1, false);
 
         assertThat(first.patternsWarmed()).isEqualTo(1);
         assertThat(first.bucketsWarmed()).isEqualTo(3);
         assertThat(queue.size()).isEqualTo(1);
 
-        WarmCacheUseCase.Report retry = orchestrator.warmCycle(0, 3 * DAY - 1, false);
+        WarmingReport retry = orchestrator.warmCycle(0, 3 * DAY - 1, false);
         assertThat(retry.bucketsWarmed()).isEqualTo(3);
         assertThat(queue.size()).isZero();
     }

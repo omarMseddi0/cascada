@@ -1,5 +1,7 @@
 package com.cascada.app.adapter.in.cli;
 
+import com.cascada.cache.application.result.WarmingReport;
+
 import com.cascada.cache.application.result.QueryResult;
 
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
@@ -84,7 +86,7 @@ public final class CascadaCli {
 
     private void runWarm() {
         long nowSeconds = System.currentTimeMillis() / 1000L;
-        WarmCacheUseCase.Report report = warmCache.warmCycle(
+        WarmingReport report = warmCache.warmCycle(
                 nowSeconds - DEFAULT_WARM_LOOKBACK_DAYS * SECONDS_PER_DAY, nowSeconds, false);
         System.out.println("patterns=" + report.patternsWarmed()
                 + " warmed=" + report.bucketsWarmed() + " skipped=" + report.bucketsSkipped());

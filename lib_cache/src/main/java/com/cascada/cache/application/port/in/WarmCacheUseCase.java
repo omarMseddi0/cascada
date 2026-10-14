@@ -1,5 +1,7 @@
 package com.cascada.cache.application.port.in;
 
+import com.cascada.cache.application.result.WarmingReport;
+
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.identity.domain.QueryHash;
 
@@ -31,9 +33,6 @@ public interface WarmCacheUseCase {
      * @param forceOverwrite re-warm buckets that already exist (used when a data-change signal says the
      *     underlying rows moved); normally {@code false}, which skips already-cached buckets
      */
-    Report warmCycle(long warmStartTimestampSeconds, long warmEndTimestampSeconds, boolean forceOverwrite);
+    WarmingReport warmCycle(long warmStartTimestampSeconds, long warmEndTimestampSeconds, boolean forceOverwrite);
 
-    /** Per-cycle totals, for the operator log and the warming dashboard. */
-    record Report(int patternsWarmed, int bucketsWarmed, int bucketsSkipped) {
-    }
 }

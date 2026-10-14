@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.result.WarmingReport;
+
 import com.cascada.cache.application.result.QueryResult;
 
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
@@ -116,8 +118,8 @@ class ExecuteCachedQueryServiceTest {
                                               CanonicalQueryObject canonicalObject) {
                 throw new IllegalStateException("warming tracker unavailable");
             }
-            @Override public Report warmCycle(long start, long end, boolean forceOverwrite) {
-                return new Report(0, 0, 0);
+            @Override public WarmingReport warmCycle(long start, long end, boolean forceOverwrite) {
+                return new WarmingReport(0, 0, 0);
             }
         };
         ExecuteCachedQueryService service = new ExecuteCachedQueryService(neverBypass,

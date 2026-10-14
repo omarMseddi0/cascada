@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.result.WarmingReport;
+
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
@@ -102,7 +104,7 @@ class WarmingRetentionTest {
                     List.of("traffic"), List.of()));
         }
 
-        WarmCacheUseCase.Report report = warmer.warmCycle(0, 86399, false);
+        WarmingReport report = warmer.warmCycle(0, 86399, false);
         assertThat(report.patternsWarmed()).isEqualTo(2);
         assertThat(backend.sizeReport().bucketCount()).isEqualTo(2);
     }

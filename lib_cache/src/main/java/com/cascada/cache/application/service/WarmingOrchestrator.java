@@ -1,5 +1,9 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.result.PatternWarmingResult;
+
+import com.cascada.cache.application.result.WarmingReport;
+
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
@@ -124,7 +128,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
 
     /** One warming cycle over {@code [warmStartTs, warmEndTs]} — Layer 1 then Layer 2, de-duplicated. */
     @Override
-    public Report warmCycle(long warmStartTimestampSeconds, long warmEndTimestampSeconds,
+    public WarmingReport warmCycle(long warmStartTimestampSeconds, long warmEndTimestampSeconds,
                                    boolean forceOverwrite) {
         // LAYER 1: recent patterns voted by the read path.
         List<QueryHash> layer1 = warmingQueue.consumeAll();
@@ -165,7 +169,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                             + failure.getClass().getSimpleName() + "); it was returned to the queue");
                 }
             }
-            return new Report(patternsWarmed, bucketsWarmed, bucketsSkipped);
+            return new WarmingReport(patternsWarmed, bucketsWarmed, bucketsSkipped);
         } catch (RuntimeException setupFailure) {
             // Failures while constructing the work set happen after consumeAll drained Layer 1.
             layer1.forEach(warmingQueue::vote);
@@ -303,12 +307,4 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         return new LinkedHashSet<>(canonicalRegistry.keySet());
     }
 
-    /** Per-pattern totals. */
-    public record PatternWarmingResult(int bucketsWarmed, int bucketsSkipped) {
-        public PatternWarmingResult {
-            if (bucketsWarmed < 0 || bucketsSkipped < 0) {
-                throw new IllegalArgumentException("bucket counts must be non-negative");
-            }
-        }
-    }
 }

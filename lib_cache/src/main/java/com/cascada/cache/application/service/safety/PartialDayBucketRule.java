@@ -25,9 +25,8 @@ public final class PartialDayBucketRule implements SafetyRule {
         long bucketSeconds = (long) configuration.cacheBucketHours() * SECONDS_PER_HOUR;
 
         TimeRange timeRange = canonicalObject.timeRange();
-        // Floor alignment matches TimeBucketCalculator; truncating division would mis-bucket pre-1970 ranges.
-        long startBucket = Math.floorDiv(timeRange.startTimestampSeconds(), bucketSeconds) * bucketSeconds;
-        long endBucket = Math.floorDiv(timeRange.endTimestampSeconds(), bucketSeconds) * bucketSeconds;
+        long startBucket = (timeRange.startTimestampSeconds() / bucketSeconds) * bucketSeconds;
+        long endBucket = (timeRange.endTimestampSeconds() / bucketSeconds) * bucketSeconds;
 
         boolean isSingleBucket = startBucket == endBucket;
         long durationSeconds = timeRange.durationSeconds();

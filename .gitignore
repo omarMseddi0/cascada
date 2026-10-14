@@ -44,6 +44,3 @@ __pycache__/
 
 # Ignore every bench/benchmark folder at any depth.
 **/bench*/
-
-# Local AI review notes are never committed.
-review_claude.md

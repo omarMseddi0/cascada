@@ -1,37 +1,57 @@
 package com.cascada.spark.adapter.out.spark;
 
-import com.cascada.cache.application.execution.QueryCancellation;
-import com.cascada.cache.application.execution.QueryExecutionScope;
-import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.spark.domain.SparkSessionConfig;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 
-/** Runs physical SQL on the shared Spark/Delta session and exposes the cache's primitive frame contract.
- * Spark 4.1.1 and its native runtime are supplied by the Java 21 driver/executor image.
+import java.util.Map;
+import java.util.Objects;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * The production {@link QueryExecutorPort}: runs a physical SQL string on a Spark 4.1.1 session
+ * with Delta Lake enabled, and maps the resulting {@code Dataset<Row>} into the cache's framework-free
+ * {@link ResultFrame}. Ported from {@code SparkSessionManager.get_session} + the query path of
+ * {@code query_engine.py} (the {@code SparkQueryEngine} that calls {@code spark.sql(sql)}).
+ *
+ * <p><b>Local and cluster are the same code.</b> The {@link SparkSessionConfig} decides the master
+ * ({@code local[*]} or {@code k8s://...}) and the {@code spark.*} properties; this class builds the
+ * session and executes against it identically either way. A {@code SELECT ... FROM delta.`/path`} reads
+ * a Delta table directly because the config always installs the Delta extensions + catalog.
+ *
+ * <p>Spark 4.1.1 supports Java 17 and 21. In production the matching Spark runtime is {@code provided}.
+ * This adapter compiles against that runtime and its live session is exercised on JDK 21, while the
+ * config builder (pure) carries unit-test coverage and this class remains a thin, well-typed bridge.
  */
 public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoCloseable {
 
     private static final Logger LOGGER = Logger.getLogger(SparkDeltaQueryExecutor.class.getName());
 
+    /**
+     * Hard ceiling on rows materialised into the engine's JVM per query. The cache path only ever
+     * pulls pre-aggregated frames (group-by cardinality Ã— buckets â€” thousands of rows), so a result
+     * beyond this is rejected before the adapter builds the full {@link ResultFrame}. Spark may still
+     * materialize the largest partition while providing {@code toLocalIterator()}.
+     */
+    private static final int DEFAULT_MAX_RESULT_ROWS = 1_000_000;
     private static final SessionOwnershipCoordinator SESSION_OWNERSHIP = new SessionOwnershipCoordinator();
 
     private final SparkSession sparkSession;
     private final boolean ownsSession;
     private final SparkResultFrameMapper resultFrameMapper;
-    private final ParallelResultCollector resultCollector = new ParallelResultCollector();
 
-    /** Build (or get) a SparkSession from the resolved config — the single place a session is created. */
+    /** Build (or get) a SparkSession from the resolved config â€” the single place a session is created. */
     public SparkDeltaQueryExecutor(SparkSessionConfig config) {
-        GlutenRuntimeValidator.validate(config);
-        this.resultFrameMapper = new SparkResultFrameMapper();
+        this(config, DEFAULT_MAX_RESULT_ROWS);
+    }
+
+    /** As above, with an explicit driver-side row ceiling. */
+    public SparkDeltaQueryExecutor(SparkSessionConfig config, int maxResultRows) {
+        this.resultFrameMapper = new SparkResultFrameMapper(maxResultRows);
         // getOrCreate may reuse a session or create one over somebody else's SparkContext.
         // Serialize our own construction so concurrent executors cannot both claim a shared context.
         SparkSession.Builder builder = SparkSession.builder()
@@ -48,38 +68,16 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
 
     /**
      * For tests / advanced wiring: wrap an already-built session (e.g. a shared one). {@link #close()}
-     * will NOT stop a session passed in this way — only the caller that created it should stop it.
+     * will NOT stop a session passed in this way â€” only the caller that created it should stop it.
      */
     public SparkDeltaQueryExecutor(SparkSession sparkSession) {
         this.sparkSession = Objects.requireNonNull(sparkSession, "sparkSession");
         this.ownsSession = false;
-        this.resultFrameMapper = new SparkResultFrameMapper();
+        this.resultFrameMapper = new SparkResultFrameMapper(DEFAULT_MAX_RESULT_ROWS);
     }
 
     @Override
     public ResultFrame execute(String physicalSql) {
-        return QueryExecutionScope.current().map(cancellation -> executeCancellable(physicalSql, cancellation))
-                .orElseGet(() -> executeSql(physicalSql));
-    }
-
-    private ResultFrame executeCancellable(String physicalSql, QueryCancellation cancellation) {
-        cancellation.requireActive();
-        var context = sparkSession.sparkContext();
-        String previousGroup = context.getLocalProperty("spark.jobGroup.id");
-        String previousDescription = context.getLocalProperty("spark.job.description");
-        String previousInterruptPolicy = context.getLocalProperty("spark.job.interruptOnCancel");
-        context.setJobGroup(cancellation.executionId(), "Cascada query", true);
-        try (var registration = cancellation.onCancel(() -> context.cancelJobGroupAndFutureJobs(cancellation.executionId()))) {
-            cancellation.requireActive();
-            return executeSql(physicalSql);
-        } finally {
-            context.setLocalProperty("spark.jobGroup.id", previousGroup);
-            context.setLocalProperty("spark.job.description", previousDescription);
-            context.setLocalProperty("spark.job.interruptOnCancel", previousInterruptPolicy);
-        }
-    }
-
-    private ResultFrame executeSql(String physicalSql) {
         boolean monitor = LOGGER.isLoggable(Level.FINE);
         long started = monitor ? System.nanoTime() : 0L;
         Dataset<Row> dataset = sparkSession.sql(physicalSql);
@@ -96,15 +94,8 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
 
     /** Map a Spark result into a {@link ResultFrame}; visible for the cluster integration test. */
     ResultFrame toResultFrame(Dataset<Row> dataset) {
-        // Parallel collection by default; toLocalIterator streams one partition per job when the
-        // serialized result is larger than spark.driver.maxResultSize.
-        return resultFrameMapper.map(dataset.schema(),
-                resultCollector.collect(dataset).orElseGet(dataset::toLocalIterator));
-    }
-
-    @Override
-    public ResultFrame project(ResultFrame input, Map<String, String> declaredTypes, List<String> projections) {
-        return new MergedFrameProjection(sparkSession, resultFrameMapper).project(input, declaredTypes, projections);
+        // toLocalIterator streams through the result; Spark may materialize its largest partition.
+        return resultFrameMapper.map(dataset.schema(), dataset.toLocalIterator());
     }
 
     @Override

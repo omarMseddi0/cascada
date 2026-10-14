@@ -1,4 +1,10 @@
-package com.cascada.cache.domain.time;
+package com.cascada.cache.application.service.time;
+
+import com.cascada.cache.domain.time.BucketLevel;
+
+import com.cascada.cache.domain.time.TimeRange;
+
+import com.cascada.cache.domain.time.HierarchicalPlan;
 
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 
@@ -108,16 +114,4 @@ public final class TimeBucketPyramid {
         return new HierarchicalPlan(leadingPartial, completeDays, completeHoursOfToday, livePartial);
     }
 
-    /**
-     * The assembled levels for a query: complete day-bucket starts (cache), complete hour-bucket starts
-     * of the in-progress day (cache), and the live partial range (recompute).
-     */
-    public record HierarchicalPlan(Optional<TimeRange> leadingPartialRange, List<Long> completeDayBucketStarts,
-                                   List<Long> completeHourBucketStartsToday,
-                                   Optional<TimeRange> livePartialRange) {
-        public HierarchicalPlan {
-            completeDayBucketStarts = List.copyOf(completeDayBucketStarts);
-            completeHourBucketStartsToday = List.copyOf(completeHourBucketStartsToday);
-        }
-    }
 }

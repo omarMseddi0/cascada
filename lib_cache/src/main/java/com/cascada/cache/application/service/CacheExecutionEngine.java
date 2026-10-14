@@ -7,7 +7,7 @@ import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.cube.CubeShapeCatalog;
-import com.cascada.cache.domain.time.TimeBucketCalculator;
+import com.cascada.cache.application.service.time.TimeBucketCalculator;
 import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;

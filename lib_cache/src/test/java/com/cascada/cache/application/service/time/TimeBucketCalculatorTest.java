@@ -1,4 +1,10 @@
-package com.cascada.cache.domain.time;
+package com.cascada.cache.application.service.time;
+
+import com.cascada.cache.domain.time.GapPlan;
+
+import com.cascada.cache.domain.time.TimeRange;
+
+import com.cascada.cache.domain.time.DailyBuckets;
 
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 

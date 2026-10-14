@@ -1,11 +1,15 @@
-package com.cascada.cache.domain.time;
+package com.cascada.cache.application.service.time;
+
+import com.cascada.cache.domain.time.BucketLevel;
+
+import com.cascada.cache.domain.time.TimeRange;
 
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.TimeSeriesBucketResampler;
 import com.cascada.cache.domain.merge.TimeSeriesBucketResampler.TimeSeriesRow;
-import com.cascada.cache.domain.time.TimeBucketPyramid.HierarchicalPlan;
+import com.cascada.cache.domain.time.HierarchicalPlan;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;

@@ -6,13 +6,12 @@ import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.application.service.cube.CubeShapeCatalog;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.time.TimeBucketCalculator;
 import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.time.DailyBuckets;
 import com.cascada.cache.domain.time.GapPlan;
@@ -109,8 +108,7 @@ public final class CacheExecutionEngine {
         boolean cubeEligible = cubeCatalog != null
                 && !canonicalObject.metadata().isTimeSeries()
                 && !canonicalObject.postProcessing().hasLimit()
-                && !canonicalObject.postProcessing().hasOrderBy()
-                && !hasDerivedMeasures(canonicalObject);
+                && !canonicalObject.postProcessing().hasOrderBy();
         QueryShape queryShape = cubeEligible
                 ? CubeShapeCatalog.shapeOf(canonicalObject)
                 : null;
@@ -142,7 +140,7 @@ public final class CacheExecutionEngine {
         // Fast path 1: nothing cacheable -> run the physical SQL directly.
         if (requiredKeys.isEmpty()) {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    executeDirect(canonicalObject));
+                    executeSql(canonicalObject.physicalSql()));
         }
 
         List<Boolean> presenceMask;
@@ -168,7 +166,7 @@ public final class CacheExecutionEngine {
         if (cachedKeys.isEmpty()) {
             if (!canonicalObject.metadata().isTimeSeries()) {
                 return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                        executeDirect(canonicalObject));
+                        executeSql(canonicalObject.physicalSql()));
             }
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
                     computeAndStoreColdBuckets(canonicalObject, queryHash, buckets, requiredKeys));
@@ -176,7 +174,7 @@ public final class CacheExecutionEngine {
 
         GapPlan gapPlan = new GapPlan(buckets.head(), missingDays, buckets.tail());
 
-        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
+        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
         List<Long> vanishedDays = new ArrayList<>();
         CompletableFuture<Void> cacheFuture = CompletableFuture.runAsync(QueryExecutionScope.propagate(() -> {
                 int[] delivered = {0};
@@ -265,7 +263,7 @@ public final class CacheExecutionEngine {
      */
     private ResultFrame computeAndStoreColdBuckets(CanonicalQueryObject canonicalObject, QueryHash queryHash,
                                                     DailyBuckets buckets, List<String> keys) {
-        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
+        FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
         for (int index = 0; index < buckets.body().size(); index++) {
             long bucketStart = buckets.body().get(index);
             ResultFrame frame = executeSql(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
@@ -293,7 +291,7 @@ public final class CacheExecutionEngine {
             propagateCancellation(mergeFailure);
             // Only the cache-derived merge is retried. Spark failures above propagate directly, while
             // an incompatible/corrupt cache ingredient falls back to one authoritative full query.
-            return executeDirect(canonicalObject);
+            return executeSql(canonicalObject.physicalSql());
         }
     }
 
@@ -328,32 +326,7 @@ public final class CacheExecutionEngine {
     private ResultFrame executeAuthoritatively(boolean cubeEligible, CanonicalQueryObject canonicalObject,
                                                QueryShape queryShape) {
         return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                executeDirect(canonicalObject));
-    }
-
-    /** AVG is fetched as SUM and COUNT ingredients and divided by the merge. */
-    private static boolean hasDerivedMeasures(CanonicalQueryObject canonicalObject) {
-        return canonicalObject.metadata().measureAggregates().containsValue(AggregateFunction.AVERAGE);
-    }
-
-    /**
-     * Runs the query without cached ingredients. AVG is still fetched as SUM and COUNT and divided by
-     * the merge, so the answer is computed the same way whether or not any bucket was cached.
-     */
-    private ResultFrame executeDirect(CanonicalQueryObject canonicalObject) {
-        if (!hasDerivedMeasures(canonicalObject)) {
-            return executeSql(canonicalObject.physicalSql());
-        }
-        ResultFrame ingredients = executeSql(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
-                new GapPlan(Optional.of(canonicalObject.timeRange()), List.of(), Optional.empty())));
-        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
-        merge.add(ingredients);
-        try {
-            return merge.finish();
-        } catch (RuntimeException mergeFailure) {
-            propagateCancellation(mergeFailure);
-            return executeSql(canonicalObject.physicalSql());
-        }
+                executeSql(canonicalObject.physicalSql()));
     }
 
     private ResultFrame executeSql(String sql) {

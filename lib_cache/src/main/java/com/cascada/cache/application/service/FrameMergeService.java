@@ -1,27 +1,25 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.service.merge.AggregateFunctionResolver;
-import com.cascada.cache.application.service.merge.AverageReconstructionService;
-import com.cascada.cache.application.service.merge.SparkAverage;
-import com.cascada.cache.application.service.merge.TypedFrameAccumulator;
-import com.cascada.cache.application.service.merge.TypedFrameAggregator;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.cache.domain.merge.AverageIngredients;
+import com.cascada.cache.domain.merge.AggregateFunctionResolver;
+import com.cascada.cache.domain.merge.AverageReconstructionService;
+import com.cascada.cache.domain.merge.TypedFrameAggregator;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.OrderByClause;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.IntBinaryOperator;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /** Coordinates typed frame aggregation, AVG/composite reconstruction, and deferred post-processing. */
 public final class FrameMergeService {
@@ -41,8 +39,60 @@ public final class FrameMergeService {
     }
 
     /** Same ordered merge and final reconstruction, without retaining each completed input frame. */
-    public IncrementalFrameMerge incremental(CanonicalQueryObject canonicalObject) {
-        return new IncrementalFrameMerge(this, canonicalObject);
+    public IncrementalMerge incremental(CanonicalQueryObject canonicalObject) {
+        return new IncrementalMerge(canonicalObject);
+    }
+
+    public final class IncrementalMerge {
+        private final CanonicalQueryObject canonical;
+        private ResultFrame schema;
+        private ResultFrame firstEmpty;
+        private TypedFrameAggregator.Accumulator accumulator;
+        private RuntimeException failure;
+        private long inputRows;
+
+        private IncrementalMerge(CanonicalQueryObject canonical) { this.canonical = canonical; }
+
+        /** Deferred merge errors preserve authoritative fallback after the original fetch/query phases. */
+        public void add(ResultFrame frame) {
+            if (failure != null) return;
+            try {
+                java.util.Objects.requireNonNull(frame, "frame");
+                if (schema == null) {
+                    ResultFrameBuilder descriptor = new ResultFrameBuilder();
+                    for (String column : frame.columnNames()) descriptor.column(column, frame.columnType(column));
+                    schema = descriptor.build();
+                    if (frame.isEmpty()) firstEmpty = frame;
+                } else TypedFrameAggregator.validateCompatibleSchemas(List.of(schema, frame));
+                inputRows += frame.rowCount();
+                if (frame.isEmpty()) return;
+                if (accumulator == null) {
+                    List<String> dimensions = new ArrayList<>();
+                    boolean timeSeries = canonical.metadata().isTimeSeries();
+                    if (timeSeries) dimensions.add(timeColumnName);
+                    dimensions.addAll(dimensionColumns(schema, canonical, timeSeries));
+                    int step = timeSeries ? timeSeriesStep(canonical) : fixedStepSeconds;
+                    accumulator = new TypedFrameAggregator.Accumulator(schema, dimensions,
+                            resolvedFunctions(canonical), timeColumnName, step);
+                }
+                accumulator.accept(frame);
+            } catch (RuntimeException invalidMerge) { failure = invalidMerge; }
+        }
+
+        public ResultFrame finish() {
+            if (failure != null) throw failure;
+            if (schema == null) return ResultFrame.empty();
+            if (accumulator == null) return firstEmpty == null ? schema : firstEmpty;
+            boolean monitor = LOGGER.isLoggable(Level.FINE);
+            long started = monitor ? System.nanoTime() : 0L;
+            ResultFrame merged = accumulator.finish();
+            ResultFrame reconstructed = reconstructAverages(merged, canonical);
+            ResultFrame composites = reconstructCompositeAliases(reconstructed, canonical);
+            ResultFrame answer = applyPostProcessing(composites, canonical);
+            if (monitor) LOGGER.fine("Incremental cache merge: input_rows=" + inputRows
+                    + " output_rows=" + answer.rowCount() + " finish_ms=" + (System.nanoTime() - started) / 1_000_000.0);
+            return answer;
+        }
     }
 
     public ResultFrame mergeAndReconstruct(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
@@ -66,7 +116,9 @@ public final class FrameMergeService {
                 : mergeGlobalAggregate(nonEmpty, canonicalObject);
 
         long aggregated = monitor ? System.nanoTime() : 0L;
-        ResultFrame result = finishMergedFrame(merged, canonicalObject);
+        ResultFrame reconstructed = reconstructAverages(merged, canonicalObject);
+        ResultFrame withComposites = reconstructCompositeAliases(reconstructed, canonicalObject);
+        ResultFrame result = applyPostProcessing(withComposites, canonicalObject);
         if (monitor) {
             long finished = System.nanoTime();
             long inputRows = 0;
@@ -78,28 +130,7 @@ public final class FrameMergeService {
         return result;
     }
 
-    TypedFrameAccumulator createAccumulator(ResultFrame schema, CanonicalQueryObject canonicalObject) {
-        List<String> dimensions = new ArrayList<>();
-        boolean timeSeries = canonicalObject.metadata().isTimeSeries();
-        if (timeSeries) dimensions.add(timeColumnName);
-        dimensions.addAll(dimensionColumns(schema, canonicalObject, timeSeries));
-        int step = timeSeries ? timeSeriesStep(canonicalObject) : fixedStepSeconds;
-        return new TypedFrameAccumulator(schema, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step);
-    }
-
-    ResultFrame finishMergedFrame(ResultFrame merged, CanonicalQueryObject canonicalObject) {
-        List<String> averages = averageAliases(canonicalObject);
-        // Cached AVG measures carry their own SUM/COUNT ingredients; the legacy SUM(col)/COUNT(col)
-        // folding would otherwise also consume a user's explicit SUM(col) and COUNT(col) columns.
-        ResultFrame reconstructed = averages.isEmpty()
-                ? reconstructAverages(merged, canonicalObject)
-                : SparkAverage.finish(merged, averages);
-        ResultFrame composites = reconstructCompositeAliases(reconstructed, canonicalObject);
-        return applyPostProcessing(composites, canonicalObject);
-    }
-
     // --- composite aliases (e.g. SUM(a) + SUM(b) AS total_bytes) ---------------------------------
-
 
     private static final Pattern COMPOSITE_TERM =
             Pattern.compile("\\s*([+-])?\\s*((?:SUM|COUNT|MIN|MAX|AVG)\\s*\\([^)]*\\)|[A-Za-z_][A-Za-z0-9_]*)",
@@ -136,7 +167,7 @@ public final class FrameMergeService {
             return frame;
         }
 
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(frame.rowCount());
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(frame.rowCount());
         for (String column : frame.columnNames()) {
             builder.column(column, frame.columnType(column));
         }
@@ -189,16 +220,13 @@ public final class FrameMergeService {
     }
 
     private String resolveColumn(String token, List<String> availableColumns) {
-        if (availableColumns.contains(token)) return token;
         String normalizedToken = token.replace("`", "").replace(" ", "").toLowerCase(Locale.ROOT);
-        String resolved = null;
         for (String column : availableColumns) {
             if (column.replace("`", "").replace(" ", "").toLowerCase(Locale.ROOT).equals(normalizedToken)) {
-                if (resolved != null) throw new IllegalArgumentException("Ambiguous result column: " + token);
-                resolved = column;
+                return column;
             }
         }
-        return resolved;
+        return null;
     }
 
     // --- time-series path -----------------------------------------------------------------------
@@ -212,8 +240,6 @@ public final class FrameMergeService {
     }
 
     private int timeSeriesStep(CanonicalQueryObject canonicalObject) {
-        // A raw GROUP BY ts is already at epoch-second granularity. Rounding it to the internal
-        // storage step merges distinct SQL groups and changes their timestamps and aggregates.
         return canonicalObject.metadata().preserveRawTimeSeries()
                 ? 1 : canonicalObject.userStepSeconds().orElse(fixedStepSeconds);
     }
@@ -231,25 +257,8 @@ public final class FrameMergeService {
         Map<String, AggregateFunction> functions = new LinkedHashMap<>(
                 AggregateFunctionResolver.fromAggregateSpecs(canonicalObject.metadata().aggregateSpecs()));
         canonicalObject.metadata().measureAggregates().forEach((column, function) ->
-                functions.put(normalizedName(column), function));
-        for (String alias : averageAliases(canonicalObject)) {
-            functions.put(normalizedName(AverageIngredients.sumColumn(alias)), AggregateFunction.SUM);
-            functions.put(normalizedName(AverageIngredients.countColumn(alias)), AggregateFunction.COUNT);
-            functions.put(normalizedName(AverageIngredients.typeColumn(alias)), AggregateFunction.MINIMUM);
-        }
+                functions.put(column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT), function));
         return functions;
-    }
-
-    private static List<String> averageAliases(CanonicalQueryObject canonicalObject) {
-        List<String> aliases = new ArrayList<>();
-        canonicalObject.metadata().measureAggregates().forEach((column, function) -> {
-            if (function == AggregateFunction.AVERAGE) aliases.add(column);
-        });
-        return aliases;
-    }
-
-    private static String normalizedName(String column) {
-        return column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT);
     }
 
     // --- AVG reconstruction (RC4) ----------------------------------------------------------------
@@ -289,7 +298,7 @@ public final class FrameMergeService {
         finalColumns.addAll(averageAliasToColumn.keySet());
         finalColumns.removeIf(sumCountColumnsToDrop::contains);
 
-        ResultFrameBuilder finalBuilder = ResultFrame.builder().expectedRows(frame.rowCount());
+        ResultFrameBuilder finalBuilder = new ResultFrameBuilder().expectedRows(frame.rowCount());
         for (String column : finalColumns) {
             ColumnType type = averageAliasToColumn.containsKey(column) ? ColumnType.DOUBLE : frame.columnType(column);
             finalBuilder.column(column, type);
@@ -338,11 +347,7 @@ public final class FrameMergeService {
                 throw new IllegalArgumentException("expression ordering requires direct execution");
             }
             String column = clause.column().get();
-            String resolved = frame.columnNames().contains(column) ? column : resolveColumn(column, frame.columnNames());
-            if (resolved == null) {
-                throw new IllegalArgumentException("ORDER BY column is absent from the result: " + column);
-            }
-            sortColumns[index] = frame.columnIndex(resolved);
+            sortColumns[index] = frame.columnNames().contains(column) ? frame.columnIndex(column) : -1;
         }
         IntBinaryOperator comparator = (left, right) -> {
             for (int index = 0; index < orderBy.size(); index++) {
@@ -357,8 +362,7 @@ public final class FrameMergeService {
                     compared = switch (frame.columnTypeAt(column)) {
                         case LONG -> Long.compare(frame.longAt(left, column), frame.longAt(right, column));
                         case DOUBLE -> Double.compare(frame.doubleAt(left, column), frame.doubleAt(right, column));
-                        case STRING -> TypedFrameAggregator.compareSparkStrings(
-                                frame.stringAt(left, column), frame.stringAt(right, column));
+                        case STRING -> TypedFrameAggregator.compareSparkStrings(frame.stringAt(left, column), frame.stringAt(right, column));
                         case DECIMAL -> ((java.math.BigDecimal) frame.valueAt(left, column))
                                 .compareTo((java.math.BigDecimal) frame.valueAt(right, column));
                     };
@@ -400,7 +404,7 @@ public final class FrameMergeService {
             if (!orderBy.isEmpty()) sortRows(rows, comparator);
         }
 
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(limit);
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(limit);
         for (String column : frame.columnNames()) {
             builder.column(column, frame.columnType(column));
         }
@@ -435,9 +439,9 @@ public final class FrameMergeService {
                                           boolean isTimeSeries) {
         List<String> dimensions = new ArrayList<>();
         for (String groupByColumn : canonicalObject.hashComponents().groupBy()) {
-            String resolved = resolveColumn(groupByColumn, frame.columnNames());
-            if (resolved != null && !(isTimeSeries && resolved.equalsIgnoreCase(timeColumnName))) {
-                dimensions.add(resolved);
+            if (frame.columnNames().contains(groupByColumn)
+                    && !(isTimeSeries && groupByColumn.equals(timeColumnName))) {
+                dimensions.add(groupByColumn);
             }
         }
         return dimensions;

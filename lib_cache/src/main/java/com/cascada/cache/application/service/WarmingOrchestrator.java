@@ -1,26 +1,24 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.result.PatternWarmingResult;
-
-import com.cascada.cache.application.result.WarmingReport;
-
+import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.QueryPopularityPort;
+import com.cascada.cache.application.result.PatternWarmingResult;
+import com.cascada.cache.application.result.WarmingReport;
+import com.cascada.cache.domain.time.TimeBucketCalculator;
+import com.cascada.cache.domain.warming.WarmingQueue;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeBucketCalculator;
 import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.warming.WarmingQueue;
+import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.identity.domain.QueryHash;
-
 import java.math.BigInteger;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -88,12 +86,10 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     }
 
     public WarmingOrchestrator(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
-                               GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
-                               QueryPopularityPort popularityTracker, CoverageIndexPort coverageIndex,
-                               long bucketSeconds, int topNQueries, int maximumPatterns) {
-        if (maximumPatterns < 1) {
-            throw new IllegalArgumentException("maximumPatterns must be positive");
-        }
+                              GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
+                              QueryPopularityPort popularityTracker, CoverageIndexPort coverageIndex,
+                              long bucketSeconds, int topNQueries, int maximumPatterns) {
+        if (maximumPatterns < 1) throw new IllegalArgumentException("maximumPatterns must be positive");
         this.maximumPatterns = maximumPatterns;
         this.cacheBackend = cacheBackend;
         this.sparkExecutor = sparkExecutor;
@@ -156,6 +152,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             int bucketsWarmed = 0;
             int bucketsSkipped = 0;
             for (Map.Entry<QueryHash, CanonicalQueryObject> entry : toWarm.entrySet()) {
+                QueryExecutionScope.current().ifPresent(cancellation -> cancellation.requireActive());
                 try {
                     PatternWarmingResult result = warmSinglePattern(entry.getKey(), entry.getValue(),
                             warmStartTimestampSeconds, warmEndTimestampSeconds, forceOverwrite);
@@ -220,6 +217,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         // not warmed; the read path computes it live as a gap, exactly as on any miss.
         long currentBucketStart = firstRepresentableBucketStart;
         while (true) {
+            QueryExecutionScope.current().ifPresent(cancellation -> cancellation.requireActive());
             long bucketEnd;
             try {
                 bucketEnd = Math.addExact(currentBucketStart, bucketSeconds - 1);
@@ -306,5 +304,6 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     public synchronized Set<QueryHash> knownQueryHashes() {
         return new LinkedHashSet<>(canonicalRegistry.keySet());
     }
+
 
 }

@@ -1,31 +1,34 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.execution.QueryCancellation;
+import com.cascada.cache.application.execution.QueryExecutionScope;
+import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CacheBackendPort;
-import com.cascada.cache.domain.admin.CacheSizeReport;
-import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.frame.ColumnType;
-import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.QueryHashGenerator;
-import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.cache.domain.time.TimeBucketCalculator;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.domain.hashing.QueryHashGenerator;
+import com.cascada.cache.domain.time.TimeBucketCalculator;
+import com.cascada.cache.domain.admin.CacheScope;
+import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.query.PostProcessing;
+import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.cache.domain.time.GapPlan;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.identity.domain.QueryHash;
-import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -35,6 +38,30 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * partial-hit merge, and the two direct-to-Spark fast paths.
  */
 class CacheExecutionEngineTest {
+
+    @Test
+    void cancellationDuringCachePresenceCannotLaunchAnAuthoritativeFallback() {
+        var cancellation = new QueryCancellation();
+        AtomicInteger sparkCalls = new AtomicInteger();
+        BucketCachePort backend = new BucketCachePort() {
+            @Override public List<Boolean> existsForKeys(List<String> keys) {
+                cancellation.cancel();
+                throw new java.util.concurrent.CancellationException("request cancelled during cache read");
+            }
+            @Override public List<Optional<ResultFrame>> multiGet(List<String> keys) { throw new AssertionError(); }
+            @Override public void store(String key, ResultFrame frame) { throw new AssertionError(); }
+        };
+        var engine = new CacheExecutionEngine(backend, sql -> {
+            sparkCalls.incrementAndGet();
+            return ResultFrame.empty();
+        }, (sql, gap) -> "GAP", CacheExecutionConfiguration.defaults());
+        try (var scope = new QueryExecutionScope(cancellation)) {
+            assertThatThrownBy(() -> engine.execute(globalAggregateOverThreeDays(),
+                    hashGenerator.generateQueryHash(globalAggregateOverThreeDays())))
+                    .isInstanceOf(java.util.concurrent.CancellationException.class);
+        }
+        assertThat(sparkCalls).hasValue(0);
+    }
 
     @Test
     void orderedStreamingVisitsAvoidBulkRetentionAndMalformedVisitsFallBack() {
@@ -441,5 +468,24 @@ class CacheExecutionEngineTest {
                 hashGenerator.generateQueryHash(canonical, 300));
 
         assertThat(((Number) result.rows().get(0).get("bytes")).doubleValue()).isEqualTo(14.0);
+    }
+    @Test
+    void propagatesRequestCancellationToTheParallelSparkGap() {
+        var canonical = timeSeriesOverThreeDays();
+        QueryHash queryHash = hashGenerator.generateQueryHash(canonical, 300);
+        var backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        backend.store(CacheKeyFactory.buildBucketKey(queryHash, 0, DAY), timeSeriesFrame(10));
+        var cancellation = new com.cascada.cache.application.execution.QueryCancellation();
+        AtomicInteger observed = new AtomicInteger();
+        QueryExecutorPort executor = sql -> {
+            assertThat(com.cascada.cache.application.execution.QueryExecutionScope.current()).contains(cancellation);
+            observed.incrementAndGet();
+            return timeSeriesFrame(20);
+        };
+        try (var scope = new com.cascada.cache.application.execution.QueryExecutionScope(cancellation)) {
+            new CacheExecutionEngine(backend, executor, (sql, gap) -> "GAP_SQL", CacheExecutionConfiguration.defaults())
+                    .execute(canonical, queryHash);
+        }
+        assertThat(observed.get()).isPositive();
     }
 }

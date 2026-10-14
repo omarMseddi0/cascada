@@ -1,22 +1,22 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.cube.CubeShapeCatalog;
+import com.cascada.cache.domain.time.TimeBucketCalculator;
 import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.cache.domain.time.DailyBuckets;
 import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeBucketCalculator;
+import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.identity.domain.QueryHash;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -101,6 +101,7 @@ public final class CacheExecutionEngine {
     }
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
+        requireActive();
         // Cube path (plan §8.12): only global aggregates with no deferred ORDER BY/LIMIT — a LIMIT
         // would register a truncated frame and a roll-up would not reapply the ordering. The lookup
         // is exact-time-window only, and every roll-up is verified before it is served.
@@ -139,13 +140,14 @@ public final class CacheExecutionEngine {
         // Fast path 1: nothing cacheable -> run the physical SQL directly.
         if (requiredKeys.isEmpty()) {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    sparkExecutor.execute(canonicalObject.physicalSql()));
+                    executeSql(canonicalObject.physicalSql()));
         }
 
         List<Boolean> presenceMask;
         try {
             presenceMask = resolvePresence(queryHash, bodyDays, requiredKeys);
         } catch (RuntimeException cacheFailure) {
+            propagateCancellation(cacheFailure);
             return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
         }
         List<String> cachedKeys = new ArrayList<>();
@@ -164,7 +166,7 @@ public final class CacheExecutionEngine {
         if (cachedKeys.isEmpty()) {
             if (!canonicalObject.metadata().isTimeSeries()) {
                 return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                        sparkExecutor.execute(canonicalObject.physicalSql()));
+                        executeSql(canonicalObject.physicalSql()));
             }
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
                     computeAndStoreColdBuckets(canonicalObject, queryHash, buckets, requiredKeys));
@@ -174,7 +176,7 @@ public final class CacheExecutionEngine {
 
         FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
         List<Long> vanishedDays = new ArrayList<>();
-        CompletableFuture<Void> cacheFuture = CompletableFuture.runAsync(() -> {
+        CompletableFuture<Void> cacheFuture = CompletableFuture.runAsync(QueryExecutionScope.propagate(() -> {
                 int[] delivered = {0};
                 cacheBackend.visitKeys(cachedKeys, (index, frame) -> {
                     if (index == null || index != delivered[0] || index >= cachedKeys.size() || frame == null) {
@@ -185,17 +187,18 @@ public final class CacheExecutionEngine {
                     else vanishedDays.add(cachedDays.get(index));
                 });
                 if (delivered[0] != cachedKeys.size()) throw new IllegalStateException("cache returned an invalid number of frames");
-            }, executor);
+            }), executor);
 
         CompletableFuture<ResultFrame> sparkFuture = gapPlan.hasGaps()
                 ? CompletableFuture.supplyAsync(
-                        () -> sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
-                                canonicalObject.physicalSql(), gapPlan)), executor)
+                        QueryExecutionScope.propagate(() -> executeSql(gapQueryRewriter.buildGapQuery(
+                                canonicalObject.physicalSql(), gapPlan))), executor)
                 : CompletableFuture.completedFuture(ResultFrame.empty());
 
         try {
             cacheFuture.join();
         } catch (RuntimeException cacheFailure) {
+            propagateCancellation(cacheFailure);
             // Prevent a queued gap task from starting after the authoritative fallback begins.
             // A running query is left untouched because the executor port has no cancellation contract.
             sparkFuture.cancel(false);
@@ -214,9 +217,9 @@ public final class CacheExecutionEngine {
         CompletableFuture<ResultFrame> vanishedFuture = vanishedDays.isEmpty()
                 ? CompletableFuture.completedFuture(ResultFrame.empty())
                 : CompletableFuture.supplyAsync(
-                        () -> sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
+                        QueryExecutionScope.propagate(() -> executeSql(gapQueryRewriter.buildGapQuery(
                                 canonicalObject.physicalSql(),
-                                new GapPlan(Optional.empty(), vanishedDays, Optional.empty()))), executor);
+                                new GapPlan(Optional.empty(), vanishedDays, Optional.empty())))), executor);
 
         ResultFrame sparkFrame = sparkFuture.join();
         if (gapPlan.hasGaps()) {
@@ -232,6 +235,7 @@ public final class CacheExecutionEngine {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
                     merge.finish());
         } catch (RuntimeException cacheOrMergeFailure) {
+            propagateCancellation(cacheOrMergeFailure);
             // A decoded but corrupt/incompatible cache frame must not make the query unavailable.
             // The full physical query is authoritative and avoids trusting any cache-derived data.
             return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
@@ -245,6 +249,7 @@ public final class CacheExecutionEngine {
             try {
                 cubeCatalog.register(canonicalObject.timeRange(), queryShape, answer);
             } catch (RuntimeException ignored) {
+                propagateCancellation(ignored);
                 // The cube is an optional accelerator; a catalog failure cannot invalidate a query result.
             }
         }
@@ -261,7 +266,7 @@ public final class CacheExecutionEngine {
         FrameMergeService.IncrementalMerge merge = frameMergeService.incremental(canonicalObject);
         for (int index = 0; index < buckets.body().size(); index++) {
             long bucketStart = buckets.body().get(index);
-            ResultFrame frame = sparkExecutor.execute(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
+            ResultFrame frame = executeSql(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
                     new GapPlan(Optional.empty(), List.of(bucketStart), Optional.empty())));
             try {
                 cacheBackend.store(keys.get(index), frame);
@@ -269,22 +274,24 @@ public final class CacheExecutionEngine {
                     coverageIndex.markCached(queryHash, configuration.bucketSeconds(), bucketStart);
                 }
             } catch (RuntimeException ignored) {
+                propagateCancellation(ignored);
                 // Cache storage is best-effort. Keep the freshly computed authoritative frame below.
             }
             merge.add(frame);
         }
         GapPlan boundaries = new GapPlan(buckets.head(), List.of(), buckets.tail());
         if (boundaries.hasGaps()) {
-            ResultFrame boundaryFrame = sparkExecutor.execute(gapQueryRewriter.buildGapQuery(
+            ResultFrame boundaryFrame = executeSql(gapQueryRewriter.buildGapQuery(
                     canonicalObject.physicalSql(), boundaries));
             merge.add(boundaryFrame);
         }
         try {
             return merge.finish();
         } catch (RuntimeException mergeFailure) {
+            propagateCancellation(mergeFailure);
             // Only the cache-derived merge is retried. Spark failures above propagate directly, while
             // an incompatible/corrupt cache ingredient falls back to one authoritative full query.
-            return sparkExecutor.execute(canonicalObject.physicalSql());
+            return executeSql(canonicalObject.physicalSql());
         }
     }
 
@@ -305,6 +312,7 @@ public final class CacheExecutionEngine {
                     }
                 }
             } catch (RuntimeException ignored) {
+                propagateCancellation(ignored);
                 // The index is advisory. A failed/corrupt index falls through to backend EXISTS.
             }
         }
@@ -318,7 +326,30 @@ public final class CacheExecutionEngine {
     private ResultFrame executeAuthoritatively(boolean cubeEligible, CanonicalQueryObject canonicalObject,
                                                QueryShape queryShape) {
         return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                sparkExecutor.execute(canonicalObject.physicalSql()));
+                executeSql(canonicalObject.physicalSql()));
+    }
+
+    private ResultFrame executeSql(String sql) {
+        requireActive();
+        return sparkExecutor.execute(sql);
+    }
+
+    private static void requireActive() {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new java.util.concurrent.CancellationException("Query was interrupted");
+        }
+        QueryExecutionScope.current().ifPresent(com.cascada.cache.application.execution.QueryCancellation::requireActive);
+    }
+
+    private static void propagateCancellation(RuntimeException failure) {
+        requireActive();
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.util.concurrent.CancellationException cancelled) throw cancelled;
+            if (cause instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                throw new java.util.concurrent.CancellationException("Query was interrupted");
+            }
+        }
     }
 
 }

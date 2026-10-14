@@ -1,5 +1,7 @@
 package com.cascada.app.adapter.in.cli;
 
+import com.cascada.cache.application.result.QueryResult;
+
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
@@ -64,7 +66,7 @@ public final class CascadaCli {
     }
 
     private void runQuery(String[] args) {
-        ExecuteCachedQueryUseCase.Result result = executeLogicalQuery.query(args[1]);
+        QueryResult result = executeLogicalQuery.query(args[1]);
         // Report whether this result used the cache execution path.
         System.out.println("served through cache: " + result.servedThroughCache());
         printFrame(result.frame());

@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.result.QueryResult;
+
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
@@ -79,7 +81,7 @@ class ExecuteCachedQueryServiceTest {
             return frame();
         };
 
-        ExecuteCachedQueryService.Result result = useCase(alwaysBypass, spark).execute(canonical());
+        QueryResult result = useCase(alwaysBypass, spark).execute(canonical());
 
         assertThat(result.servedThroughCache()).isFalse();
         assertThat(seenSql.toString()).isEqualTo("FULL_SQL");
@@ -95,7 +97,7 @@ class ExecuteCachedQueryServiceTest {
             return frame();
         };
 
-        ExecuteCachedQueryService.Result result = useCase(neverBypass, spark).execute(canonical());
+        QueryResult result = useCase(neverBypass, spark).execute(canonical());
 
         assertThat(result.servedThroughCache()).isTrue();
         assertThat(sparkCalls.get()).isEqualTo(1); // zero cached buckets -> engine's direct fast path
@@ -121,7 +123,7 @@ class ExecuteCachedQueryServiceTest {
         ExecuteCachedQueryService service = new ExecuteCachedQueryService(neverBypass,
                 CacheConfiguration.defaults(), new QueryHashGenerator(), engine, spark, unavailableWarmer);
 
-        ExecuteCachedQueryService.Result result = service.execute(canonical());
+        QueryResult result = service.execute(canonical());
 
         assertThat(result.servedThroughCache()).isTrue();
         assertThat(result.frame().rowCount()).isEqualTo(1);

@@ -1,5 +1,7 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.cache.application.result.QueryResult;
+
 import com.cascada.app.config.EngineSettings;
 
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
@@ -85,7 +87,7 @@ class CascadaEngineFactoryTest {
 
     @Test
     void returnsTheExecutorResultThroughTheFullPipeline() {
-        ExecuteCachedQueryUseCase.Result result = factory.executeLogicalQueryUseCase().query(LOGICAL_SQL);
+        QueryResult result = factory.executeLogicalQueryUseCase().query(LOGICAL_SQL);
 
         assertThat(result.frame().columnNames()).contains("appName", "total_bytes");
         Map<String, Double> totalByApp = new HashMap<>();
@@ -116,7 +118,7 @@ class CascadaEngineFactoryTest {
     void anEmptyCacheStillAnswersCorrectlyByBypassingToTheExecutor() {
         // Cold start is the case most likely to be broken by a wiring mistake: no buckets exist, so the
         // engine must fall through to the executor rather than returning an empty frame.
-        ExecuteCachedQueryUseCase.Result result = factory.executeLogicalQueryUseCase().query(LOGICAL_SQL);
+        QueryResult result = factory.executeLogicalQueryUseCase().query(LOGICAL_SQL);
         assertThat(result.frame().rowCount()).isEqualTo(2);
     }
 
@@ -126,7 +128,7 @@ class CascadaEngineFactoryTest {
                 new com.cascada.cache.application.config.CacheExecutionConfiguration(86_400, 300, "event_time"),
                 "redis://unused:6379", "traffic", "/tmp/traffic", true, 10);
         try (CascadaEngineFactory configured = new CascadaEngineFactory(settings, executor)) {
-            ExecuteCachedQueryUseCase.Result result = configured.executeLogicalQueryUseCase().query(
+            QueryResult result = configured.executeLogicalQueryUseCase().query(
                     "SELECT SUM(bytes) AS total_bytes FROM traffic WHERE event_time >= 0 AND event_time <= 86399");
             assertThat(result.servedThroughCache()).isTrue();
         }

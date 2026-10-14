@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.result.QueryResult;
+
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.domain.safety.CacheDecision;
@@ -51,10 +53,10 @@ public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCas
     }
 
     @Override
-    public Result execute(CanonicalQueryObject canonicalObject) {
+    public QueryResult execute(CanonicalQueryObject canonicalObject) {
         CacheDecision decision = safetyRuleRegistry.evaluate(canonicalObject, cacheConfiguration);
         if (decision.isBypass()) {
-            return new Result(sparkExecutor.execute(canonicalObject.physicalSql()), false);
+            return new QueryResult(sparkExecutor.execute(canonicalObject.physicalSql()), false);
         }
         QueryHash queryHash =
                 queryHashGenerator.generateQueryHash(canonicalObject, cacheConfiguration.fixedStepSeconds());
@@ -67,7 +69,7 @@ public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCas
                         + observationFailure.getClass().getSimpleName() + ")");
             }
         }
-        return new Result(cacheExecutionEngine.execute(canonicalObject, queryHash), true);
+        return new QueryResult(cacheExecutionEngine.execute(canonicalObject, queryHash), true);
     }
 
 }

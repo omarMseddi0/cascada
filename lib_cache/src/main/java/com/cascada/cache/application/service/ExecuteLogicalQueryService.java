@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.result.QueryResult;
+
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
@@ -29,13 +31,13 @@ public final class ExecuteLogicalQueryService implements ExecuteLogicalQueryUseC
     }
 
     @Override
-    public ExecuteCachedQueryUseCase.Result query(String logicalSql) {
+    public QueryResult query(String logicalSql) {
         String physicalSql = translator.translateToPhysicalSql(logicalSql);
         CanonicalQueryObject canonicalObject;
         try {
             canonicalObject = canonicalizer.canonicalize(physicalSql);
         } catch (UncacheableQueryException unsupported) {
-            return new ExecuteCachedQueryUseCase.Result(executor.execute(physicalSql), false);
+            return new QueryResult(executor.execute(physicalSql), false);
         }
         return executeCachedQuery.execute(canonicalObject);
     }

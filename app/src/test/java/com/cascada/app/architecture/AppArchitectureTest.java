@@ -18,7 +18,7 @@ class AppArchitectureTest {
         noClasses().that().resideInAPackage("com.cascada.app.adapter.in..")
                 .should().dependOnClassesThat().resideOutsideOfPackages(
                         "java..", "com.cascada.app.adapter.in..",
-                        "com.cascada.cache.application.port.in..", "com.cascada.cache.domain..")
+                        "com.cascada.cache.application.port.in..", "com.cascada.cache.application.result..", "com.cascada.cache.domain..")
                 .check(CLASSES);
     }
 

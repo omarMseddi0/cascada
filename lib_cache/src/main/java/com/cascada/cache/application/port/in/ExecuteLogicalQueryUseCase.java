@@ -1,5 +1,7 @@
 package com.cascada.cache.application.port.in;
 
+import com.cascada.cache.application.result.QueryResult;
+
 /**
  * <b>Primary (driving) port</b> — "answer this query, written the way the customer thinks about their
  * data".
@@ -27,5 +29,5 @@ public interface ExecuteLogicalQueryUseCase {
      * @throws RuntimeException when the SQL cannot be translated or canonicalised — the caller decides
      *     whether to surface the error or fall back to submitting the SQL directly
      */
-    ExecuteCachedQueryUseCase.Result query(String logicalSql);
+    QueryResult query(String logicalSql);
 }

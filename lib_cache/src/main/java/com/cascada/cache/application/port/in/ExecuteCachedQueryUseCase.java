@@ -1,7 +1,7 @@
 package com.cascada.cache.application.port.in;
 
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.application.result.QueryResult;
 
 /**
  * <b>Primary (driving) port</b> — "answer this query, using the cache when it is safe to".
@@ -24,13 +24,6 @@ public interface ExecuteCachedQueryUseCase {
      * @param canonicalObject the deterministic description of query intent
      * @return the result frame plus whether it was served through the cache path
      */
-    Result execute(CanonicalQueryObject canonicalObject);
+    QueryResult execute(CanonicalQueryObject canonicalObject);
 
-    /**
-     * The answer plus how it was obtained. {@code servedThroughCache == false} means a safety
-     * guardrail forced a bypass and the physical SQL ran directly against the executor — the answer is
-     * still correct, it just cost a full scan.
-     */
-    record Result(ResultFrame frame, boolean servedThroughCache) {
-    }
 }

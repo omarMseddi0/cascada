@@ -1,5 +1,7 @@
 package com.cascada.cache.application.port.out;
 
+import com.cascada.cache.exception.CacheSerializationException;
+
 import com.cascada.cache.domain.frame.ResultFrame;
 
 /**
@@ -17,10 +19,4 @@ public interface CacheValueSerializerPort {
 
     ResultFrame deserialize(byte[] blob);
 
-    /** Thrown when a blob cannot be decompressed or decoded (the data is corrupt). */
-    class CacheSerializationException extends RuntimeException {
-        public CacheSerializationException(String message, Throwable cause) {
-            super(message, cause);
-        }
-    }
 }

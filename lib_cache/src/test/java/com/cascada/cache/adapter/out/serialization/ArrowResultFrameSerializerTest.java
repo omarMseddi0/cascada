@@ -1,5 +1,7 @@
 package com.cascada.cache.adapter.out.serialization;
 
+import com.cascada.cache.exception.CacheSerializationException;
+
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
@@ -147,6 +149,6 @@ class ArrowResultFrameSerializerTest {
         byte[] blob = arrow.serialize(sampleFrame());
         blob[blob.length - 1] ^= 0x7F; // flip bits in the compressed body
         assertThatThrownBy(() -> arrow.deserialize(blob))
-                .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
+                .isInstanceOf(CacheSerializationException.class);
     }
 }

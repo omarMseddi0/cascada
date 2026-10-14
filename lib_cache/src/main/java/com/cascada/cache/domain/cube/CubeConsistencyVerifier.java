@@ -1,5 +1,7 @@
 package com.cascada.cache.domain.cube;
 
+import com.cascada.cache.exception.CubeRollUpUnavailableException;
+
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.merge.AggregateFunction;

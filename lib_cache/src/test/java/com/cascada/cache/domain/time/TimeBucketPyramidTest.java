@@ -1,5 +1,7 @@
 package com.cascada.cache.domain.time;
 
+import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
+
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.TimeSeriesBucketResampler;
 import com.cascada.cache.domain.merge.TimeSeriesBucketResampler.TimeSeriesRow;

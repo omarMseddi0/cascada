@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.time;
+package com.cascada.cache.exception;
 
 /** Raised before a request materializes or visits more buckets than the configured hard ceiling. */
 public final class BucketEnumerationLimitExceededException extends IllegalArgumentException {

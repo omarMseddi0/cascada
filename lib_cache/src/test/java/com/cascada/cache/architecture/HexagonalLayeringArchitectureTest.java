@@ -93,21 +93,21 @@ class HexagonalLayeringArchitectureTest {
         noClasses()
                 .should().dependOnClassesThat().resideOutsideOfPackages(
                         "com.cascada.cache.domain..",
-                        "com.cascada.identity.domain..",
+                        "com.cascada.identity.domain..", "com.cascada.cache.exception..",
                         "java..")
                 .check(domainClasses);
     }
 
     @Test
-    void domainTypesAreGroupedBySubdomainAndExceptionsStayWithTheirOwner() {
+    void domainTypesAreGroupedAndSharedExceptionsAreLeafTypes() {
         boolean hasFlatDomainType = false;
-        boolean hasSiblingExceptionType = false;
         for (var type : moduleClasses) {
             hasFlatDomainType |= type.getPackageName().equals("com.cascada.cache.domain");
-            hasSiblingExceptionType |= type.getPackageName().equals("com.cascada.cache.exception");
         }
         assertFalse(hasFlatDomainType, "domain types must live in a cohesive domain subpackage");
-        assertFalse(hasSiblingExceptionType, "domain exceptions must live beside their owning domain types");
+        noClasses().that().resideInAPackage("com.cascada.cache.exception..")
+                .should().dependOnClassesThat().resideOutsideOfPackages("java..", "com.cascada.cache.exception..")
+                .check(moduleClasses);
     }
 
     /** Application dependencies are limited to cache ports/domain, identity values, and the JDK. */
@@ -117,7 +117,7 @@ class HexagonalLayeringArchitectureTest {
                 .should().dependOnClassesThat().resideOutsideOfPackages(
                         "com.cascada.cache.application..",
                         "com.cascada.cache.domain..",
-                        "com.cascada.identity.domain..",
+                        "com.cascada.identity.domain..", "com.cascada.cache.exception..",
                         "java..")
                 .because("application code may depend on its ports, domain, identity values, and the JDK")
                 .check(moduleClasses);

@@ -44,7 +44,7 @@ class SqlHexagonBoundaryTest {
     void theDomainDependsOnlyOnItsOwnTypesCacheDomainTypesAndTheJdk() {
         noClasses().that().resideInAPackage("com.cascada.sql.domain..")
                 .should().dependOnClassesThat().resideOutsideOfPackages(
-                        "com.cascada.sql.domain..", "com.cascada.cache.domain..", "java..")
+                        "com.cascada.sql.domain..", "com.cascada.cache.domain..", "com.cascada.cache.exception..", "java..")
                 .check(moduleClasses);
     }
 

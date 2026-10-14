@@ -8,7 +8,7 @@ import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.UncacheableQueryException;
+import com.cascada.cache.exception.UncacheableQueryException;
 
 import java.util.Objects;
 

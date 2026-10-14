@@ -1,5 +1,7 @@
 package com.cascada.cache.adapter.out.serialization;
 
+import com.cascada.cache.exception.CacheSerializationException;
+
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
@@ -67,7 +69,7 @@ class PortableFrameSerializerTest {
     @Test
     void corruptBlobRaisesSerializationException() {
         assertThatThrownBy(() -> serializer.deserialize(new byte[]{0, 0, 0, 8, 1, 2, 3}))
-                .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
+                .isInstanceOf(CacheSerializationException.class);
     }
 
     @Test
@@ -100,9 +102,9 @@ class PortableFrameSerializerTest {
         byte[] blob = serializer.serialize(sampleFrame());
         ByteBuffer.wrap(blob).putInt(Integer.MAX_VALUE);
         assertThatThrownBy(() -> serializer.deserialize(blob))
-                .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
+                .isInstanceOf(CacheSerializationException.class);
         assertThatThrownBy(() -> new ArrowResultFrameSerializer().deserialize(blob))
-                .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
+                .isInstanceOf(CacheSerializationException.class);
     }
 
     @Test
@@ -163,7 +165,7 @@ class PortableFrameSerializerTest {
         for (byte[] corrupted : corruptions) {
             byte[] blob = ZstdFrameEnvelope.compress(corrupted,corrupted.length,3);
             assertThatThrownBy(() -> serializer.deserialize(blob))
-                    .isInstanceOf(CacheValueSerializerPort.CacheSerializationException.class);
+                    .isInstanceOf(CacheSerializationException.class);
         }
     }
 

@@ -1,5 +1,7 @@
 package com.cascada.cache.adapter.out.serialization;
 
+import com.cascada.cache.exception.CacheSerializationException;
+
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.FrameColumnReader;

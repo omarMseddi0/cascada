@@ -1,5 +1,7 @@
 package com.cascada.cache.domain.time;
 
+import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
+
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;

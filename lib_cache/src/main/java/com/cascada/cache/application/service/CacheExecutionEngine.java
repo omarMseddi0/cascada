@@ -11,7 +11,7 @@ import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.time.BucketEnumerationLimitExceededException;
+import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.cache.domain.time.DailyBuckets;
 import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.time.TimeBucketCalculator;

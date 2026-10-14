@@ -7,7 +7,7 @@ package com.cascada.sql.domain;
  * <p>Anything unparseable or unsupported <b>bypasses to Spark</b> rather than being silently
  * accepted. Callers translate this exception into a cache bypass.
  */
-public class UnsupportedSqlException extends com.cascada.cache.domain.query.UncacheableQueryException {
+public class UnsupportedSqlException extends com.cascada.cache.exception.UncacheableQueryException {
 
     public UnsupportedSqlException(String message) {
         super(message);

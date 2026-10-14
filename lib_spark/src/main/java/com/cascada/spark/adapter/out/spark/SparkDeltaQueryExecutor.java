@@ -25,6 +25,7 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
     private final SparkSession sparkSession;
     private final boolean ownsSession;
     private final SparkResultFrameMapper resultFrameMapper;
+    private final ParallelResultCollector resultCollector = new ParallelResultCollector();
 
     /** Build (or get) a SparkSession from the resolved config — the single place a session is created. */
     public SparkDeltaQueryExecutor(SparkSessionConfig config) {
@@ -94,8 +95,10 @@ public final class SparkDeltaQueryExecutor implements QueryExecutorPort, AutoClo
 
     /** Map a Spark result into a {@link ResultFrame}; visible for the cluster integration test. */
     ResultFrame toResultFrame(Dataset<Row> dataset) {
-        // toLocalIterator streams through the result; Spark may materialize its largest partition.
-        return resultFrameMapper.map(dataset.schema(), dataset.toLocalIterator());
+        // Parallel collection by default; toLocalIterator streams one partition per job when the
+        // serialized result is larger than spark.driver.maxResultSize.
+        return resultFrameMapper.map(dataset.schema(),
+                resultCollector.collect(dataset).orElseGet(dataset::toLocalIterator));
     }
 
     @Override

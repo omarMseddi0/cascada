@@ -20,8 +20,6 @@ import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.identity.domain.QueryHash;
 import java.math.BigInteger;
-import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -56,9 +54,6 @@ import java.util.logging.Logger;
 public final class WarmingOrchestrator implements WarmCacheUseCase {
 
     private static final Logger LOGGER = Logger.getLogger(WarmingOrchestrator.class.getName());
-
-    /** Complete buckets computed by one warming Spark job; bounds the rows held at once. */
-    static final int BUCKETS_PER_WARMING_QUERY = 32;
 
     private final BucketCachePort cacheBackend;
     private final QueryExecutorPort sparkExecutor;
@@ -202,13 +197,27 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         }
         long firstRepresentableBucketStart = firstBucketStart.longValueExact();
         ensureWarmWindowWithinLimit(firstRepresentableBucketStart, warmEndTimestampSeconds);
+        int bucketsWarmed = 0;
+        int bucketsSkipped = 0;
+
+        // Never re-warm what is already cached: one coverage-bitmap load answers presence for the
+        // whole lookback window (plan J.1) instead of one EXISTS round-trip per bucket — a 55-day
+        // window steady-state costs one fetch and warms only the missing buckets. No bitmap (or
+        // forceOverwrite) falls back to the per-bucket EXISTS check. A stale present-bit can only
+        // skip a warm, never corrupt data: the read path's vanished-bucket guard recomputes that
+        // bucket live as a gap.
+        Optional<BucketCoverageBitmap> coverage = (coverageIndex != null && !forceOverwrite)
+                ? coverageIndex.load(queryHash, bucketSeconds)
+                : Optional.empty();
+
         // README caveat 1: warm only COMPLETE buckets. The bucket key claims the FULL window
         // [bucketStart, bucketStart + bucketSeconds - 1]; storing a frame truncated at warmEnd under
-        // that key would permanently undercount. The trailing partial bucket is simply not warmed;
-        // the read path computes it live as a gap, exactly as on any miss.
-        List<Long> completeBuckets = new ArrayList<>();
+        // that key would permanently undercount — the EXISTS-skip then sees the bucket as present and
+        // never recomputes it, so the hole can never self-heal. The trailing partial bucket is simply
+        // not warmed; the read path computes it live as a gap, exactly as on any miss.
         long currentBucketStart = firstRepresentableBucketStart;
         while (true) {
+            QueryExecutionScope.current().ifPresent(cancellation -> cancellation.requireActive());
             long bucketEnd;
             try {
                 bucketEnd = Math.addExact(currentBucketStart, bucketSeconds - 1);
@@ -218,102 +227,52 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             if (bucketEnd > warmEndTimestampSeconds) {
                 break;
             }
-            completeBuckets.add(currentBucketStart);
+            String key = CacheKeyFactory.buildBucketKey(queryHash, currentBucketStart, bucketSeconds);
+
+            boolean alreadyWarmed;
+            if (forceOverwrite) {
+                alreadyWarmed = false;
+            } else if (coverage.isPresent()) {
+                alreadyWarmed = coverage.get().isCovered(currentBucketStart) && isAlreadyWarmed(key);
+                if (!alreadyWarmed) {
+                    coverageIndex.markEvicted(queryHash, bucketSeconds, currentBucketStart);
+                }
+            } else {
+                alreadyWarmed = isAlreadyWarmed(key);
+            }
+            if (alreadyWarmed) {
+                bucketsSkipped++;
+                try {
+                    currentBucketStart = Math.addExact(currentBucketStart, bucketSeconds);
+                } catch (ArithmeticException outsideLongDomain) {
+                    break;
+                }
+                continue;
+            }
+
+            String bucketSql = gapQueryRewriter.buildGapQuery(
+                    canonicalObject.physicalSql(),
+                    new GapPlan(Optional.empty(), List.of(), Optional.of(new TimeRange(currentBucketStart, bucketEnd))));
+            // Cache empty results too (Python caches an empty frame to avoid re-querying).
+            ResultFrame frame = sparkExecutor.execute(bucketSql);
+            cacheBackend.store(key, frame);
+            if (coverageIndex != null) {
+                coverageIndex.markCached(queryHash, bucketSeconds, currentBucketStart);
+            }
+            bucketsWarmed++;
+
             try {
                 currentBucketStart = Math.addExact(currentBucketStart, bucketSeconds);
             } catch (ArithmeticException outsideLongDomain) {
                 break;
             }
         }
-
-        List<Long> missingBuckets = missingBuckets(queryHash, completeBuckets, forceOverwrite);
-        int bucketsWarmed = 0;
-        for (int from = 0; from < missingBuckets.size(); from += BUCKETS_PER_WARMING_QUERY) {
-            QueryExecutionScope.current().ifPresent(cancellation -> cancellation.requireActive());
-            List<Long> chunk = missingBuckets.subList(from,
-                    Math.min(missingBuckets.size(), from + BUCKETS_PER_WARMING_QUERY));
-            bucketsWarmed += warmBuckets(queryHash, canonicalObject, chunk);
-        }
-        return new PatternWarmingResult(bucketsWarmed, completeBuckets.size() - missingBuckets.size());
+        return new PatternWarmingResult(bucketsWarmed, bucketsSkipped);
     }
 
-    /**
-     * Never re-warm what is already cached. Presence for the whole lookback window costs one
-     * pipelined EXISTS round trip; with a coverage bitmap only the buckets it marks as covered are
-     * checked, and a covered-but-absent bucket has its stale bit cleared. A stale present-bit can only
-     * skip a warm, never corrupt data: the read path's vanished-bucket guard recomputes that bucket.
-     */
-    private List<Long> missingBuckets(QueryHash queryHash, List<Long> completeBuckets, boolean forceOverwrite) {
-        if (forceOverwrite || completeBuckets.isEmpty()) {
-            return completeBuckets;
-        }
-        Optional<BucketCoverageBitmap> coverage = coverageIndex != null
-                ? coverageIndex.load(queryHash, bucketSeconds)
-                : Optional.empty();
-        List<Long> candidates = coverage.isPresent()
-                ? completeBuckets.stream().filter(coverage.get()::isCovered).toList()
-                : completeBuckets;
-        List<String> keys = candidates.stream()
-                .map(bucketStart -> CacheKeyFactory.buildBucketKey(queryHash, bucketStart, bucketSeconds)).toList();
-        List<Boolean> present = keys.isEmpty() ? List.of() : cacheBackend.existsForKeys(keys);
-        if (present == null || present.size() != keys.size()) {
-            throw new IllegalStateException("cache returned an invalid presence mask");
-        }
-        Set<Long> cached = new HashSet<>();
-        for (int index = 0; index < candidates.size(); index++) {
-            if (Boolean.TRUE.equals(present.get(index))) {
-                cached.add(candidates.get(index));
-            } else if (coverage.isPresent()) {
-                coverageIndex.markEvicted(queryHash, bucketSeconds, candidates.get(index));
-            }
-        }
-        return completeBuckets.stream().filter(bucketStart -> !cached.contains(bucketStart)).toList();
-    }
-
-    /**
-     * Computes and stores a run of complete buckets. A bucket-labelled query computes the whole run in
-     * one Spark job; each bucket's split frame is exactly what its own gap query would return. A global
-     * aggregate over an empty bucket still yields one SQL row, so that bucket gets its own query.
-     */
-    private int warmBuckets(QueryHash queryHash, CanonicalQueryObject canonicalObject, List<Long> bucketStarts) {
-        Optional<String> labelledSql = gapQueryRewriter.buildBucketedGapQuery(canonicalObject.physicalSql(),
-                new GapPlan(Optional.empty(), bucketStarts, Optional.empty()), CacheExecutionEngine.BUCKET_COLUMN);
-        if (labelledSql.isEmpty()) {
-            for (long bucketStart : bucketStarts) {
-                storeBucket(queryHash, bucketStart, computeBucket(canonicalObject, bucketStart));
-            }
-            return bucketStarts.size();
-        }
-        BucketSplit split = BucketSplit.of(sparkExecutor.execute(labelledSql.get()), CacheExecutionEngine.BUCKET_COLUMN);
-        Set<Long> requested = new HashSet<>(bucketStarts);
-        for (long bucketStart : split.bucketStarts()) {
-            if (!requested.contains(bucketStart)) {
-                throw new IllegalStateException("warming query returned rows for unrequested bucket " + bucketStart);
-            }
-        }
-        boolean global = canonicalObject.hashComponents().groupBy().isEmpty();
-        for (long bucketStart : bucketStarts) {
-            // Cache empty results too (Python caches an empty frame to avoid re-querying).
-            ResultFrame frame = global && !split.hasRowsFor(bucketStart)
-                    ? computeBucket(canonicalObject, bucketStart)
-                    : split.frameFor(bucketStart);
-            storeBucket(queryHash, bucketStart, frame);
-        }
-        return bucketStarts.size();
-    }
-
-    private ResultFrame computeBucket(CanonicalQueryObject canonicalObject, long bucketStart) {
-        QueryExecutionScope.current().ifPresent(cancellation -> cancellation.requireActive());
-        String bucketSql = gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(), new GapPlan(
-                Optional.empty(), List.of(), Optional.of(new TimeRange(bucketStart, bucketStart + bucketSeconds - 1))));
-        return sparkExecutor.execute(bucketSql);
-    }
-
-    private void storeBucket(QueryHash queryHash, long bucketStart, ResultFrame frame) {
-        cacheBackend.store(CacheKeyFactory.buildBucketKey(queryHash, bucketStart, bucketSeconds), frame);
-        if (coverageIndex != null) {
-            coverageIndex.markCached(queryHash, bucketSeconds, bucketStart);
-        }
+    private boolean isAlreadyWarmed(String key) {
+        List<Boolean> presence = cacheBackend.existsForKeys(List.of(key));
+        return !presence.isEmpty() && Boolean.TRUE.equals(presence.get(0));
     }
 
     private void ensureWarmWindowWithinLimit(long startSeconds, long endSeconds) {

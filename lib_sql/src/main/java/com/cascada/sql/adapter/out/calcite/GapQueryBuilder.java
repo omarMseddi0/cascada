@@ -6,11 +6,8 @@ import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.time.TimeRange;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
-import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
@@ -95,35 +92,7 @@ public final class GapQueryBuilder {
         if (gapRanges.isEmpty()) {
             return originalSql;
         }
-        return CalciteSql.unparse(rewriteGap(originalSql, gapRanges));
-    }
 
-    /**
-     * The gap query grouped additionally by bucket, projecting each row's epoch-aligned bucket start
-     * as {@code bucketColumn}. Rows with one label are exactly the rows the per-bucket gap query
-     * returns. Empty for non-flat queries or when {@code bucketColumn} would shadow an output name.
-     */
-    public Optional<String> buildBucketedGapQuery(String originalSql, GapPlan gapPlan, String bucketColumn) {
-        List<TimeRange> gapRanges = mergeConsecutiveGaps(gapPlan);
-        if (gapRanges.isEmpty()) {
-            return Optional.empty();
-        }
-        SqlNode root = rewriteGap(originalSql, gapRanges);
-        if (!(root instanceof SqlSelect select) || outputNames(select).contains(bucketColumn.toLowerCase(Locale.ROOT))) {
-            return Optional.empty();
-        }
-        String column = quotedTimeColumn();
-        SqlNode bucketStart = CalciteSql.parseExpression("CAST(" + column + " - PMOD(" + column + ", "
-                + bucketSeconds + ") AS BIGINT)");
-        select.getSelectList().add(SqlStdOperatorTable.AS.createCall(SqlParserPos.ZERO, bucketStart,
-                new SqlIdentifier(bucketColumn, SqlParserPos.ZERO)));
-        SqlNodeList group = select.getGroup() == null ? new SqlNodeList(SqlParserPos.ZERO) : select.getGroup();
-        group.add(bucketStart.clone(SqlParserPos.ZERO));
-        select.setGroupBy(group);
-        return Optional.of(CalciteSql.unparse(select));
-    }
-
-    private SqlNode rewriteGap(String originalSql, List<TimeRange> gapRanges) {
         SqlNode parsed = CalciteSql.parseQuery(originalSql);
         // Drop ORDER BY / LIMIT from the gap fetch (Python removes exp.Order / exp.Limit).
         SqlNode root = parsed instanceof SqlOrderBy orderBy ? orderBy.query : parsed;
@@ -143,23 +112,8 @@ public final class GapQueryBuilder {
         } else {
             injectGapIntoInnerWhere(root, gapCondition);
         }
-        return root;
-    }
 
-    private Set<String> outputNames(SqlSelect select) {
-        Set<String> names = new HashSet<>();
-        for (SqlNode item : select.getSelectList()) {
-            if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall alias) {
-                names.add(CalciteSql.unparse(alias.operand(1)).replace("`", "").toLowerCase(Locale.ROOT));
-            } else if (item instanceof SqlIdentifier identifier) {
-                names.add(identifier.names.get(identifier.names.size() - 1).toLowerCase(Locale.ROOT));
-            }
-        }
-        return names;
-    }
-
-    private String quotedTimeColumn() {
-        return timeColumn.matches("[A-Za-z_][A-Za-z0-9_]*") ? timeColumn : "`" + timeColumn.replace("`", "``") + "`";
+        return CalciteSql.unparse(root);
     }
 
     /**

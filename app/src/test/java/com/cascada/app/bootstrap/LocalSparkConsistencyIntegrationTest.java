@@ -557,7 +557,7 @@ class LocalSparkConsistencyIntegrationTest {
                     new com.cascada.cache.adapter.out.tracking.QueryPopularityTracker(), h.coverage, DAY, 10);
             var first = warmer.warmSinglePattern(hash, canonical, BASE + 123, BASE + 3 * DAY + 177, false);
             assertThat(first.bucketsWarmed()).isEqualTo(3);
-            assertThat(h.executed).as("one bucket-labelled Spark job warms all three buckets").hasSize(1);
+            assertThat(h.executed).hasSize(3);
             assertThat(h.cache.existsForKeys(List.of(CacheKeyFactory.buildBucketKey(hash, BASE + 3 * DAY, DAY))))
                     .containsExactly(false);
             String request = observed.replace(Long.toString(BASE + DAY), Long.toString(BASE))
@@ -571,7 +571,7 @@ class LocalSparkConsistencyIntegrationTest {
             assertThat(h.executed).isEmpty();
             var forced = warmer.warmSinglePattern(hash, canonical, BASE + 123, BASE + 3 * DAY + 177, true);
             assertThat(forced.bucketsWarmed()).isEqualTo(3);
-            assertThat(h.executed).hasSize(1);
+            assertThat(h.executed).hasSize(3);
             System.out.println("CONSISTENCY_PASS real-Spark-warming " + timeSeries);
         }));
     }

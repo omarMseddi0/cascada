@@ -2,7 +2,6 @@ package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.domain.time.GapPlan;
-import java.util.Optional;
 
 /**
  * Adapts the Apache Calcite-based {@link GapQueryBuilder} to the cache's {@link GapQueryRewriterPort}, so
@@ -20,10 +19,5 @@ public final class GapQueryRewriterAdapter implements GapQueryRewriterPort {
     @Override
     public String buildGapQuery(String physicalSql, GapPlan gapPlan) {
         return gapQueryBuilder.buildGapQuery(physicalSql, gapPlan);
-    }
-
-    @Override
-    public Optional<String> buildBucketedGapQuery(String physicalSql, GapPlan gapPlan, String bucketColumn) {
-        return gapQueryBuilder.buildBucketedGapQuery(physicalSql, gapPlan, bucketColumn);
     }
 }

@@ -1,4 +1,8 @@
-package com.cascada.cache.domain.safety;
+package com.cascada.cache.application.service.safety;
+
+import com.cascada.cache.domain.safety.BypassReason;
+
+import com.cascada.cache.domain.safety.CacheConfiguration;
 
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 

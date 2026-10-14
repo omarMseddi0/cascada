@@ -9,7 +9,7 @@ import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.safety.CacheConfiguration;
-import com.cascada.cache.domain.safety.SafetyRuleRegistry;
+import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.identity.domain.QueryHash;
 
 import java.util.logging.Logger;

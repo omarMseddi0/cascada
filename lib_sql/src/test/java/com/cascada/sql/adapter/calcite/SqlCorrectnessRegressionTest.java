@@ -4,7 +4,7 @@ import com.cascada.cache.application.service.ExecuteLogicalQueryService;
 import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.safety.CacheConfiguration;
-import com.cascada.cache.domain.safety.SafetyRuleRegistry;
+import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.sql.adapter.dialect.MySqlToSparkFunctionTranslator;
 import com.cascada.sql.domain.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;

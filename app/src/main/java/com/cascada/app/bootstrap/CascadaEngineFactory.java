@@ -28,7 +28,7 @@ import com.cascada.cache.application.service.WarmingOrchestrator;
 import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.safety.CacheConfiguration;
-import com.cascada.cache.domain.safety.SafetyRuleRegistry;
+import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.warming.WarmingQueue;
 import com.cascada.sql.adapter.calcite.CalciteCanonicalObjectFactory;
 import com.cascada.sql.adapter.calcite.GapQueryRewriterAdapter;

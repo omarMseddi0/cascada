@@ -19,8 +19,8 @@ import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.domain.safety.CacheConfiguration;
-import com.cascada.cache.domain.safety.SafetyRule;
-import com.cascada.cache.domain.safety.SafetyRuleRegistry;
+import com.cascada.cache.application.service.safety.SafetyRule;
+import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

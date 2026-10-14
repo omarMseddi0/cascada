@@ -14,7 +14,7 @@ import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.warming.WarmingQueue;
+import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.identity.domain.QueryHash;
 import org.junit.jupiter.api.Test;
 

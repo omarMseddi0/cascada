@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.warming;
+package com.cascada.cache.application.service.warming;
 
 import com.cascada.identity.domain.QueryHash;
 

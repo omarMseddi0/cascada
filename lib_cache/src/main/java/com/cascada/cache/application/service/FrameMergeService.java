@@ -309,9 +309,16 @@ public final class FrameMergeService {
             for (int column = 0; column < finalColumns.size(); column++) {
                 int[] pair = ingredients.get(finalColumns.get(column));
                 if (pair != null) {
-                    double sum = asDouble(frame.valueAt(row, pair[0]));
-                    long count = Math.round(asDouble(frame.valueAt(row, pair[1])));
-                    finalBuilder.appendDouble(averageReconstructionService.reconstructAverageFromStoredSumAndCount(sum, count));
+                    if (frame.isNullAt(row, pair[1])) {
+                        finalBuilder.appendNull();
+                        continue;
+                    }
+                    long count = frame.columnTypeAt(pair[1]) == ColumnType.LONG
+                            ? frame.longAt(row, pair[1]) : Math.round(asDouble(frame.valueAt(row, pair[1])));
+                    if (count < 0) throw new IllegalArgumentException("AVG count ingredient cannot be negative");
+                    if (count == 0 || frame.isNullAt(row, pair[0])) finalBuilder.appendNull();
+                    else finalBuilder.appendDouble(averageReconstructionService.reconstructAverageFromStoredSumAndCount(
+                            asDouble(frame.valueAt(row, pair[0])), count));
                 } else if (sourceColumns[column] >= 0) {
                     finalBuilder.appendCell(frame, row, sourceColumns[column]);
                 } else finalBuilder.appendNull();

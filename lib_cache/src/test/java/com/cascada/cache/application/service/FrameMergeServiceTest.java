@@ -173,4 +173,37 @@ class FrameMergeServiceTest {
                     Map.of("ts", 1759968002L, "SUM(bytes)", 17L));
         }
     }
+
+    @Test void averageWithAllNullIngredientsIsSqlNullInBothMergePaths() {
+        var metadata = QueryMetadata.globalAggregate().withOriginalAggregates(List.of("AVG(x) AS mean"));
+        var canonical = globalAgg(List.of(), List.of("SUM(x)", "COUNT(x)"), metadata);
+        var frame = ResultFrame.builder().column("SUM(x)", ColumnType.DOUBLE).column("COUNT(x)", ColumnType.LONG)
+                .row(null, 0L).build();
+        var incremental = merge.incremental(canonical);
+        incremental.add(frame);
+        for (var result : List.of(merge.mergeAndReconstruct(List.of(frame), canonical), incremental.finish())) {
+            assertThat(result.columnNames()).containsExactly("mean");
+            assertThat(result.isNullAt(0, 0)).isTrue();
+        }
+    }
+
+    @Test
+    void averageHandlesZeroAndLargeLongCountsAndRejectsNegativeCounts() {
+        var metadata = QueryMetadata.globalAggregate().withOriginalAggregates(List.of("AVG(x) AS mean"));
+        var canonical = globalAgg(List.of(), List.of("SUM(x)", "COUNT(x)"), metadata);
+        long count = 9_007_199_254_740_993L;
+        var large = ResultFrame.builder().column("SUM(x)", ColumnType.DOUBLE).column("COUNT(x)", ColumnType.LONG)
+                .row(18_014_398_509_481_984.0, count).build();
+        assertThat(merge.mergeAndReconstruct(List.of(large), canonical).doubleAt(0, 0))
+                .isEqualTo(18_014_398_509_481_984.0 / count);
+        var zero = ResultFrame.builder().column("SUM(x)", ColumnType.DOUBLE).column("COUNT(x)", ColumnType.LONG)
+                .row(0.0, 0L).build();
+        assertThat(merge.mergeAndReconstruct(List.of(zero), canonical).isNullAt(0, 0)).isTrue();
+        for (Object sum : java.util.Arrays.asList(null, 1.0)) {
+            var negative = ResultFrame.builder().column("SUM(x)", ColumnType.DOUBLE).column("COUNT(x)", ColumnType.LONG)
+                    .row(sum, -1L).build();
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> merge.mergeAndReconstruct(List.of(negative), canonical))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("negative");
+        }
+    }
 }

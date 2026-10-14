@@ -1,7 +1,5 @@
 package com.cascada.cache.application.service.merge;
 
-import com.cascada.cache.application.port.out.DistinctSketchAccumulator;
-import com.cascada.cache.application.port.out.DistinctSketchPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -21,8 +19,6 @@ final class TypedAggregationGroups {
     private final int[] measureColumns;
     private final ColumnType[] measureTypes;
     private final AggregateOperation[] measureFunctions;
-    private final boolean[] sketchMeasures;
-    private final DistinctSketchPort sketches;
 
     private int[] slots = new int[INITIAL_CAPACITY];
     private int slotMask = INITIAL_CAPACITY - 1;
@@ -40,12 +36,10 @@ final class TypedAggregationGroups {
     private final double[][] doubleValues;
     private final String[][] stringValues;
     private final BigDecimal[][] decimalValues;
-    private final DistinctSketchAccumulator[][] sketchValues;
 
     TypedAggregationGroups(ResultFrame schema, int[] dimensionColumns, ColumnType[] dimensionTypes,
                        boolean[] timeDimensions, int step, int[] measureColumns,
-                       ColumnType[] measureTypes, AggregateOperation[] measureFunctions,
-                       boolean[] sketchMeasures, DistinctSketchPort sketches) {
+                       ColumnType[] measureTypes, AggregateOperation[] measureFunctions) {
         this.schema = schema;
         this.dimensionColumns = dimensionColumns;
         this.dimensionTypes = dimensionTypes;
@@ -54,8 +48,6 @@ final class TypedAggregationGroups {
         this.measureColumns = measureColumns;
         this.measureTypes = measureTypes;
         this.measureFunctions = measureFunctions;
-        this.sketchMeasures = sketchMeasures;
-        this.sketches = sketches;
         int keyCount = dimensionColumns.length;
         keyPresent = new boolean[keyCount][groupCapacity];
         keyLongs = new long[keyCount][];
@@ -78,12 +70,7 @@ final class TypedAggregationGroups {
         doubleValues = new double[measures][];
         stringValues = new String[measures][];
         decimalValues = new BigDecimal[measures][];
-        sketchValues = new DistinctSketchAccumulator[measures][];
         for (int measure = 0; measure < measures; measure++) {
-            if (sketchMeasures[measure]) {
-                sketchValues[measure] = new DistinctSketchAccumulator[groupCapacity];
-                continue;
-            }
             switch (measureTypes[measure]) {
                 case LONG -> longValues[measure] = new long[groupCapacity];
                 case DOUBLE -> doubleValues[measure] = new double[groupCapacity];
@@ -202,10 +189,6 @@ final class TypedAggregationGroups {
             if (input[column].isNullAt(row)) {
                 continue;
             }
-            if (sketchMeasures[measure]) {
-                accumulateSketch(group, measure, input[column].stringValue(row));
-                continue;
-            }
             switch (measureTypes[measure]) {
                 case LONG -> accumulateLong(group, measure, input[column].longValue(row));
                 case DOUBLE -> accumulateDouble(group, measure, input[column].doubleValue(row));
@@ -213,21 +196,6 @@ final class TypedAggregationGroups {
                 case DECIMAL -> accumulateDecimal(group, measure, input[column].decimalValue(row));
             }
         }
-    }
-
-    void accumulateSketch(int group, int measure, String encodedSketch) {
-        DistinctSketchAccumulator union = sketchValues[measure][group];
-        if (union == null) {
-            union = sketches.newAccumulator();
-            sketchValues[measure][group] = union;
-            measurePresent[measure][group] = true;
-        }
-        union.add(encodedSketch);
-    }
-
-    /** Sketch measures leave the merge as their LONG estimate; every other measure keeps its type. */
-    ColumnType outputType(int measure) {
-        return sketchMeasures[measure] ? ColumnType.LONG : measureTypes[measure];
     }
 
     void accumulateLong(int group, int measure, long incoming) {
@@ -306,10 +274,6 @@ final class TypedAggregationGroups {
         }
         for (int measure = 0; measure < measureColumns.length; measure++) {
             measurePresent[measure] = Arrays.copyOf(measurePresent[measure], grown);
-            if (sketchMeasures[measure]) {
-                sketchValues[measure] = Arrays.copyOf(sketchValues[measure], grown);
-                continue;
-            }
             switch (measureTypes[measure]) {
                 case LONG -> longValues[measure] = Arrays.copyOf(longValues[measure], grown);
                 case DOUBLE -> doubleValues[measure] = Arrays.copyOf(doubleValues[measure], grown);
@@ -422,12 +386,6 @@ final class TypedAggregationGroups {
     }
 
     void appendMeasure(ResultFrameBuilder output, int group, int measure) {
-        if (measure >= 0 && sketchMeasures[measure]) {
-            // APPROX_COUNT_DISTINCT never yields NULL: a group without any sketch counted nothing.
-            DistinctSketchAccumulator union = sketchValues[measure][group];
-            output.appendLong(union == null ? 0L : union.estimate());
-            return;
-        }
         if (measure < 0 || !measurePresent[measure][group]) {
             output.appendNull();
             return;

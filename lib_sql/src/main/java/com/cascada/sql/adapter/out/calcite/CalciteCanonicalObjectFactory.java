@@ -3,7 +3,6 @@ package com.cascada.sql.adapter.out.calcite;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.cache.domain.merge.DistinctSketchPrecision;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.OrderByClause;
 import com.cascada.cache.domain.query.PostProcessing;
@@ -61,8 +60,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         this.configuredTimeDimensions = java.util.Objects.requireNonNull(timeDimensions);
     }
 
-    private static final Set<String> AGGREGATE_FUNCTION_NAMES =
-            Set.of("SUM", "COUNT", "AVG", "MIN", "MAX", "APPROX_COUNT_DISTINCT");
+    private static final Set<String> AGGREGATE_FUNCTION_NAMES = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX");
 
     private final AggregateNormalizer aggregateNormalizer = new AggregateNormalizer();
     private final SqlCacheabilityGuard cacheabilityGuard = new SqlCacheabilityGuard();
@@ -98,15 +96,10 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         CanonicalTimeSeriesShape shape = timeSeriesAnalyzer.detectTimeSeries(select, timeDimensionMap);
 
         NormalizedAggregates normalized = aggregateNormalizer.normalize(rawAggregateCalls);
-        List<String> hashedAggregates = new ArrayList<>(normalized.normalizedForHash());
-        if (measureAggregates.containsValue(AggregateFunction.DISTINCT_SKETCH)) {
-            // Stored sketches are only unioned with sketches of the same precision.
-            hashedAggregates.add(DistinctSketchPrecision.HASH_MARKER);
-        }
 
         HashComponents hashComponents = new HashComponents(
                 new ArrayList<>(new TreeSet<>(groupBy)),
-                hashedAggregates,
+                normalized.normalizedForHash(),
                 timeExtraction.filters(),
                 0);
 
@@ -141,10 +134,9 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             }
             if (expression instanceof SqlBasicCall call && isAggregateName(call)) {
                 if (combineFunctionFor(call.getOperator().getName()) == null || call.getFunctionQuantifier() != null) return false;
-                // Sketch and AVG columns are rebuilt from renamed ingredients; only an explicit alias
-                // keeps the cached and direct result schemas identical.
-                if ((GapQueryBuilder.isDistinctSketchCall(call) || GapQueryBuilder.isAverageCall(call))
-                        && (alias == null || call.operandCount() != 1)) return false;
+                // AVG is rebuilt from renamed SUM/COUNT ingredients; only an explicit alias keeps the
+                // cached and direct result schemas identical.
+                if (GapQueryBuilder.isAverageCall(call) && (alias == null || call.operandCount() != 1)) return false;
                 continue;
             }
             String rendered = CalciteSql.unparse(expression);
@@ -264,7 +256,6 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             case "COUNT" -> AggregateFunction.COUNT;
             case "MIN" -> AggregateFunction.MINIMUM;
             case "MAX" -> AggregateFunction.MAXIMUM;
-            case "APPROX_COUNT_DISTINCT" -> AggregateFunction.DISTINCT_SKETCH;
             case "AVG" -> AggregateFunction.AVERAGE;
             default -> null;
         };

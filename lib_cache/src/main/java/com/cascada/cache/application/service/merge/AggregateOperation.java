@@ -53,7 +53,7 @@ public enum AggregateOperation {
             case COUNT -> COUNT;
             case MINIMUM -> MINIMUM;
             case MAXIMUM -> MAXIMUM;
-            case DISTINCT_SKETCH, AVERAGE -> throw new IllegalArgumentException(
+            case AVERAGE -> throw new IllegalArgumentException(
                     function + " is merged through its stored ingredients, not by an arithmetic combine");
         };
     }

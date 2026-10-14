@@ -18,8 +18,7 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 /** Fails closed when a parsed query cannot be represented by the cache's single-window model. */
 final class SqlCacheabilityGuard {
 
-    private static final Set<String> BUILT_IN_AGGREGATES =
-            Set.of("SUM", "COUNT", "AVG", "MIN", "MAX", "APPROX_COUNT_DISTINCT");
+    private static final Set<String> BUILT_IN_AGGREGATES = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX");
     private static final Set<String> CONTEXT_DEPENDENT_FUNCTIONS = Set.of(
             "CURRENT_TIMESTAMP", "CURRENT_TIME", "CURRENT_DATE",
             "LOCALTIME", "LOCALTIMESTAMP", "CURRENT_USER", "SESSION_USER",

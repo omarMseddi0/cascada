@@ -550,7 +550,7 @@ public final class CubeConsistencyVerifier {
                     case SUM, COUNT -> Math.addExact(leftValue, rightValue);
                     case MINIMUM -> Math.min(leftValue, rightValue);
                     case MAXIMUM -> Math.max(leftValue, rightValue);
-                    case DISTINCT_SKETCH, AVERAGE -> throw new CubeRollUpUnavailableException("derived measures are not rolled up");
+                    case AVERAGE -> throw new CubeRollUpUnavailableException("derived measures are not rolled up");
                 };
             }
             case DOUBLE -> switch (function) {
@@ -567,7 +567,7 @@ public final class CubeConsistencyVerifier {
                     yield Double.isNaN(leftValue) || Double.isNaN(rightValue)
                             ? Double.NaN : Math.max(leftValue, rightValue);
                 }
-                case DISTINCT_SKETCH, AVERAGE -> throw new CubeRollUpUnavailableException("derived measures are not rolled up");
+                case AVERAGE -> throw new CubeRollUpUnavailableException("derived measures are not rolled up");
             };
             case DECIMAL -> {
                 BigDecimal leftValue = (BigDecimal) left;
@@ -576,7 +576,7 @@ public final class CubeConsistencyVerifier {
                     case SUM, COUNT -> leftValue.add(rightValue);
                     case MINIMUM -> leftValue.min(rightValue);
                     case MAXIMUM -> leftValue.max(rightValue);
-                    case DISTINCT_SKETCH, AVERAGE -> throw new CubeRollUpUnavailableException("derived measures are not rolled up");
+                    case AVERAGE -> throw new CubeRollUpUnavailableException("derived measures are not rolled up");
                 };
                 validateDecimal(type, combined);
                 yield combined;

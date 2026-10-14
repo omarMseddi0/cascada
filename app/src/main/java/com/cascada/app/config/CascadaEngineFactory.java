@@ -4,7 +4,6 @@ import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.ArrowResultFrameSerializer;
-import com.cascada.cache.adapter.out.sketch.DataSketchesDistinctSketchAdapter;
 import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
@@ -84,8 +83,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
                 new WarmingQueue(applicationSettings.warming().maximumPatterns()), popularityTracker, coverageIndex, settings.cacheExecution().bucketSeconds(),
                 settings.warmingTopNQueries(), applicationSettings.warming().maximumPatterns());
         CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
-                gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks,
-                new DataSketchesDistinctSketchAdapter());
+                gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks);
         this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
                 validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor, applicationSettings.warming().enabled() ? warmingOrchestrator : null);
         this.logicalQueryUseCase = new ExecuteLogicalQueryService(translator(), canonicalizer(),

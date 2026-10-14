@@ -362,7 +362,7 @@ public final class FrameMergeService {
                     compared = switch (frame.columnTypeAt(column)) {
                         case LONG -> Long.compare(frame.longAt(left, column), frame.longAt(right, column));
                         case DOUBLE -> Double.compare(frame.doubleAt(left, column), frame.doubleAt(right, column));
-                        case STRING -> frame.stringAt(left, column).compareTo(frame.stringAt(right, column));
+                        case STRING -> TypedFrameAggregator.compareSparkStrings(frame.stringAt(left, column), frame.stringAt(right, column));
                         case DECIMAL -> ((java.math.BigDecimal) frame.valueAt(left, column))
                                 .compareTo((java.math.BigDecimal) frame.valueAt(right, column));
                     };

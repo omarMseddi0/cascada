@@ -603,7 +603,7 @@ public final class TypedFrameAggregator {
     }
 
     /** Spark's binary UTF-8 ordering is code-point order for valid Unicode strings. */
-    private static int compareSparkStrings(String leftString, String rightString) {
+    public static int compareSparkStrings(String leftString, String rightString) {
         int leftOffset = 0;
         int rightOffset = 0;
         while (leftOffset < leftString.length() && rightOffset < rightString.length()) {

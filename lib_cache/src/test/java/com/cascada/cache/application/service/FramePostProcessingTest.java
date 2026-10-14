@@ -49,4 +49,20 @@ class FramePostProcessingTest {
         ResultFrame limited = merge.mergeAndReconstruct(List.of(input), query(new PostProcessing(Optional.of(2), List.of())));
         assertThat(limited.rows()).extracting(row -> row.get("id")).containsExactly(1L, 2L);
     }
+
+    @Test void fullSortAndTopKUseSparkUnicodeOrderWithNulls() {
+        var input = ResultFrame.builder().column("label", ColumnType.STRING).column("SUM(x)", ColumnType.LONG)
+                .row("😀", 1L).row("\uE000", 2L).row("z", 3L).row(null, 4L).build();
+        for (boolean ascending : List.of(true, false)) {
+            List<Object> expected = ascending ? Arrays.asList(null, "z", "\uE000", "😀")
+                    : Arrays.asList("😀", "\uE000", "z", null);
+            for (int limit : List.of(2, 4)) {
+                var canonical = CanonicalQueryObject.of(HashComponents.of(List.of("label"), List.of("SUM(x)"), List.of()),
+                        new TimeRange(0, 86399), new PostProcessing(Optional.of(limit),
+                                List.of(OrderByClause.forColumn("label", ascending, ascending))), QueryMetadata.globalAggregate());
+                var actual = merge.mergeAndReconstruct(List.of(input), canonical);
+                assertThat(actual.rows()).extracting(row -> row.get("label")).containsExactlyElementsOf(expected.subList(0, limit));
+            }
+        }
+    }
 }

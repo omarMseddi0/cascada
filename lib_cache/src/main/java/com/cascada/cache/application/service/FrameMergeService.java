@@ -71,7 +71,7 @@ public final class FrameMergeService {
                     boolean timeSeries = canonical.metadata().isTimeSeries();
                     if (timeSeries) dimensions.add(timeColumnName);
                     dimensions.addAll(dimensionColumns(schema, canonical, timeSeries));
-                    int step = timeSeries ? canonical.userStepSeconds().orElse(fixedStepSeconds) : fixedStepSeconds;
+                    int step = timeSeries ? timeSeriesStep(canonical) : fixedStepSeconds;
                     accumulator = new TypedFrameAggregator.Accumulator(schema, dimensions,
                             resolvedFunctions(canonical), timeColumnName, step);
                 }
@@ -236,7 +236,12 @@ public final class FrameMergeService {
         dimensions.add(timeColumnName);
         dimensions.addAll(dimensionColumns(frames.get(0), canonicalObject, true));
         return typedMerge(frames, canonicalObject, dimensions,
-                canonicalObject.userStepSeconds().orElse(fixedStepSeconds));
+                timeSeriesStep(canonicalObject));
+    }
+
+    private int timeSeriesStep(CanonicalQueryObject canonicalObject) {
+        return canonicalObject.metadata().preserveRawTimeSeries()
+                ? 1 : canonicalObject.userStepSeconds().orElse(fixedStepSeconds);
     }
 
     private ResultFrame mergeGlobalAggregate(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {

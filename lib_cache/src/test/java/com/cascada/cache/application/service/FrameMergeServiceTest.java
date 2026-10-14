@@ -148,4 +148,29 @@ class FrameMergeServiceTest {
         values.put("SUM(bytesFromServer)", server);
         return values;
     }
+
+    @Test void preservesRawEpochSecondGroupsInBatchAndIncrementalMerges() {
+        QueryMetadata raw = new QueryMetadata(true, 0L, List.of(), Map.of(),
+                java.util.Optional.empty(), true, List.of("SUM(bytes)"));
+        CanonicalQueryObject canonical = globalAgg(List.of("ts"), List.of("SUM(bytes)"), raw);
+        ResultFrame cached = ResultFrame.builder().column("ts", ColumnType.LONG)
+                .column("SUM(bytes)", ColumnType.LONG)
+                .row(Map.of("ts", -301L, "SUM(bytes)", 7L))
+                .row(Map.of("ts", 1759968001L, "SUM(bytes)", 11L)).build();
+        ResultFrame gap = ResultFrame.builder().column("ts", ColumnType.LONG)
+                .column("SUM(bytes)", ColumnType.LONG)
+                .row(Map.of("ts", -300L, "SUM(bytes)", 13L))
+                .row(Map.of("ts", 1759968002L, "SUM(bytes)", 17L))
+                .row(Map.of("ts", 1759968001L, "SUM(bytes)", 19L)).build();
+        var incremental = merge.incremental(canonical);
+        incremental.add(cached);
+        incremental.add(gap);
+        for (ResultFrame result : List.of(merge.mergeAndReconstruct(List.of(cached, gap), canonical), incremental.finish())) {
+            assertThat(result.rows()).containsExactly(
+                    Map.of("ts", -301L, "SUM(bytes)", 7L),
+                    Map.of("ts", -300L, "SUM(bytes)", 13L),
+                    Map.of("ts", 1759968001L, "SUM(bytes)", 30L),
+                    Map.of("ts", 1759968002L, "SUM(bytes)", 17L));
+        }
+    }
 }

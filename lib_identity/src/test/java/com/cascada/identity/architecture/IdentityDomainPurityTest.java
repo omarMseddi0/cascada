@@ -17,7 +17,6 @@ class IdentityDomainPurityTest {
     static void importDomainClasses() {
         domainClasses = new ClassFileImporter()
                 .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-            .withImportOption(location -> !location.asURI().toString().contains("/test-classes/"))
                 .importPackages("com.cascada.identity.domain");
     }
 

@@ -1,7 +1,8 @@
-package com.cascada.sparkconfig.application.service;
+package com.cascada.sparkconfig.domain;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collections;
@@ -16,7 +17,7 @@ final class SparkJsonGoldenFixture {
     }
 
     static Map<String, String> loadFlattenedConfiguration() throws IOException {
-        try (InputStream input = SparkJsonGoldenFixture.class.getResourceAsStream("/com/cascada/sparkconfig/domain/spark.json")) {
+        try (InputStream input = SparkJsonGoldenFixture.class.getResourceAsStream("spark.json")) {
             if (input == null) {
                 throw new IllegalStateException("Required test fixture spark.json is missing from the module");
             }

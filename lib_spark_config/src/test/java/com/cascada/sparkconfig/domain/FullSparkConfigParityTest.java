@@ -1,12 +1,10 @@
-package com.cascada.sparkconfig.application.service;
+package com.cascada.sparkconfig.domain;
 
-import com.cascada.sparkconfig.domain.ExecutorPlacement;
-import com.cascada.sparkconfig.domain.SparkConfiguration;
-import com.cascada.sparkconfig.domain.WorkloadType;
-import java.io.IOException;
-import java.util.Map;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;

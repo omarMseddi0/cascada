@@ -2,29 +2,61 @@ package com.cascada.fabric.adapter.out.manifest;
 
 import com.cascada.fabric.application.port.out.ClusterManifestRenderingPort;
 import com.cascada.fabric.domain.ClusterValues;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Arrays;
 import java.util.stream.Collectors;
 
-/** Loads the single deployment.yaml source, substitutes settings, and preserves apply order.
- * Spark JSON, Hadoop XML, logging, and executor pod template are embedded in that file.
+/**
+ * Fills the {@code src/main/resources/fabric} YAML templates from {@link ClusterValues} and returns the
+ * complete, apply-ready manifest set (plan §6.7). The templates are real {@code kubectl apply -f} YAML;
+ * this class only substitutes {@code ${placeholder}} tokens and indents the embedded block-scalar files
+ * (the HDFS XML, {@code spark.json}, log4j, and the executor pod template) into their ConfigMaps.
+ *
+ * <p>No YAML is built in Java and there is no Kubernetes dependency here — API calls live in
+ * {@code com.cascada.fabric.adapter.out.kubernetes.FabricClusterDeployer}. This adapter owns classpath
+ * resource access and deterministic placeholder substitution.
  */
 public final class ClusterManifestRenderer implements ClusterManifestRenderingPort {
 
-    /** The single source contains all resources, including embedded configuration files. */
+    /** Manifest templates in {@code kubectl apply} order (RBAC → ConfigMaps → Deployment → Service). */
+    private static final List<String> TEMPLATES = List.of(
+            "service-account.yaml",
+            "namespace-role.yaml",
+            "role-binding.yaml",
+            "configmap-core-site.yaml",
+            "configmap-hdfs-site.yaml",
+            "configmap-executor-pod-template.yaml",
+            "configmap-spark-config.yaml",
+            "configmap-log4j.yaml",
+            "deployment-driver.yaml",
+            "service-driver.yaml");
+
+    /** Render every manifest, in apply order, as a list of YAML documents. */
     @Override
     public List<String> render(ClusterValues values) {
         Objects.requireNonNull(values, "values");
-        String combined = fill(load("/fabric/deployment.yaml"), values.placeholders());
-        if (combined.contains("${")) throw new IllegalStateException("unresolved Fabric placeholder");
-        return java.util.Arrays.stream(combined.split("(?m)^---\\s*$"))
-                .filter(document -> !document.isBlank()).map(String::stripLeading).toList();
+        Map<String, String> v = new LinkedHashMap<>(values.placeholders());
+        // Resolve the embedded files first, indented to sit under their ConfigMap `data:` block scalar.
+        v.put("coreSiteXml", indent(fill(loadFile("core-site.xml"), v), 4));
+        v.put("hdfsSiteXml", indent(fill(loadFile("hdfs-site.xml"), v), 4));
+        v.put("log4j", indent(loadFile("log4j2.properties"), 4));
+        v.put("sparkJson", indent(fill(loadFile("spark.json"), v), 4));
+        v.put("executorPodTemplate", indent(fill(loadTemplate("pod-template.yaml"), v), 4));
+
+        List<String> manifests = new ArrayList<>(TEMPLATES.size());
+        for (String template : TEMPLATES) {
+            manifests.add(fill(loadTemplate(template), v));
+        }
+        return manifests;
     }
 
     /** The manifests joined into one multi-document YAML stream — what you would feed to {@code apply -f}. */
@@ -32,6 +64,14 @@ public final class ClusterManifestRenderer implements ClusterManifestRenderingPo
         return render(values).stream()
                 .map(manifest -> "---\n" + manifest + (manifest.endsWith("\n") ? "" : "\n"))
                 .collect(Collectors.joining());
+    }
+
+    private static String loadTemplate(String name) {
+        return load("/fabric/templates/" + name);
+    }
+
+    private static String loadFile(String name) {
+        return load("/fabric/files/" + name);
     }
 
     private static String load(String resourcePath) {

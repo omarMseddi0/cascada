@@ -1,10 +1,5 @@
-package com.cascada.sparkconfig.application.service;
+package com.cascada.sparkconfig.domain;
 
-import com.cascada.sparkconfig.application.port.in.DeriveSparkConfigurationUseCase;
-import com.cascada.sparkconfig.domain.ExecutorPlacement;
-import com.cascada.sparkconfig.domain.SparkConfiguration;
-import com.cascada.sparkconfig.domain.SparkMemorySplit;
-import com.cascada.sparkconfig.domain.WorkloadType;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -28,7 +23,7 @@ import java.util.Objects;
  *       — and the customer never sees {@code offHeap}.</li>
  * </ul>
  */
-public final class SparkConfigurationDeriver implements DeriveSparkConfigurationUseCase {
+public final class SparkConfigurationDeriver {
 
     static final long ADVISORY_PARTITION_SIZE_BYTES = 267_108_864L;
     static final String REFERENCE_DRIVER_MEMORY = "2g";
@@ -83,13 +78,6 @@ public final class SparkConfigurationDeriver implements DeriveSparkConfiguration
                 Math.min(REFERENCE_INITIAL_EXECUTOR_COUNT, maximumExecutors));
         entries.put("spark.executor.instances", Integer.toString(initialExecutors));
         entries.put("spark.driver.memory", REFERENCE_DRIVER_MEMORY);
-        if (workloadType.isGlutenOffHeapEnabled()) {
-            if (memorySplit.offHeapGigabytes() == 0) {
-                throw new IllegalArgumentException("Gluten requires at least 3 GiB executor RAM");
-            }
-            entries.put("spark.plugins", "org.apache.gluten.GlutenPlugin");
-            entries.put("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager");
-        }
         if (memorySplit.offHeapGigabytes() > 0) {
             entries.put("spark.memory.offHeap.enabled", "true");
             entries.put("spark.memory.offHeap.size", memorySplit.offHeapGigabytes() + "g");

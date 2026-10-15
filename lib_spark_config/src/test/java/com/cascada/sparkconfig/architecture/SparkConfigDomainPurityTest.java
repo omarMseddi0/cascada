@@ -21,22 +21,14 @@ class SparkConfigDomainPurityTest {
     static void importDomainClasses() {
         domainClasses = new ClassFileImporter()
                 .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-            .withImportOption(location -> !location.asURI().toString().contains("/test-classes/"))
-                .importPackages("com.cascada.sparkconfig");
+                .importPackages("com.cascada.sparkconfig.domain");
     }
 
     @Test
     void derivationDomainDependsOnlyOnTheJdk() {
-        noClasses().that().resideInAPackage("com.cascada.sparkconfig.domain..")
+        noClasses()
                 .should().dependOnClassesThat().resideOutsideOfPackages(
                         "com.cascada.sparkconfig.domain..", "java..")
-                .check(domainClasses);
-    }
-    @Test
-    void applicationIsFrameworkFree() {
-        noClasses().that().resideInAPackage("com.cascada.sparkconfig.application..")
-                .should().dependOnClassesThat().resideOutsideOfPackages(
-                        "com.cascada.sparkconfig.application..", "com.cascada.sparkconfig.domain..", "java..")
                 .check(domainClasses);
     }
 }

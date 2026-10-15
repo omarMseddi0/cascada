@@ -1,43 +1,20 @@
 package com.cascada.fabric.adapter.out.manifest;
 
-import com.cascada.fabric.application.service.ClusterSettingsService;
 import com.cascada.fabric.domain.ClusterValues;
-import com.cascada.sparkconfig.application.service.SparkConfigurationDeriver;
+
+import org.junit.jupiter.api.Test;
+
 import java.util.List;
 import java.util.Map;
-import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ClusterManifestRendererTest {
 
-    @Test
-    void rejectsDocumentJsonAndXmlInjectionInPlaceholderValues() {
-        for (String attack : List.of("safe\n---\nkind: Pod", "x\",\"spark.plugins\":\"evil", "/tmp/# comment", "hdfs://x</value><property>")) {
-            org.assertj.core.api.Assertions.assertThatThrownBy(
-                    () -> renderer.render(new ClusterValues(Map.of("namespace", attack))))
-                    .isInstanceOf(IllegalArgumentException.class);
-        }
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-                () -> values(Map.of("CASCADA_NAMESPACE", "default\n---\nkind: Pod")))
-                .isInstanceOf(IllegalArgumentException.class);
-    }
-
-    @Test
-    void keepsUnicodeTableNamesAndPathsInEmbeddedApplicationConfiguration() throws Exception {
-        String table = "table_\u6771\u4eac", path = "hdfs://lake/\u6771\u4eac";
-        var documents = renderer.render(values(Map.of("CASCADA_MAIN_TABLE_NAME", table, "CASCADA_MAIN_TABLE_PATH", path)));
-        var config = io.fabric8.kubernetes.client.utils.Serialization.unmarshal(
-                documents.get(6), io.fabric8.kubernetes.api.model.ConfigMap.class);
-        var application = new com.fasterxml.jackson.databind.ObjectMapper().readTree(config.getData().get("application.json"));
-        assertThat(application.path("tables").get(0).path("logicalName").textValue()).isEqualTo(table);
-        assertThat(application.path("tables").get(0).path("deltaPath").textValue()).isEqualTo(path);
-    }
-
     private final ClusterManifestRenderer renderer = new ClusterManifestRenderer();
 
     private ClusterValues values(Map<String, String> environmentValues) {
-        return new ClusterSettingsService(new SparkConfigurationDeriver()::deriveMemorySplit).prepareClusterSettings(environmentValues);
+        return ClusterValues.fromSettings(environmentValues);
     }
 
     @Test
@@ -63,7 +40,6 @@ class ClusterManifestRendererTest {
                 "CASCADA_RELEASE_NAME", "al-collector2",
                 "CASCADA_COPY_SUFFIX", "copy2",
                 "CASCADA_NAMESPACE", "review",
-                "CASCADA_EXECUTOR_RAM_GB", "64",
                 "CASCADA_EXECUTOR_MEMORY", "16g",
                 "CASCADA_EXECUTOR_CORES", "5"));
         String combined = renderer.renderCombined(clusterValues);
@@ -132,19 +108,6 @@ class ClusterManifestRendererTest {
     }
 
     @Test
-    void nativeDeploymentEnablesPluginAndFitsTheExecutorBudget() {
-        String yaml = renderer.renderCombined(new ClusterSettingsService(new SparkConfigurationDeriver()::deriveMemorySplit).prepareClusterSettings(Map.of()));
-        assertThat(yaml).contains("org.apache.gluten.GlutenPlugin")
-                .contains("org.apache.spark.shuffle.sort.ColumnarShuffleManager")
-                .contains("\"spark.memory.offHeap.size\": \"9g\"")
-                .contains("\"spark.executor.memoryOverhead\": \"1g\"")
-                .contains("containerPort: 9090").contains("containerPort: 8000");
-        String vanilla = renderer.renderCombined(values(Map.of("CASCADA_GLUTEN_ENABLED", "false")));
-        assertThat(vanilla).doesNotContain("org.apache.gluten.GlutenPlugin")
-                .contains("\"spark.memory.offHeap.enabled\": \"false\"");
-    }
-
-    @Test
     void indentSkipsBlankLinesAndPreservesThem() {
         assertThat(ClusterManifestRenderer.indent("a\n\nb", 2)).isEqualTo("  a\n\n  b");
     }
@@ -153,18 +116,5 @@ class ClusterManifestRendererTest {
     void fillReplacesEveryTokenAndIsPrefixSafe() {
         String out = ClusterManifestRenderer.fill("${a}/${ab}", Map.of("a", "X", "ab", "Y"));
         assertThat(out).isEqualTo("X/Y");
-    }
-    @Test
-    void embedsApplicationAndFairSchedulingConfigurationAsRealConfigMapKeys() throws Exception {
-        var documents = renderer.render(new ClusterSettingsService(new SparkConfigurationDeriver()::deriveMemorySplit).prepareClusterSettings(Map.of()));
-        io.fabric8.kubernetes.api.model.ConfigMap spark = io.fabric8.kubernetes.client.utils.Serialization
-                .unmarshal(documents.get(6), io.fabric8.kubernetes.api.model.ConfigMap.class);
-        io.fabric8.kubernetes.api.model.ConfigMap logging = io.fabric8.kubernetes.client.utils.Serialization
-                .unmarshal(documents.get(7), io.fabric8.kubernetes.api.model.ConfigMap.class);
-        assertThat(spark.getData()).containsKey("application.json");
-        assertThat(logging.getData()).containsKey("fairscheduler.xml");
-        assertThat(logging.getData().get("fairscheduler.xml")).contains("<schedulingMode>FAIR</schedulingMode>");
-        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(spark.getData().get("application.json"));
-        assertThat(json.path("server").path("httpPort").intValue()).isEqualTo(8000);
     }
 }

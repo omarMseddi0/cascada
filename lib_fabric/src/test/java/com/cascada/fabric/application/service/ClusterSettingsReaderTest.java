@@ -1,9 +1,9 @@
 package com.cascada.fabric.application.service;
 
 import com.cascada.fabric.domain.ClusterValues;
-import com.cascada.sparkconfig.application.service.SparkConfigurationDeriver;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -16,17 +16,17 @@ class ClusterSettingsReaderTest {
                 "CASCADA_NAMESPACE", "analytics",
                 "CASCADA_EXECUTOR_CORES", "6");
 
-        ClusterValues values = new ClusterSettingsReader(environment::get, new ClusterSettingsService(new SparkConfigurationDeriver()::deriveMemorySplit)).read();
+        ClusterValues values = new ClusterSettingsReader(environment::get).read();
 
         assertThat(values.namespace()).isEqualTo("analytics");
         assertThat(values.driverWorkloadName()).isEqualTo("release-driver-copy1");
         assertThat(values.get("executorLimitCores")).isEqualTo("7");
-        assertThat(values.get("executorMemory")).isEqualTo("6g");
+        assertThat(values.get("executorMemory")).isEqualTo("8g");
     }
 
     @Test
     void defaultsWhenTheEnvironmentPortHasNoValues() {
-        ClusterValues values = new ClusterSettingsReader(name -> null, new ClusterSettingsService(new SparkConfigurationDeriver()::deriveMemorySplit)).read();
+        ClusterValues values = new ClusterSettingsReader(name -> null).read();
 
         assertThat(values.namespace()).isEqualTo("default");
         assertThat(values.get("driverPort")).isEqualTo("8002");

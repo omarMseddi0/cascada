@@ -1,16 +1,15 @@
 package com.cascada.fabric.adapter.out.kubernetes;
 
-import com.cascada.fabric.adapter.out.manifest.ClusterManifestRenderer;
 import com.cascada.fabric.application.port.in.ManageClusterLifecycleUseCase;
 import com.cascada.fabric.application.service.ClusterLifecycleService;
-import com.cascada.fabric.application.service.ClusterSettingsService;
+import com.cascada.fabric.adapter.out.manifest.ClusterManifestRenderer;
 import com.cascada.fabric.domain.ClusterValues;
-import com.cascada.sparkconfig.application.service.SparkConfigurationDeriver;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
+import org.junit.jupiter.api.Test;
+
 import java.util.List;
 import java.util.Map;
-import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -31,7 +30,7 @@ class FabricClusterDeployerTest {
     static KubernetesClient client;
 
     private ClusterValues values() {
-        return new ClusterSettingsService(new SparkConfigurationDeriver()::deriveMemorySplit).prepareClusterSettings(Map.of(
+        return ClusterValues.fromSettings(Map.of(
                 "CASCADA_RELEASE_NAME", "rel",
                 "CASCADA_COPY_SUFFIX", "c1",
                 "CASCADA_NAMESPACE", "default"));

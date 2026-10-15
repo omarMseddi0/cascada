@@ -1,12 +1,13 @@
-package com.cascada.app.config;
+package com.cascada.app.bootstrap;
+
+import com.cascada.app.config.EngineSettings;
+import com.cascada.app.config.CacheBackend;
 
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.ArrowResultFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
-import com.cascada.cache.adapter.out.tracking.ValkeyQueryPopularityAdapter;
-import com.cascada.cache.application.config.WarmingConfiguration;
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
@@ -24,30 +25,29 @@ import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.application.service.ExecuteCachedQueryService;
 import com.cascada.cache.application.service.ExecuteLogicalQueryService;
 import com.cascada.cache.application.service.WarmingOrchestrator;
-import com.cascada.cache.application.service.cube.CubeShapeCatalog;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
-import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
-import com.cascada.cache.application.service.warming.DataChangeDetector;
-import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.cache.domain.safety.CacheConfiguration;
-import com.cascada.sql.adapter.out.calcite.CalciteCanonicalObjectFactory;
-import com.cascada.sql.adapter.out.calcite.GapQueryRewriterAdapter;
-import com.cascada.sql.adapter.out.calcite.LogicalToPhysicalSqlTranslator;
+import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
+import com.cascada.cache.application.service.warming.WarmingQueue;
+import com.cascada.sql.adapter.calcite.CalciteCanonicalObjectFactory;
+import com.cascada.sql.adapter.calcite.GapQueryRewriterAdapter;
+import com.cascada.sql.adapter.calcite.LogicalToPhysicalSqlTranslator;
 import com.cascada.sql.domain.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
 import com.cascada.sql.domain.TimeDimensionMap;
-import java.time.Clock;
-import java.util.List;
+
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 
 /** Composition root for cache use cases and their infrastructure adapters. */
 public final class CascadaEngineFactory implements AutoCloseable {
 
     private final EngineSettings settings;
-    private final ApplicationSettings applicationSettings;
 
     // Outbound adapters, created once and shared by every service below.
     private final QueryExecutorPort queryExecutor;
@@ -60,7 +60,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
     private final ExecuteCachedQueryUseCase cachedQueryUseCase;
     private final ExecuteLogicalQueryUseCase logicalQueryUseCase;
     private final CacheAdministrationService administrationService;
-    private final java.util.concurrent.ExecutorService cacheTasks;
+    private final ThreadPoolExecutor cacheTasks;
 
     /**
      * @param queryExecutor the execution tier. Passed in rather than built here because it is the one
@@ -68,11 +68,6 @@ public final class CascadaEngineFactory implements AutoCloseable {
      *     a fake, {@code CascadaLauncher} injects the real Spark/Delta adapter.
      */
     public CascadaEngineFactory(EngineSettings settings, QueryExecutorPort queryExecutor) {
-        this(settings, queryExecutor, ApplicationSettings.defaults());
-    }
-
-    public CascadaEngineFactory(EngineSettings settings, QueryExecutorPort queryExecutor, ApplicationSettings applicationSettings) {
-        this.applicationSettings = Objects.requireNonNull(applicationSettings);
         this.settings = Objects.requireNonNull(settings, "settings");
         this.queryExecutor = Objects.requireNonNull(queryExecutor, "queryExecutor");
         // Validate configuration before opening the backend's network resources.
@@ -82,20 +77,18 @@ public final class CascadaEngineFactory implements AutoCloseable {
         this.coverageIndex = coverageIndex();
         this.popularityTracker = popularityTracker();
         this.cubeCatalog = new CubeShapeCatalog();
-        this.cacheTasks = java.util.concurrent.Executors.newThreadPerTaskExecutor(
-                Thread.ofVirtual().name("cache-gap-", 0).factory());
-        GapQueryRewriterPort gapQueryRewriter = gapQueryRewriter();
-        WarmingSettings warming = applicationSettings.warming();
-        this.warmingOrchestrator = new WarmingOrchestrator(cacheBackend, queryExecutor, gapQueryRewriter,
-                new WarmingQueue(warming.maximumPatterns()), popularityTracker, coverageIndex, canonicalizer(),
-                dataChangeDetector(), cubeCatalog,
-                new WarmingConfiguration(settings.cacheExecution().bucketSeconds(), settings.warmingTopNQueries(),
-                        warming.maximumPatterns(), warming.lookback(), applicationSettings.cacheSafety().maximumCachedRows()),
-                Clock.systemUTC());
+        this.cacheTasks = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(128), (task, executor) -> {
+                    if (executor.isShutdown()) throw new RejectedExecutionException("cache executor is closed");
+                    task.run();
+                });
+        this.warmingOrchestrator = new WarmingOrchestrator(cacheBackend, queryExecutor, gapQueryRewriter(),
+                new WarmingQueue(), popularityTracker, coverageIndex, settings.cacheExecution().bucketSeconds(),
+                settings.warmingTopNQueries());
         CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
-                gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks);
+                gapQueryRewriter(), settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks);
         this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
-                validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor, applicationSettings.warming().enabled() ? warmingOrchestrator : null);
+                validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor, warmingOrchestrator);
         this.logicalQueryUseCase = new ExecuteLogicalQueryService(translator(), canonicalizer(),
                 cachedQueryUseCase, queryExecutor);
         this.administrationService = new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
@@ -131,36 +124,22 @@ public final class CascadaEngineFactory implements AutoCloseable {
     }
 
     /**
-     * Layer-2 popularity lives next to the buckets: in Valkey it survives restarts and idle weeks, so the
-     * warmer keeps popular queries warm after a deploy. Local runs keep it in memory, like the buckets.
+     * TODO(cascada): back this with a Redis sorted set (QT:V1:TOP) so popularity survives a restart.
+     * In-memory means the Layer-2 warmer starts cold on every deploy and re-learns which queries matter.
      */
     private QueryPopularityPort popularityTracker() {
-        return settings.cacheBackend() == CacheBackend.MEMORY
-                ? new QueryPopularityTracker(applicationSettings.warming().maximumPatterns())
-                : new ValkeyQueryPopularityAdapter(settings.redisUri(), applicationSettings.warming().popularityRetention());
+        return new QueryPopularityTracker();
     }
 
-    /** The data-change canary runs only when an operator supplies a validation query. */
-    private DataChangeDetector dataChangeDetector() {
-        WarmingSettings warming = applicationSettings.warming();
-        return warming.hasValidationSql()
-                ? new DataChangeDetector(cacheBackend, translator(), queryExecutor, warming.validationSql(),
-                        warming.lookback())
-                : null;
-    }
-
-    /** Uses configured column mappings; legacy settings retain the single identity-mapped table. */
+    /**
+     * The logical→physical table registry.
+     *
+     * <p>TODO(cascada): load every table from deployment configuration.
+     * Registering one table from settings is enough to run, but it means a customer can only query a
+     * single table, and the column map below is a placeholder identity mapping rather than the real
+     * logical→physical schema.
+     */
     private TableCatalog tableCatalog() {
-        if (!applicationSettings.tables().isEmpty()) {
-            TableCatalog catalog = new TableCatalog();
-            applicationSettings.tables().forEach(table -> {
-                if (!table.timeColumns().stream().map(table.columnMappings()::get)
-                        .allMatch(settings.cacheExecution().timeColumnName()::equalsIgnoreCase))
-                    throw new IllegalArgumentException("Table physical time columns must match the configured cache time column");
-                catalog.register(new RegisteredTable(table.logicalName(), table.deltaPath(), table.columnMappings(), table.timeColumns()));
-            });
-            return catalog;
-        }
         return new TableCatalog().register(RegisteredTable.of(
                 settings.mainTableName(),
                 settings.mainTablePath(),
@@ -170,11 +149,8 @@ public final class CascadaEngineFactory implements AutoCloseable {
 
     /** Calcite canonicalisation, behind the cache's port. */
     private SqlCanonicalizerPort canonicalizer() {
-        java.util.Set<String> timeColumns = new java.util.HashSet<>();
-        timeColumns.add(settings.cacheExecution().timeColumnName());
-        applicationSettings.tables().forEach(table -> table.timeColumns().forEach(logicalName ->
-                timeColumns.add(table.columnMappings().get(logicalName))));
-        return new CalciteCanonicalObjectFactory(new TimeDimensionMap(timeColumns));
+        return new CalciteCanonicalObjectFactory(new TimeDimensionMap(
+                java.util.Set.of(settings.cacheExecution().timeColumnName())));
     }
 
     /**
@@ -224,6 +200,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
         return warmingOrchestrator;
     }
 
+    /** Exposed so a launcher can close adapters that hold sockets or sessions. */
     public CacheBackendPort cacheBackendForShutdown() {
         return cacheBackend;
     }
@@ -233,11 +210,10 @@ public final class CascadaEngineFactory implements AutoCloseable {
         if (bucketSeconds % 3_600L != 0) {
             throw new IllegalArgumentException("CASCADA_BUCKET_SECONDS must be a whole number of hours");
         }
-        CacheSafetySettings safety = applicationSettings.cacheSafety();
-        return new CacheConfiguration(CacheConfiguration.defaults().impossibleAggregates(),
-                safety.highCardinalityColumns(), safety.liquidClusteredFilterColumns(),
-                settings.cacheExecution().fixedStepSeconds(), Math.toIntExact(bucketSeconds / 3_600L),
-                Optional.ofNullable(safety.minimumCacheableTimeRangeSeconds()));
+        CacheConfiguration defaults = CacheConfiguration.defaults();
+        return new CacheConfiguration(defaults.impossibleAggregates(), defaults.highCardinalityColumns(),
+                defaults.liquidClusteredFilterColumns(), settings.cacheExecution().fixedStepSeconds(),
+                Math.toIntExact(bucketSeconds / 3_600L), defaults.minimumCacheableTimeRangeSeconds());
     }
 
     @Override
@@ -248,16 +224,14 @@ public final class CascadaEngineFactory implements AutoCloseable {
         } catch (RuntimeException failure) {
             shutdownFailure = failure;
         }
-        for (Object connection : List.of(cacheBackend, popularityTracker)) {
-            if (connection instanceof AutoCloseable closeable) {
-                try {
-                    closeable.close();
-                } catch (Exception failure) {
-                    if (shutdownFailure == null) {
-                        shutdownFailure = new IllegalStateException("failed to close cache connection", failure);
-                    } else {
-                        shutdownFailure.addSuppressed(failure);
-                    }
+        if (cacheBackend instanceof AutoCloseable closeable) {
+            try {
+                closeable.close();
+            } catch (Exception failure) {
+                if (shutdownFailure == null) {
+                    shutdownFailure = new IllegalStateException("failed to close cache backend", failure);
+                } else {
+                    shutdownFailure.addSuppressed(failure);
                 }
             }
         }

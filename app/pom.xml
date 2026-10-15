@@ -1,118 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+
     <parent>
         <groupId>com.cascada</groupId>
         <artifactId>cascada-platform</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
+
     <artifactId>cascada-app</artifactId>
     <name>Cascada Application - engine assembler + entrypoint</name>
     <description>
-        Composition root and HTTP/gRPC adapters for the SQL compiler, cache use cases,
+        Composition root and command-line adapter for the SQL compiler, cache use cases,
         and Spark/Delta execution adapter. Owns deployment configuration and resource lifecycle.
     </description>
-    <properties>
-        <grpc.version>1.76.0</grpc.version>
-        <protobuf.version>4.33.0</protobuf.version>
-    </properties>
-    <build>
-        <extensions>
-            <extension>
-                <groupId>kr.motd.maven</groupId>
-                <artifactId>os-maven-plugin</artifactId>
-                <version>1.7.1</version>
-            </extension>
-        </extensions>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId>
-                <configuration><annotationProcessorPaths><path>
-                    <groupId>org.projectlombok</groupId><artifactId>lombok</artifactId><version>${lombok.version}</version>
-                </path></annotationProcessorPaths></configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.xolstice.maven.plugins</groupId>
-                <artifactId>protobuf-maven-plugin</artifactId>
-                <version>0.6.1</version>
-                <dependencies>
-                    <!-- Disable Windows cmd AutoRun in subprocesses; older Plexus launches without /D. -->
-                    <dependency>
-                        <groupId>org.codehaus.plexus</groupId>
-                        <artifactId>plexus-utils</artifactId>
-                        <version>4.0.3</version>
-                    </dependency>
-                </dependencies>
-                <configuration>
-                    <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
-                    <pluginId>grpc-java</pluginId>
-                    <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
-                </configuration>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>compile</goal>
-                            <goal>compile-custom</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-dependency-plugin</artifactId>
-                <version>3.6.1</version>
-                <executions>
-                    <execution>
-                        <id>runtime-libraries</id>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>copy-dependencies</goal>
-                        </goals>
-                        <configuration>
-                            <includeScope>runtime</includeScope>
-                            <outputDirectory>${project.build.directory}/lib</outputDirectory>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
-    </build>
+
     <dependencies>
-        <dependency><groupId>com.google.protobuf</groupId><artifactId>protobuf-java</artifactId><version>${protobuf.version}</version></dependency>
-        <dependency><groupId>com.fasterxml.jackson.module</groupId><artifactId>jackson-module-scala_2.13</artifactId><version>${jackson.version}</version></dependency>
-        <dependency><groupId>org.projectlombok</groupId><artifactId>lombok</artifactId><version>${lombok.version}</version><scope>provided</scope></dependency>
-        <dependency><groupId>com.cascada</groupId><artifactId>cascada-lib-fabric</artifactId></dependency>
-        <dependency>
-            <groupId>io.grpc</groupId>
-            <artifactId>grpc-netty-shaded</artifactId>
-            <version>${grpc.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>io.grpc</groupId>
-            <artifactId>grpc-protobuf</artifactId>
-            <version>${grpc.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>io.grpc</groupId>
-            <artifactId>grpc-stub</artifactId>
-            <version>${grpc.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>javax.annotation</groupId>
-            <artifactId>javax.annotation-api</artifactId>
-            <version>1.3.2</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.parquet</groupId>
-            <artifactId>parquet-hadoop</artifactId>
-            <version>${parquet.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-client-api</artifactId>
-            <version>${hadoop.version}</version>
-            <scope>provided</scope>
-        </dependency>
         <dependency>
             <groupId>com.tngtech.archunit</groupId>
             <artifactId>archunit-junit5</artifactId>
@@ -134,6 +39,12 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client-api</artifactId>
+            <version>${hadoop.version}</version>
+            <scope>provided</scope>
+        </dependency>
         <!-- Spark/Delta runtime is supplied by the cluster image; provided here so app compiles
              against SparkDeltaQueryExecutor's transitive Spark types but does not bundle Spark. -->
         <dependency>
@@ -143,8 +54,12 @@
             <scope>provided</scope>
         </dependency>
     </dependencies>
+
     <profiles>
-        <!-- Bundles the pinned Spark/Delta runtime for local Java 21 execution. -->
+        <!-- `mvn -Plocal-spark ...` bundles the REAL Spark + Delta runtime so the app runs a
+             local[*] SparkSession with Delta tables outside the cluster image. Spark 4.1.x
+             supports Java 17 and 21; run this profile on JDK 21 (or add the
+             required module-access options for Java 21). -->
         <profile>
             <id>local-spark</id>
             <dependencies>
@@ -158,7 +73,6 @@
                     <artifactId>spark-sql_2.13</artifactId>
                     <version>${spark.version}</version>
                 </dependency>
-                <dependency><groupId>org.apache.spark</groupId><artifactId>spark-hive_2.13</artifactId><version>${spark.version}</version></dependency>
                 <dependency>
                     <groupId>io.delta</groupId>
                     <artifactId>delta-spark_4.1_2.13</artifactId>

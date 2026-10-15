@@ -1,15 +1,10 @@
 package com.cascada.cache.application.service.time;
 
 import com.cascada.cache.domain.time.CacheTimeConstants;
-
-import com.cascada.cache.domain.time.GapPlan;
-
-import com.cascada.cache.domain.time.TimeRange;
-
 import com.cascada.cache.domain.time.DailyBuckets;
-
+import com.cascada.cache.domain.time.GapPlan;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
-
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -102,6 +97,26 @@ public final class TimeBucketCalculator {
         }
 
         return new DailyBuckets(head, body, tail);
+    }
+
+    /**
+     * Like {@link #getDailyBuckets}, but a body bucket that has not finished at {@code nowSeconds} is
+     * live data: it and everything after it move into the tail so they are always computed, never cached.
+     */
+    public DailyBuckets getCompletedBuckets(long startTimestampSeconds, long endTimestampSeconds, long nowSeconds) {
+        DailyBuckets buckets = getDailyBuckets(startTimestampSeconds, endTimestampSeconds);
+        return buckets.body().stream()
+                .filter(bucketStart -> bucketStart > nowSeconds - secondsPerBucket)
+                .findFirst()
+                .map(firstLiveBucket -> new DailyBuckets(buckets.head(),
+                        buckets.body().stream().filter(bucketStart -> bucketStart < firstLiveBucket).toList(),
+                        Optional.of(new TimeRange(firstLiveBucket, endTimestampSeconds))))
+                .orElse(buckets);
+    }
+
+    /** Start of the bucket containing {@code nowSeconds}; every earlier bucket is complete. */
+    public long currentBucketStart(long nowSeconds) {
+        return Math.floorDiv(nowSeconds, secondsPerBucket) * secondsPerBucket;
     }
 
     private BigInteger floorBucketStart(BigInteger timestamp, BigInteger width) {

@@ -1,31 +1,31 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import java.time.Duration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.port.out.CacheBackendPort;
+import com.cascada.cache.application.port.out.GapQueryRewriterPort;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.application.service.hashing.QueryHashGenerator;
-import com.cascada.cache.application.port.out.CacheBackendPort;
-import com.cascada.cache.application.port.out.GapQueryRewriterPort;
-import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.query.PostProcessing;
+import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.identity.domain.QueryHash;
-import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -76,8 +76,24 @@ class CoverageIndexedEngineTest {
         }
 
         @Override
-        public void store(String key, ResultFrame frame) {
-            delegate.store(key, frame);
+        public void store(String key, ResultFrame frame, Duration timeToLive) {
+            delegate.store(key, frame, timeToLive);
+        }
+
+        @Override
+        public void evict(String key) {
+            delegate.evict(key);
+        }
+
+        @Override
+        public Optional<com.cascada.cache.domain.validation.ValidationBaseline> loadValidationBaseline() {
+            return delegate.loadValidationBaseline();
+        }
+
+        @Override
+        public void saveValidationBaseline(com.cascada.cache.domain.validation.ValidationBaseline baseline,
+                                           Duration timeToLive) {
+            delegate.saveValidationBaseline(baseline, timeToLive);
         }
 
         @Override
@@ -97,8 +113,8 @@ class CoverageIndexedEngineTest {
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
 
         InMemoryBlobCacheBackendAdapter store = new InMemoryBlobCacheBackendAdapter(serializer);
-        store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10));
-        store.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20));
+        store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
+        store.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20), Duration.ofDays(1));
         CountingBackend backend = new CountingBackend(store);
 
         InMemoryCoverageIndexAdapter coverage = new InMemoryCoverageIndexAdapter();
@@ -128,8 +144,8 @@ class CoverageIndexedEngineTest {
 
         InMemoryBlobCacheBackendAdapter store = new InMemoryBlobCacheBackendAdapter(serializer);
         // Days 0 and 1 really exist; day 2's coverage bit is STALE (bucket evicted).
-        store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10));
-        store.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20));
+        store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
+        store.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20), Duration.ofDays(1));
 
         InMemoryCoverageIndexAdapter coverage = new InMemoryCoverageIndexAdapter();
         coverage.markCached(hash, DAY, 0L);

@@ -1,32 +1,30 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.result.WarmingReport;
-
-import com.cascada.cache.application.result.QueryResult;
-
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.domain.safety.BypassReason;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.frame.ColumnType;
-import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.application.service.hashing.QueryHashGenerator;
-import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
-import com.cascada.cache.domain.safety.CacheConfiguration;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.result.QueryResult;
+import com.cascada.cache.application.result.WarmingReport;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRule;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.query.PostProcessing;
+import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.cache.domain.safety.BypassReason;
+import com.cascada.cache.domain.safety.CacheConfiguration;
+import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.identity.domain.QueryHash;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -119,6 +117,9 @@ class ExecuteCachedQueryServiceTest {
                 throw new IllegalStateException("warming tracker unavailable");
             }
             @Override public WarmingReport warmCycle(long start, long end, boolean forceOverwrite) {
+                return new WarmingReport(0, 0, 0);
+            }
+            @Override public WarmingReport warmLookbackWindow(long nowSeconds, java.time.Duration lookback) {
                 return new WarmingReport(0, 0, 0);
             }
         };

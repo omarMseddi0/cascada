@@ -1,15 +1,13 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.result.QueryResult;
-
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
+import com.cascada.cache.application.result.QueryResult;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.exception.UncacheableQueryException;
-
 import java.util.Objects;
 
 /** Translates logical SQL, canonicalizes it, and delegates the physical query to the cache use case. */

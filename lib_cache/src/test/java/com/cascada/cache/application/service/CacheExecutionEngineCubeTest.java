@@ -1,25 +1,23 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.port.out.GapQueryRewriterPort;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.service.cube.CubeShapeCatalog;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
+import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.cube.CubeShapeCatalog;
-import com.cascada.cache.domain.frame.ColumnType;
-import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.application.service.hashing.QueryHashGenerator;
-import com.cascada.cache.application.port.out.GapQueryRewriterPort;
-import com.cascada.cache.application.port.out.QueryExecutorPort;
-import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -203,6 +201,6 @@ class CacheExecutionEngineCubeTest {
         engine.execute(timeSeries, hashGenerator.generateQueryHash(timeSeries, 300));
         engine.execute(timeSeries, hashGenerator.generateQueryHash(timeSeries, 300));
 
-        assertThat(sparkCalls.get()).isEqualTo(3); // one call per cold bucket, never served from the cube
+        assertThat(sparkCalls.get()).isEqualTo(2); // one direct query per request, never served from the cube
     }
 }

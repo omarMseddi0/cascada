@@ -1,7 +1,6 @@
 package com.cascada.cache.domain.query;
 
 import com.cascada.cache.domain.merge.AggregateFunction;
-
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;

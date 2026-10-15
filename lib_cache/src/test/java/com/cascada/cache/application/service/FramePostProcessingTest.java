@@ -2,15 +2,42 @@ package com.cascada.cache.application.service;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.query.*;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.query.OrderByClause;
+import com.cascada.cache.domain.query.PostProcessing;
+import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
-import org.junit.jupiter.api.Test;
 import java.util.*;
+import org.junit.jupiter.api.Test;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class FramePostProcessingTest {
     private final FrameMergeService merge = new FrameMergeService(300, "ts");
+
+    @Test
+    void orderByResolvesColumnCaseBeforeApplyingLimit() {
+        var input = ResultFrame.builder().column("id", ColumnType.LONG).column("SUM(x)", ColumnType.LONG)
+                .row(1L, 10L).row(2L, 90L).build();
+        var processing = new PostProcessing(Optional.of(1),
+                List.of(OrderByClause.forColumn("sum(X)", false, false)));
+        var answer = merge.mergeAndReconstruct(List.of(input), query(processing));
+        assertThat(answer.rows()).extracting(row -> row.get("id")).containsExactly(2L);
+    }
+
+    @Test
+    void missingOrderByColumnsRejectMergeInsteadOfChoosingArbitraryRows() {
+        var input = ResultFrame.builder().column("id", ColumnType.LONG).column("SUM(x)", ColumnType.LONG)
+                .row(1L, 10L).row(2L, 90L).build();
+        var processing = new PostProcessing(Optional.of(1),
+                List.of(OrderByClause.forColumn("missing", false, false)));
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> merge.mergeAndReconstruct(List.of(input), query(processing)))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("ORDER BY");
+    }
 
     private CanonicalQueryObject query(PostProcessing processing) {
         return new CanonicalQueryObject(HashComponents.of(List.of("id"), List.of("SUM(x)", "SUM(y)"), List.of()),
@@ -19,7 +46,7 @@ class FramePostProcessingTest {
 
     @Test
     void boundedTopKMatchesFullStableSortWithMultipleKeysNullsAndTies() {
-        ResultFrame.Builder builder = ResultFrame.builder().column("id", ColumnType.LONG)
+        ResultFrameBuilder builder = ResultFrame.builder().column("id", ColumnType.LONG)
                 .column("SUM(x)", ColumnType.DOUBLE).column("SUM(y)", ColumnType.LONG);
         Random random = new Random(42);
         for (int row = 0; row < 400; row++) {

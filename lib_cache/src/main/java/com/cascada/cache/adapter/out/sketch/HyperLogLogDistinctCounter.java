@@ -1,10 +1,9 @@
 package com.cascada.cache.adapter.out.sketch;
 
+import java.util.List;
 import org.apache.datasketches.hll.HllSketch;
 import org.apache.datasketches.hll.TgtHllType;
 import org.apache.datasketches.hll.Union;
-
-import java.util.List;
 
 /**
  * A mergeable approximate distinct-count, wrapping Apache DataSketches HLL (plan §8.13). This is what
@@ -31,10 +30,8 @@ public final class HyperLogLogDistinctCounter {
 
     public void add(String value) {
         // DataSketches ignores empty strings; SQL COUNT(DISTINCT) excludes NULL but includes "".
-        // Prefix each non-null value to keep the string encoding injective, including embedded NULs.
-        if (value != null) {
-            sketch.update("\u0000" + value);
-        }
+        // Prefix every non-null string so the encoding remains injective, including empty and NUL.
+        if (value != null) sketch.update("\u0000" + value);
     }
 
     public void add(long value) {

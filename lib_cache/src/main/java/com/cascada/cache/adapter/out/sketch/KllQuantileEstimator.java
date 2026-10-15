@@ -1,9 +1,8 @@
 package com.cascada.cache.adapter.out.sketch;
 
+import java.util.List;
 import org.apache.datasketches.kll.KllDoublesSketch;
 import org.apache.datasketches.quantilescommon.QuantileSearchCriteria;
-
-import java.util.List;
 
 /**
  * A mergeable approximate quantile estimator, wrapping Apache DataSketches KLL (plan §8.13). This is

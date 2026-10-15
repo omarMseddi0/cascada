@@ -8,5 +8,5 @@ package com.cascada.cache.application.port.out;
  * (production). Services depend on the narrower {@link BucketCachePort} or
  * {@link CacheAdministrationPort} contract they use.
  */
-public interface CacheBackendPort extends BucketCachePort, CacheAdministrationPort {
+public interface CacheBackendPort extends BucketCachePort, CacheAdministrationPort, ValidationBaselinePort {
 }

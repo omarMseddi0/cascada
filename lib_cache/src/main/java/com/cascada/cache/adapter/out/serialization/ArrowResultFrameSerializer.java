@@ -1,12 +1,11 @@
 package com.cascada.cache.adapter.out.serialization;
 
-import com.cascada.cache.exception.CacheSerializationException;
-
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
+import com.cascada.cache.exception.CacheSerializationException;
 import com.github.luben.zstd.Zstd;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -144,7 +143,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
 
     private void writeColumn(FieldVector vector, ResultFrame frame, int column, ColumnType type) {
         vector.allocateNew();
-        FrameColumnReader values = frame.frameColumnReader(column);
+        FrameColumnReader values = frame.columnReader(column);
         Utf8EncodingCache strings = type == ColumnType.STRING ? new Utf8EncodingCache(frame.rowCount()) : null;
         for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
             if (values.isNullAt(rowIndex)) {
@@ -171,7 +170,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             FieldVector[] vectors = new FieldVector[fields.size()];
             ColumnType[] columnTypes = new ColumnType[fields.size()];
             Utf8ValueCache[] strings = new Utf8ValueCache[fields.size()];
-            ResultFrameBuilder builder = new ResultFrameBuilder();
+            ResultFrameBuilder builder = ResultFrame.builder();
             for (int column = 0; column < fields.size(); column++) {
                 Field field = fields.get(column);
                 ColumnType type = fromArrowType(field);
@@ -219,6 +218,8 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             case STRING -> builder.appendString(strings.read((VarCharVector) vector, rowIndex));
         }
     }
+
+    /** Bounded per-column encoding reuse; predominantly distinct columns leave the cache early. */
 
     private Schema toArrowSchema(ResultFrame frame) {
         List<Field> fields = new ArrayList<>(frame.columnNames().size());

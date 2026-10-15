@@ -3,8 +3,6 @@ package com.cascada.cache.application.service.warming;
 import com.cascada.identity.domain.QueryHash;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
 import static org.assertj.core.api.Assertions.assertThat;
 
 class WarmingQueueTest {

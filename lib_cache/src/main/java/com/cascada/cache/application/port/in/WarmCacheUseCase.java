@@ -1,9 +1,9 @@
 package com.cascada.cache.application.port.in;
 
 import com.cascada.cache.application.result.WarmingReport;
-
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.identity.domain.QueryHash;
+import java.time.Duration;
 
 /**
  * <b>Primary (driving) port</b> — pre-compute buckets a query is likely to want, so the read path finds
@@ -34,5 +34,12 @@ public interface WarmCacheUseCase {
      *     underlying rows moved); normally {@code false}, which skips already-cached buckets
      */
     WarmingReport warmCycle(long warmStartTimestampSeconds, long warmEndTimestampSeconds, boolean forceOverwrite);
+
+    /**
+     * The scheduled cycle: warm the complete buckets of the last {@code lookback}, letting the data-change
+     * canary decide whether already-cached history must be rewritten.
+     */
+    WarmingReport warmLookbackWindow(long nowSeconds, Duration lookback);
+
 
 }

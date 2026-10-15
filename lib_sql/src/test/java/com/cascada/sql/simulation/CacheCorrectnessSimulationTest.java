@@ -3,28 +3,27 @@ package com.cascada.sql.simulation;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.service.CacheExecutionEngine;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
+import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
+import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.frame.ResultFrameBuilder;
-import com.cascada.cache.domain.frame.ColumnType;
-import com.cascada.cache.application.service.hashing.QueryHashGenerator;
-import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.identity.domain.QueryHash;
-import com.cascada.sql.adapter.calcite.GapQueryRewriterAdapter;
+import com.cascada.sql.adapter.out.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.simulation.DirectComputeOracle.MeasureSpec;
 import com.cascada.sql.simulation.DirectComputeOracle.TrafficEvent;
-import org.junit.jupiter.api.Test;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -132,7 +131,8 @@ class CacheCorrectnessSimulationTest {
         QueryHash hash = hashGenerator.generateQueryHash(canonical, DirectComputeOracle.FIXED_STEP_SECONDS);
         InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
         for (long day : daysToCache) {
-            backend.store(CacheKeyFactory.buildBucketKey(hash, day, DAY), oracle.computeDayBucket(day, DAY));
+            backend.store(CacheKeyFactory.buildBucketKey(hash, day, DAY), oracle.computeDayBucket(day, DAY),
+                    java.time.Duration.ofDays(1));
         }
         CacheExecutionEngine engine = new CacheExecutionEngine(
                 backend, oracle, gapRewriter, CacheExecutionConfiguration.defaults());
@@ -143,7 +143,7 @@ class CacheCorrectnessSimulationTest {
     private ResultFrame reconstructAverageFrame(ResultFrame sumCountFrame, String field, String alias) {
         String sumColumn = "SUM(" + field + ")";
         String countColumn = "COUNT(" + field + ")";
-        ResultFrameBuilder builder = new ResultFrameBuilder();
+        ResultFrameBuilder builder = ResultFrame.builder();
         for (String column : sumCountFrame.columnNames()) {
             if (!column.equals(sumColumn) && !column.equals(countColumn)) {
                 builder.column(column, sumCountFrame.columnType(column));

@@ -1,31 +1,34 @@
 package com.cascada.sql.simulation;
 
+import com.cascada.cache.application.result.WarmingReport;
+
+import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
-import com.cascada.cache.application.result.WarmingReport;
 import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.application.service.WarmingOrchestrator;
-import com.cascada.cache.application.service.hashing.QueryHashGenerator;
-import com.cascada.cache.application.service.warming.WarmingQueue;
-import com.cascada.cache.domain.frame.ColumnType;
-import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.frame.ResultFrameBuilder;
-import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
+import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.identity.domain.QueryHash;
-import com.cascada.sql.adapter.out.calcite.GapQueryRewriterAdapter;
+import com.cascada.sql.adapter.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.simulation.DirectComputeOracle.MeasureSpec;
 import com.cascada.sql.simulation.DirectComputeOracle.TrafficEvent;
+import org.junit.jupiter.api.Test;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -156,7 +159,7 @@ class WarmingConsistencySimulationTest {
     private ResultFrame reconstructAverageFrame(ResultFrame sumCountFrame, String field, String alias) {
         String sumColumn = "SUM(" + field + ")";
         String countColumn = "COUNT(" + field + ")";
-        ResultFrameBuilder builder = ResultFrame.builder();
+        ResultFrameBuilder builder = new ResultFrameBuilder();
         for (String column : sumCountFrame.columnNames()) {
             if (!column.equals(sumColumn) && !column.equals(countColumn)) {
                 builder.column(column, sumCountFrame.columnType(column));

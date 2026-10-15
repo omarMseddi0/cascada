@@ -29,7 +29,6 @@ class SqlHexagonBoundaryTest {
     static void importClasses() {
         moduleClasses = new ClassFileImporter()
                 .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-            .withImportOption(location -> !location.asURI().toString().contains("/test-classes/"))
                 .importPackages("com.cascada.sql");
     }
 
@@ -45,7 +44,7 @@ class SqlHexagonBoundaryTest {
     void theDomainDependsOnlyOnItsOwnTypesCacheDomainTypesAndTheJdk() {
         noClasses().that().resideInAPackage("com.cascada.sql.domain..")
                 .should().dependOnClassesThat().resideOutsideOfPackages(
-                        "com.cascada.sql.domain..", "com.cascada.sql.exception..", "com.cascada.cache.domain..", "java..")
+                        "com.cascada.sql.domain..", "com.cascada.cache.domain..", "com.cascada.cache.exception..", "java..")
                 .check(moduleClasses);
     }
 

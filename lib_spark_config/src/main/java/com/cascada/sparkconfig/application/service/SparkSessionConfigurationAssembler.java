@@ -1,5 +1,6 @@
-package com.cascada.sparkconfig.domain;
+package com.cascada.sparkconfig.application.service;
 
+import com.cascada.sparkconfig.domain.SparkConfiguration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -25,6 +26,11 @@ public final class SparkSessionConfigurationAssembler {
 
     /** Keys that require a session stop+recreate to change (ported from {@code _RESTART_REQUIRED_SPARK_KEYS}). */
     public static final Set<String> RESTART_REQUIRED_KEYS = Set.of(
+            "spark.plugins",
+            "spark.shuffle.manager",
+            "spark.memory.offHeap.enabled",
+            "spark.memory.offHeap.size",
+            "spark.executor.memoryOverhead",
             "spark.driver.memory",
             "spark.executor.memory",
             "spark.driver.cores",

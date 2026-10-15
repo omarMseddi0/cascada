@@ -1,4 +1,4 @@
-package com.cascada.sparkconfig.domain;
+package com.cascada.sparkconfig.application.service;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -33,7 +33,7 @@ public final class StaticSparkInfrastructureSettings {
         entries.put("spark.driver.port", "8002");
         entries.put("spark.blockManager.port", "8001");
         entries.put("spark.kubernetes.namespace", "default");
-        entries.put("spark.kubernetes.container.image", "docker.registry.local:5000/spark:python3-java17-hadoop");
+        entries.put("spark.kubernetes.container.image", "cascada:0.1.0");
         entries.put("spark.kubernetes.container.image.pullPolicy", "IfNotPresent");
         entries.put("spark.kubernetes.authenticate.driver.serviceAccountName", "spark");
         entries.put("spark.kubernetes.authenticate.executor.serviceAccountName", "spark");
@@ -86,7 +86,7 @@ public final class StaticSparkInfrastructureSettings {
 
         // --- additional ---
         entries.put("spark.jars",
-                "/app/jars/antlr4-runtime-4.9.3.jar,/app/jars/delta-spark_2.12-3.3.0.jar,/app/jars/delta-storage-3.3.0.jar");
+                "/opt/spark/jars/antlr4-runtime-4.13.1.jar,/opt/spark/jars/delta-spark_4.1_2.13-4.1.0.jar,/opt/spark/jars/delta-storage-4.1.0.jar");
         entries.put("spark.sql.statistics.size.autoUpdate.enabled", "true");
         entries.put("spark.sql.join.preferSortMergeJoin", "true");
         entries.put("spark.sql.parquet.mergeSchema", "true");

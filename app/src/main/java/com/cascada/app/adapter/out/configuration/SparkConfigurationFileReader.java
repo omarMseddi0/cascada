@@ -1,8 +1,8 @@
 package com.cascada.app.adapter.out.configuration;
 
+import com.cascada.app.exception.ConfigurationException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,15 +21,20 @@ public final class SparkConfigurationFileReader {
                 throw new IllegalArgumentException("Spark configuration must be a flat map of spark.* strings");
             }
             Map<String, String> properties = new LinkedHashMap<>();
-            raw.forEach((key, value) -> {
-                if (!key.startsWith("spark.") || !(value instanceof String)) {
-                    throw new IllegalArgumentException("Spark configuration must be a flat map of spark.* strings");
-                }
-                properties.put(key, (String) value);
-            });
+            flatten(raw, properties);
             return Map.copyOf(properties);
-        } catch (IOException failure) {
-            throw new IllegalArgumentException("cannot read SPARK_CONFIG_PATH: " + path, failure);
+        } catch (IOException | IllegalArgumentException failure) {
+            throw new ConfigurationException("Cannot read Spark configuration: " + path, failure);
         }
+    }
+    private static void flatten(Map<String, Object> group, Map<String, String> properties) {
+        group.forEach((key, value) -> {
+            if (key.startsWith("spark.") && value instanceof String text) properties.put(key, text);
+            else if (!key.startsWith("spark.") && value instanceof Map<?, ?> nested) {
+                Map<String, Object> section = new LinkedHashMap<>();
+                nested.forEach((name, setting) -> section.put(name.toString(), setting));
+                flatten(section, properties);
+            } else throw new IllegalArgumentException("Spark configuration must contain spark.* string values");
+        });
     }
 }

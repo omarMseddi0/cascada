@@ -1,20 +1,16 @@
-package com.cascada.app.bootstrap;
+package com.cascada.app.config;
 
-import com.cascada.cache.application.result.QueryResult;
-
-import com.cascada.app.config.EngineSettings;
-
-import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
+import com.cascada.cache.application.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.result.QueryResult;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-
 import java.util.HashMap;
 import java.util.Map;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

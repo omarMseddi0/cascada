@@ -1,8 +1,10 @@
 package com.cascada.app.adapter.out.configuration;
 
-import org.junit.jupiter.api.Test;
+import com.cascada.app.exception.ConfigurationException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import org.junit.jupiter.api.Test;
+
 import static org.assertj.core.api.Assertions.*;
 
 class SparkConfigurationFileReaderTest {
@@ -22,6 +24,6 @@ class SparkConfigurationFileReaderTest {
         Files.writeString(config, "{\"not.spark\": 1}");
 
         assertThatThrownBy(() -> new SparkConfigurationFileReader().read(config.toString()))
-                .isInstanceOf(IllegalArgumentException.class);
+                .isInstanceOf(com.cascada.app.exception.ConfigurationException.class);
     }
 }

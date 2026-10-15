@@ -1,7 +1,8 @@
 package com.cascada.cache.application.port.out;
 
-import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.exception.CacheSerializationException;
+
+import com.cascada.cache.domain.frame.ResultFrame;
 
 /**
  * Serializes a {@link ResultFrame} to a compressed blob and back, porting the two-stage
@@ -17,6 +18,5 @@ public interface CacheValueSerializerPort {
     byte[] serialize(ResultFrame frame);
 
     ResultFrame deserialize(byte[] blob);
-
 
 }

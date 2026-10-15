@@ -1,11 +1,11 @@
 package com.cascada.cache.adapter.out.tracking;
 
 import com.cascada.cache.application.port.out.QueryPopularityPort;
-import com.cascada.cache.domain.query.PopularQuery;
 import com.cascada.identity.domain.QueryHash;
-import java.util.ArrayList;
+
 import java.util.Comparator;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.PriorityQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,29 +24,34 @@ public final class QueryPopularityTracker implements QueryPopularityPort {
 
     private final ConcurrentHashMap<QueryHash, AtomicLong>
             hitCountByQuery = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<QueryHash, String> physicalSqlByQuery = new ConcurrentHashMap<>();
 
     private final int maximumQueries;
     private final java.util.ArrayDeque<QueryHash> insertionOrder = new java.util.ArrayDeque<>();
-    public QueryPopularityTracker() { this(10_000); }
+
+    public QueryPopularityTracker() {
+        this(10_000);
+    }
+
     public QueryPopularityTracker(int maximumQueries) {
-        if (maximumQueries < 1) throw new IllegalArgumentException("maximumQueries must be positive");
+        if (maximumQueries < 1) {
+            throw new IllegalArgumentException("maximumQueries must be positive");
+        }
         this.maximumQueries = maximumQueries;
     }
 
     /** Record one observation of a query (a cache hit or a submission), incrementing its counter. */
     @Override
-    public void recordObservation(QueryHash queryHash, String physicalSql) {
-        physicalSqlByQuery.put(queryHash, physicalSql);
+    public void recordObservation(QueryHash queryHash) {
         AtomicLong existing = hitCountByQuery.get(queryHash);
-        if (existing != null) { existing.incrementAndGet(); return; }
+        if (existing != null) {
+            existing.incrementAndGet();
+            return;
+        }
         synchronized (insertionOrder) {
             AtomicLong counter = hitCountByQuery.get(queryHash);
             if (counter == null) {
                 if (hitCountByQuery.size() >= maximumQueries) {
-                    QueryHash evicted = insertionOrder.removeFirst();
-                    hitCountByQuery.remove(evicted);
-                    physicalSqlByQuery.remove(evicted);
+                    hitCountByQuery.remove(insertionOrder.removeFirst());
                 }
                 counter = new AtomicLong();
                 hitCountByQuery.put(queryHash, counter);
@@ -64,7 +69,7 @@ public final class QueryPopularityTracker implements QueryPopularityPort {
 
     /** The most popular {@code limit} queries, highest first — the warmer's prioritisation feed. */
     @Override
-    public List<PopularQuery> topByPopularity(int limit) {
+    public List<QueryHash> topByPopularity(int limit) {
         if (limit < 0) throw new IllegalArgumentException("limit must be non-negative");
         if (limit == 0) return List.of();
         // Snapshot each count once; concurrent updates cannot invalidate the comparator.
@@ -82,9 +87,7 @@ public final class QueryPopularityTracker implements QueryPopularityPort {
         });
         List<RankedQuery> ranked = new ArrayList<>(best);
         ranked.sort(ascending.reversed());
-        return ranked.stream()
-                .map(rankedQuery -> new PopularQuery(rankedQuery.query(), physicalSqlByQuery.get(rankedQuery.query())))
-                .toList();
+        return ranked.stream().map(RankedQuery::query).toList();
     }
 
     public int distinctQueryCount() {

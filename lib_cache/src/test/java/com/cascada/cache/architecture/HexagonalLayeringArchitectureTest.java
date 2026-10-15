@@ -19,8 +19,7 @@ class HexagonalLayeringArchitectureTest {
     @BeforeAll
     static void importClasses() {
         ClassFileImporter importer = new ClassFileImporter()
-                .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-            .withImportOption(location -> !location.asURI().toString().contains("/test-classes/"));
+                .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS);
         moduleClasses = importer.importPackages("com.cascada.cache");
         domainClasses = importer.importPackages("com.cascada.cache.domain");
     }
@@ -54,9 +53,9 @@ class HexagonalLayeringArchitectureTest {
                 .check(moduleClasses);
     }
 
-    /** Ports contain contracts; results and exceptions have separate owners. */
+    /** Top-level port types are interfaces; nested contract values remain allowed. */
     @Test
-    void portsContainOnlyInterfaces() {
+    void everyTopLevelPortTypeIsAnInterface() {
         classes().that().resideInAnyPackage(
                         "com.cascada.cache.application.port.in..",
                         "com.cascada.cache.application.port.out..")
@@ -94,19 +93,21 @@ class HexagonalLayeringArchitectureTest {
         noClasses()
                 .should().dependOnClassesThat().resideOutsideOfPackages(
                         "com.cascada.cache.domain..",
-                        "com.cascada.cache.exception..",
-                        "com.cascada.identity.domain..",
+                        "com.cascada.identity.domain..", "com.cascada.cache.exception..",
                         "java..")
                 .check(domainClasses);
     }
 
     @Test
-    void domainTypesAreGroupedBySubdomain() {
+    void domainTypesAreGroupedAndSharedExceptionsAreLeafTypes() {
         boolean hasFlatDomainType = false;
         for (var type : moduleClasses) {
             hasFlatDomainType |= type.getPackageName().equals("com.cascada.cache.domain");
         }
         assertFalse(hasFlatDomainType, "domain types must live in a cohesive domain subpackage");
+        noClasses().that().resideInAPackage("com.cascada.cache.exception..")
+                .should().dependOnClassesThat().resideOutsideOfPackages("java..", "com.cascada.cache.exception..")
+                .check(moduleClasses);
     }
 
     /** Application dependencies are limited to cache ports/domain, identity values, and the JDK. */
@@ -116,8 +117,7 @@ class HexagonalLayeringArchitectureTest {
                 .should().dependOnClassesThat().resideOutsideOfPackages(
                         "com.cascada.cache.application..",
                         "com.cascada.cache.domain..",
-                        "com.cascada.cache.exception..",
-                        "com.cascada.identity.domain..",
+                        "com.cascada.identity.domain..", "com.cascada.cache.exception..",
                         "java..")
                 .because("application code may depend on its ports, domain, identity values, and the JDK")
                 .check(moduleClasses);

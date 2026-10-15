@@ -1,9 +1,13 @@
 package com.cascada.cache.application.service.safety;
 
-import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.safety.BypassReason;
-import com.cascada.cache.domain.safety.CacheConfiguration;
+
 import com.cascada.cache.domain.safety.CacheDecision;
+
+import com.cascada.cache.domain.safety.CacheConfiguration;
+
+import com.cascada.cache.domain.query.CanonicalQueryObject;
+
 import java.util.List;
 import java.util.Optional;
 
@@ -54,14 +58,6 @@ public final class SafetyRuleRegistry {
             }
         }
         return Optional.empty();
-    }
-
-    /** Every rule that fires, in registration order — for decisions that depend on why a query bypassed. */
-    public List<BypassReason> findAllBypassReasons(CanonicalQueryObject canonicalObject,
-                                                   CacheConfiguration configuration) {
-        return rules.stream()
-                .flatMap(rule -> rule.evaluate(canonicalObject, configuration).stream())
-                .toList();
     }
 
     public List<SafetyRule> rules() {

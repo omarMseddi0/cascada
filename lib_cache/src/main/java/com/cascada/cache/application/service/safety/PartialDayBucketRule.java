@@ -1,9 +1,12 @@
 package com.cascada.cache.application.service.safety;
 
-import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.safety.BypassReason;
+
 import com.cascada.cache.domain.safety.CacheConfiguration;
+
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.time.TimeRange;
+
 import java.util.Optional;
 
 /**

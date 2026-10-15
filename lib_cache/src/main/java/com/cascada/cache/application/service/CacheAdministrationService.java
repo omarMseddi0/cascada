@@ -4,9 +4,10 @@ import com.cascada.cache.application.port.in.FlushCacheUseCase;
 import com.cascada.cache.application.port.in.MeasureCacheSizeUseCase;
 import com.cascada.cache.application.port.out.CacheAdministrationPort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
-import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
+
 import java.util.Objects;
 
 /**

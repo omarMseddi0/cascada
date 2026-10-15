@@ -1,7 +1,7 @@
 package com.cascada.cache.application.port.out;
 
 import com.cascada.cache.domain.frame.ResultFrame;
-import java.time.Duration;
+
 import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
@@ -24,9 +24,6 @@ public interface BucketCachePort {
         for (int index = 0; index < frames.size(); index++) visitor.accept(index, frames.get(index));
     }
 
-    /** Store (or overwrite) one bucket's frame under its key; the entry expires after {@code timeToLive}. */
-    void store(String key, ResultFrame frame, Duration timeToLive);
-
-    /** Remove a bucket whose stored value can no longer be trusted, so the warmer recomputes it. */
-    void evict(String key);
+    /** Store (or overwrite) one bucket's frame under its key. */
+    void store(String key, ResultFrame frame);
 }

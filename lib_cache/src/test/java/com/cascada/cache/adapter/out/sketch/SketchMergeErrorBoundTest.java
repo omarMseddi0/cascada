@@ -1,8 +1,9 @@
 package com.cascada.cache.adapter.out.sketch;
 
+import org.junit.jupiter.api.Test;
+
 import java.util.ArrayList;
 import java.util.List;
-import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -12,16 +13,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * thing exact aggregates cannot do.
  */
 class SketchMergeErrorBoundTest {
-    @Test void hllDistinguishesEmptyStringFromNullAndNul() {
-        var first = new HyperLogLogDistinctCounter();
+
+    @Test
+    void hyperLogLogIncludesEmptyStringsButExcludesNullAndPreservesNulValuesAcrossUnion() {
+        HyperLogLogDistinctCounter first = new HyperLogLogDistinctCounter();
         first.add((String) null);
         first.add("");
         first.add("");
-        var second = new HyperLogLogDistinctCounter();
+
+        HyperLogLogDistinctCounter second = new HyperLogLogDistinctCounter();
         second.add("\u0000");
         second.add("a");
-        assertThat(HyperLogLogDistinctCounter.unionOf(List.of(first, second)).estimateDistinctCount())
-                .isCloseTo(3.0, org.assertj.core.data.Offset.offset(0.001));
+
+        double estimate = HyperLogLogDistinctCounter.unionOf(List.of(first, second)).estimateDistinctCount();
+        assertThat(estimate).isCloseTo(3.0, org.assertj.core.data.Offset.offset(0.001));
     }
 
     @Test

@@ -1,9 +1,11 @@
 package com.cascada.cache.application.service.hashing;
 
 import com.cascada.cache.domain.hashing.HashComponents;
+
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.time.CacheTimeConstants;
 import com.cascada.identity.domain.QueryHash;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -30,8 +32,8 @@ import java.util.TreeMap;
  */
 public final class QueryHashGenerator {
 
-    /** Version 3 excludes entries whose gap queries may have dropped fractional or negated predicates. */
-    private static final int CANONICAL_SEMANTICS_VERSION = 3;
+    /** Version 2 separates corrected ordinal projection hashes from entries written by version 1. */
+    private static final int CANONICAL_SEMANTICS_VERSION = 2;
 
     /** Builds the logic hash for a canonical object using the platform default fixed step. */
     public QueryHash generateQueryHash(CanonicalQueryObject canonicalObject) {

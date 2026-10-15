@@ -1,8 +1,6 @@
 package com.cascada.cache.adapter.out.tracking;
 
-import com.cascada.cache.domain.query.PopularQuery;
 import com.cascada.identity.domain.QueryHash;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -13,36 +11,27 @@ class QueryPopularityTrackerTest {
     private static final QueryHash B = QueryHash.of("00000000000000000000000000000002");
     private static final QueryHash C = QueryHash.of("00000000000000000000000000000003");
 
-    private static String sqlFor(QueryHash queryHash) {
-        return "SELECT SUM(bytes) FROM traffic -- " + queryHash.value();
-    }
-
-    private static List<QueryHash> hashes(List<PopularQuery> popularQueries) {
-        return popularQueries.stream().map(PopularQuery::queryHash).toList();
-    }
-
     @Test
     void popularityTrackerRanksByCumulativeHits() {
         QueryPopularityTracker tracker = new QueryPopularityTracker();
-        tracker.recordObservation(A, sqlFor(A));
-        tracker.recordObservation(B, sqlFor(B));
-        tracker.recordObservation(B, sqlFor(B));
-        tracker.recordObservation(B, sqlFor(B));
-        tracker.recordObservation(C, sqlFor(C));
-        tracker.recordObservation(C, sqlFor(C));
+        tracker.recordObservation(A);
+        tracker.recordObservation(B);
+        tracker.recordObservation(B);
+        tracker.recordObservation(B);
+        tracker.recordObservation(C);
+        tracker.recordObservation(C);
 
         assertThat(tracker.hitCount(B)).isEqualTo(3);
-        assertThat(hashes(tracker.topByPopularity(2))).containsExactly(B, C);
-        assertThat(tracker.topByPopularity(1)).containsExactly(new PopularQuery(B, sqlFor(B)));
+        assertThat(tracker.topByPopularity(2)).containsExactly(B, C);
         assertThat(tracker.distinctQueryCount()).isEqualTo(3);
     }
 
     @Test
     void handlesLimitsAndTies() {
         QueryPopularityTracker tracker = new QueryPopularityTracker();
-        tracker.recordObservation(C, sqlFor(C)); tracker.recordObservation(B, sqlFor(B)); tracker.recordObservation(A, sqlFor(A));
+        tracker.recordObservation(C); tracker.recordObservation(B); tracker.recordObservation(A);
         assertThat(tracker.topByPopularity(0)).isEmpty();
-        assertThat(hashes(tracker.topByPopularity(100))).containsExactlyInAnyOrder(A,B,C);
+        assertThat(tracker.topByPopularity(100)).containsExactlyInAnyOrder(A,B,C);
         assertThat(tracker.topByPopularity(2)).hasSize(2);
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> tracker.topByPopularity(-1))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -59,7 +48,7 @@ class QueryPopularityTrackerTest {
             var tasks = new java.util.ArrayList<java.util.concurrent.Callable<Void>>();
             for (int thread = 0; thread < 8; thread++) tasks.add(() -> {
                 for (int round = 0; round < 10; round++) {
-                    for (QueryHash key : keys) tracker.recordObservation(key, sqlFor(key));
+                    for (QueryHash key : keys) tracker.recordObservation(key);
                 }
                 return null;
             });
@@ -67,7 +56,7 @@ class QueryPopularityTrackerTest {
             for (var result : executor.invokeAll(tasks)) result.get();
             assertThat(tracker.distinctQueryCount()).isEqualTo(keys.size());
             for (QueryHash key : keys) assertThat(tracker.hitCount(key)).isEqualTo(80);
-            assertThat(hashes(tracker.topByPopularity(10))).hasSize(10).allMatch(keys::contains);
+            assertThat(tracker.topByPopularity(10)).hasSize(10).allMatch(keys::contains);
         } finally { executor.shutdownNow(); }
     }
 
@@ -78,11 +67,11 @@ class QueryPopularityTrackerTest {
         for (int i = 0; i < 256; i++) {
             QueryHash key = QueryHash.of(String.format("%032x",i));
             expected.add(key);
-            for (int hit = 0; hit <= i; hit++) tracker.recordObservation(key, sqlFor(key));
+            for (int hit = 0; hit <= i; hit++) tracker.recordObservation(key);
         }
         java.util.Collections.reverse(expected);
         for (int limit : new int[]{0,1,10,64,256,512}) {
-            assertThat(hashes(tracker.topByPopularity(limit))).containsExactlyElementsOf(expected.subList(0,Math.min(limit,256)));
+            assertThat(tracker.topByPopularity(limit)).containsExactlyElementsOf(expected.subList(0,Math.min(limit,256)));
         }
     }
 }

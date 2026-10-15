@@ -4,19 +4,18 @@ import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.exception.CacheSerializationException;
 import io.lettuce.core.KeyScanCursor;
 import io.lettuce.core.KeyValue;
 import io.lettuce.core.RedisCommandExecutionException;
 import io.lettuce.core.RedisFuture;
-import io.lettuce.core.SetArgs;
-import io.lettuce.core.codec.ByteArrayCodec;
-import io.lettuce.core.protocol.CommandArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.async.RedisAsyncCommands;
 import io.lettuce.core.api.sync.RedisCommands;
+import org.junit.jupiter.api.Test;
+
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -30,7 +29,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -214,58 +212,6 @@ class ValkeyCacheBackendAdapterTest {
         assertInstanceOf(java.util.concurrent.ExecutionException.class, failure.getCause());
         assertEquals(2, responses.size());
         assertTrue(responses.get(1).isCancelled());
-    }
-
-    @Test
-    void storeWritesTheValueWithItsTimeToLive() {
-        AtomicReference<String> sentArguments = new AtomicReference<>();
-        RedisCommands<byte[], byte[]> sync = proxy(RedisCommands.class, (proxy, method, args) -> {
-            assertEquals("set", method.getName());
-            CommandArgs<byte[], byte[]> commandArguments = new CommandArgs<>(ByteArrayCodec.INSTANCE);
-            ((SetArgs) args[2]).build(commandArguments);
-            sentArguments.set(commandArguments.toCommandString());
-            return "OK";
-        });
-        CacheValueSerializerPort serializer = new CacheValueSerializerPort() {
-            @Override public byte[] serialize(ResultFrame frame) { return bytes("frame"); }
-            @Override public ResultFrame deserialize(byte[] blob) { throw new UnsupportedOperationException(); }
-        };
-        ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(connection(null, unused -> sync), serializer);
-
-        adapter.store("QC:V4:B86400:abc:0", ResultFrame.builder().column("n", ColumnType.LONG).row(1L).build(),
-                Duration.ofDays(7));
-
-        assertEquals("EX 604800", sentArguments.get());
-    }
-
-    @Test
-    void anUndecodableBlobIsDeliveredAsMissingAndDeleted() {
-        List<String> deletedKeys = new ArrayList<>();
-        RedisAsyncCommands<byte[], byte[]> async = proxy(RedisAsyncCommands.class, (proxy, method, args) -> {
-            if (method.getName().equals("del")) {
-                deletedKeys.add(text(((byte[][]) args[0])[0]));
-                return redisFuture(CompletableFuture.completedFuture(1L));
-            }
-            CompletableFuture<List<KeyValue<byte[], byte[]>>> response = new CompletableFuture<>();
-            completeWithMgetResults(response, (byte[][]) args[0], "none");
-            return redisFuture(response);
-        });
-        CacheValueSerializerPort corruptForBad = new CacheValueSerializerPort() {
-            @Override public byte[] serialize(ResultFrame frame) { throw new UnsupportedOperationException(); }
-            @Override public ResultFrame deserialize(byte[] blob) {
-                if (text(blob).equals("kbad")) {
-                    throw new CacheSerializationException("corrupt", new IllegalStateException());
-                }
-                return ResultFrame.builder().column("value", ColumnType.LONG).row(1L).build();
-            }
-        };
-        ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(connection(async, unused -> null), corruptForBad);
-
-        List<java.util.Optional<ResultFrame>> frames = adapter.multiGet(List.of("kgood", "kbad"));
-
-        assertTrue(frames.get(0).isPresent());
-        assertTrue(frames.get(1).isEmpty());
-        assertEquals(List.of("kbad"), deletedKeys);
     }
 
     private static void completeWithMgetResults(

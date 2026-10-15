@@ -121,14 +121,14 @@ public final class ResultFrameBuilder {
         Object[] trimmedColumns = new Object[names.size()];
         long[][] trimmedPresent = new long[names.size()][];
         for (int column = 0; column < names.size(); column++) {
-            trimmedColumns[column] = growColumn(columns[column], types.get(names.get(column)), rowCount);
+            trimmedColumns[column] = copyColumn(columns[column], types.get(names.get(column)), rowCount);
             trimmedPresent[column] = present[column] == null ? null
                     : java.util.Arrays.copyOf(present[column], bitmapWords(rowCount));
         }
         return new ResultFrame(names, types, trimmedColumns, trimmedPresent, rowCount);
     }
 
-    void appendObject(Object value) {
+    private void appendObject(Object value) {
         if (value == null) {
             appendNull();
             return;
@@ -142,7 +142,7 @@ public final class ResultFrameBuilder {
         }
     }
 
-    void requireType(ColumnType expected) {
+    private void requireType(ColumnType expected) {
         initialize();
         if (nextColumn >= names.size() || indexedTypes[nextColumn] != expected) {
             String actual = nextColumn >= names.size() ? "no column" : indexedTypes[nextColumn].toString();
@@ -150,7 +150,7 @@ public final class ResultFrameBuilder {
         }
     }
 
-    void ensureCapacityForCell() {
+    private void ensureCapacityForCell() {
         initialize();
         if (rowCount < capacity && !sharedSnapshot) {
             return;
@@ -169,7 +169,7 @@ public final class ResultFrameBuilder {
         sharedSnapshot = false;
     }
 
-    void initialize() {
+    private void initialize() {
         if (columns != null) {
             return;
         }
@@ -184,7 +184,7 @@ public final class ResultFrameBuilder {
         }
     }
 
-    void advance() {
+    private void advance() {
         nextColumn++;
         if (nextColumn == names.size()) {
             nextColumn = 0;
@@ -192,7 +192,7 @@ public final class ResultFrameBuilder {
         }
     }
 
-    void markNull() {
+    private void markNull() {
         long[] bitmap = present[nextColumn];
         if (bitmap == null) {
             bitmap = new long[bitmapWords(capacity)];
@@ -204,7 +204,7 @@ public final class ResultFrameBuilder {
         bitmap[rowCount >>> 6] &= ~(1L << (rowCount & 63));
     }
 
-    static Object newColumn(ColumnType type, int length) {
+    private static Object newColumn(ColumnType type, int length) {
         return switch (type) {
             case LONG -> new long[length];
             case DOUBLE -> new double[length];
@@ -213,7 +213,16 @@ public final class ResultFrameBuilder {
         };
     }
 
-    static Object growColumn(Object source, ColumnType type, int length) {
+    private static Object growColumn(Object source, ColumnType type, int length) {
+        return switch (type) {
+            case LONG -> java.util.Arrays.copyOf((long[]) source, length);
+            case DOUBLE -> java.util.Arrays.copyOf((double[]) source, length);
+            case STRING -> java.util.Arrays.copyOf((String[]) source, length);
+            case DECIMAL -> java.util.Arrays.copyOf((java.math.BigDecimal[]) source, length);
+        };
+    }
+
+    private static Object copyColumn(Object source, ColumnType type, int length) {
         return switch (type) {
             case LONG -> java.util.Arrays.copyOf((long[]) source, length);
             case DOUBLE -> java.util.Arrays.copyOf((double[]) source, length);

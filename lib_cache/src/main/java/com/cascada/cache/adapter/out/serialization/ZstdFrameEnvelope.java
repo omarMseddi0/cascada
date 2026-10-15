@@ -1,7 +1,6 @@
 package com.cascada.cache.adapter.out.serialization;
 
 import com.github.luben.zstd.Zstd;
-import com.github.luben.zstd.ZstdCompressCtx;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -14,11 +13,9 @@ final class ZstdFrameEnvelope {
         int capacity = Math.toIntExact(Math.addExact(4L, Zstd.compressBound(length)));
         byte[] blob = new byte[capacity];
         new UnsafeBuffer(blob).putInt(0, length, ByteOrder.BIG_ENDIAN);
-        try (ZstdCompressCtx compressor = new ZstdCompressCtx()) {
-            compressor.setLevel(level).setChecksum(true).setContentSize(true);
-            int written = compressor.compressByteArray(blob, 4, capacity - 4, source, 0, length);
-            return Arrays.copyOf(blob, Math.addExact(written, 4));
-        }
+        long written = Zstd.compressByteArray(blob, 4, capacity - 4, source, 0, length, level);
+        if (Zstd.isError(written)) throw new IllegalArgumentException(Zstd.getErrorName(written));
+        return Arrays.copyOf(blob, Math.toIntExact(written + 4));
     }
 
     static byte[] decompress(byte[] blob) {

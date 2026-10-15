@@ -1,17 +1,34 @@
 package com.cascada.cache.domain.frame;
 
-import java.util.Map;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ResultFrameTest {
 
     @Test
+    void nestedColumnReaderRemainsACompatibilityDelegate() {
+        ResultFrame.ColumnReader reader = new ResultFrameBuilder().column("n", ColumnType.LONG)
+                .row(7L).build().columnReader(0);
+
+        assertThat(reader.type()).isEqualTo(ColumnType.LONG);
+        assertThat(reader.longValue(0)).isEqualTo(7L);
+    }
+
+    @Test
+    void nestedBuilderRemainsACompatibilityDelegate() {
+        ResultFrame.Builder builder = ResultFrame.builder().column("n", ColumnType.LONG).row(7L);
+
+        assertThat(builder.build().longAt(0, 0)).isEqualTo(7L);
+    }
+
+    @Test
     void resolvedColumnReaderKeepsItsSnapshotAcrossBuilderReuse() {
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(64).column("n", ColumnType.LONG);
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(64).column("n", ColumnType.LONG);
         for (int row = 0; row < 64; row++) builder.appendLong(row);
-        FrameColumnReader reader = builder.build().columnReader(0);
+        FrameColumnReader reader = builder.build().frameColumnReader(0);
         builder.appendNull();
         assertThat(reader.type()).isEqualTo(ColumnType.LONG);
         for (int row = 0; row < 64; row++) {
@@ -24,7 +41,7 @@ class ResultFrameTest {
 
     @Test
     void packedNullsCrossWordBoundariesAndRemainImmutableWhenBuilderGrows() {
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(65)
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(65)
                 .column("n", ColumnType.LONG).column("s", ColumnType.STRING);
         for (int row = 0; row < 65; row++) {
             if (row == 0 || row == 63 || row == 64) builder.appendNull(); else builder.appendLong(row);
@@ -49,7 +66,7 @@ class ResultFrameTest {
 
     @Test
     void lateFirstNullDoesNotChangeAnEarlierAllValidSnapshot() {
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(64).column("n", ColumnType.LONG);
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(64).column("n", ColumnType.LONG);
         for (int row = 0; row < 64; row++) builder.appendLong(row);
         ResultFrame beforeNull = builder.build();
         builder.appendNull();
@@ -63,7 +80,7 @@ class ResultFrameTest {
 
     @Test
     void exactlySizedBuildSharesSafelyAndDetachesBeforeBuilderGrowth() {
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(32).column("value", ColumnType.LONG);
+        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(32).column("value", ColumnType.LONG);
         for (int row = 0; row < 32; row++) builder.appendLong(row);
         ResultFrame first = builder.build(), second = builder.build();
         builder.appendLong(32);
@@ -75,10 +92,10 @@ class ResultFrameTest {
 
     @Test
     void capacityHintAndTypedCellCopyPreserveNullsExactNumbersAndSnapshots() {
-        ResultFrame source = ResultFrame.builder().expectedRows(1).column("large", ColumnType.LONG)
+        ResultFrame source = new ResultFrameBuilder().expectedRows(1).column("large", ColumnType.LONG)
                 .column("decimal", ColumnType.DECIMAL).column("missing", ColumnType.STRING)
                 .row(Long.MAX_VALUE, new java.math.BigDecimal("1.2300"), null).build();
-        ResultFrameBuilder copy = ResultFrame.builder().expectedRows(1).column("large", ColumnType.LONG)
+        ResultFrameBuilder copy = new ResultFrameBuilder().expectedRows(1).column("large", ColumnType.LONG)
                 .column("decimal", ColumnType.DECIMAL).column("missing", ColumnType.STRING);
         for (int column = 0; column < 3; column++) copy.appendCell(source, 0, column);
         ResultFrame snapshot = copy.build();
@@ -90,7 +107,7 @@ class ResultFrameTest {
 
     @Test
     void builderSnapshotDoesNotChangeWhenBuilderIsReused() {
-        ResultFrameBuilder builder = ResultFrame.builder()
+        ResultFrameBuilder builder = new ResultFrameBuilder()
                 .column("value", ColumnType.DOUBLE)
                 .row(Map.of("value", 1.0));
 
@@ -103,7 +120,7 @@ class ResultFrameTest {
 
     @Test
     void rowsReturnsTheCachedReadOnlyView() {
-        ResultFrame frame = ResultFrame.builder()
+        ResultFrame frame = new ResultFrameBuilder()
                 .column("value", ColumnType.DOUBLE)
                 .row(Map.of("value", 1.0))
                 .build();
@@ -112,8 +129,21 @@ class ResultFrameTest {
     }
 
     @Test
+    void rowViewsRemainReadOnlyAndReturnNullForMissingKeys() {
+        ResultFrame frame = new ResultFrameBuilder().column("n", ColumnType.LONG).row(7L).build();
+        Map<String, Object> row = frame.rows().get(0);
+
+        assertThat(row.get("missing")).isNull();
+        assertThat(row).doesNotContainKey("missing");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> row.put("n", 8L))
+                .isInstanceOf(UnsupportedOperationException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> frame.rows().set(0, Map.of("n", 8L)))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
     void typedColumnsPreserveNullsWithoutBoxedRowsOnTheWritePath() {
-        ResultFrame frame = ResultFrame.builder()
+        ResultFrame frame = new ResultFrameBuilder()
                 .column("bucket", ColumnType.LONG)
                 .column("value", ColumnType.DOUBLE)
                 .column("service", ColumnType.STRING)

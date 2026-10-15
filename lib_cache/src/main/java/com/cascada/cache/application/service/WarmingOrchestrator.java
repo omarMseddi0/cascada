@@ -1,6 +1,5 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.config.WarmingConfiguration;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.BucketCachePort;
@@ -8,50 +7,49 @@ import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.QueryPopularityPort;
-import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.application.result.PatternWarmingResult;
 import com.cascada.cache.application.result.WarmingReport;
-import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.time.TimeBucketCalculator;
-import com.cascada.cache.application.service.warming.DataChangeDetector;
 import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.PopularQuery;
 import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.identity.domain.QueryHash;
 import java.math.BigInteger;
-import java.time.Clock;
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
 import java.util.logging.Logger;
 
 /**
- * The Java heir to {@code auto_warmer.py}: the <em>only</em> writer of cache buckets. It pre-computes
- * likely-to-be-hit buckets so the read path finds them already in cache. It ties together the Layer-1
- * {@link WarmingQueue} (recent misses) and the Layer-2 {@link QueryPopularityPort} (persistent top-N), and
- * warms each pattern <em>bucket by bucket</em> over the lookback window via the same gap-rewriter and Spark
- * executor the engine uses, so a warmed bucket is byte-identical to one the engine computes for a gap.
+ * The Java heir to {@code auto_warmer.py}: the application service that pre-computes likely-to-be-hit
+ * buckets so the read path finds them already in cache. It ties together the existing warming
+ * machinery — the Layer-1 {@link WarmingQueue} (recent misses) and the Layer-2
+ * {@link QueryPopularityPort} (persistent top-N) — and
+ * warms each pattern <em>bucket by bucket</em> over the lookback window via the same gap-rewriter and
+ * Spark executor the engine uses, so a warmed bucket is byte-identical to one the engine would have
+ * computed on a miss (the 100%-data-consistency invariant).
  *
+ * <p>Ported faithfully from {@code _perform_warming_cycle} / {@code _warm_single_pattern_sequential}:
  * <ul>
- *   <li><b>Complete buckets only:</b> the bucket containing "now" is live and never stored;</li>
- *   <li><b>EXISTS-skip:</b> a bucket already present is not recomputed unless the data-change canary
- *       (or an operator) forces an overwrite;</li>
- *   <li><b>Expiring writes:</b> every bucket is stored with a time-to-live, so nothing lives forever;</li>
- *   <li><b>Bounded writes:</b> a frame larger than the configured row cap is not stored;</li>
- *   <li><b>two layers, de-duplicated:</b> Layer 2 never re-warms a hash Layer 1 already did, and rebuilds
- *       canonical objects from persisted SQL after a restart.</li>
+ *   <li><b>EXISTS-skip:</b> a bucket already present is not recomputed (unless {@code forceOverwrite});</li>
+ *   <li><b>force-overwrite:</b> the validation gate's data-change signal re-warms every bucket;</li>
+ *   <li><b>per-bucket gap SQL:</b> the whole bucket is a gap fetched via
+ *       {@link GapQueryRewriterPort#buildGapQuery} with a single tail range, which also strips the
+ *       original wide time predicate (no double-predicate 0-row bug);</li>
+ *   <li><b>two layers, de-duplicated:</b> Layer-2 never re-warms a hash Layer-1 already did.</li>
  * </ul>
+ *
+ * <p>Unlike the Python monolith (which carried the canonical object inside each queue vote), the Java
+ * {@link WarmingQueue} carries only the hash; this orchestrator owns the hash→canonical
+ * {@link #canonicalRegistry} that {@link #recordQuery} populates from the read path.
  */
 public final class WarmingOrchestrator implements WarmCacheUseCase {
 
@@ -63,12 +61,11 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     private final WarmingQueue warmingQueue;
     private final QueryPopularityPort popularityTracker;
     private final CoverageIndexPort coverageIndex;
-    private final SqlCanonicalizerPort canonicalizer;
-    private final DataChangeDetector dataChangeDetector;
-    private final CubeShapeCatalog cubeCatalog;
-    private final WarmingConfiguration configuration;
-    private final Clock clock;
+    private final long bucketSeconds;
+    private final int topNQueries;
+
     private final Map<QueryHash, CanonicalQueryObject> canonicalRegistry = new LinkedHashMap<>();
+    private final int maximumPatterns;
 
     public WarmingOrchestrator(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
@@ -92,33 +89,16 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                               GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
                               QueryPopularityPort popularityTracker, CoverageIndexPort coverageIndex,
                               long bucketSeconds, int topNQueries, int maximumPatterns) {
-        this(cacheBackend, sparkExecutor, gapQueryRewriter, warmingQueue, popularityTracker, coverageIndex,
-                null, null, null, WarmingConfiguration.of(bucketSeconds > 0 ? bucketSeconds : 86_400L,
-                        Math.max(0, topNQueries), maximumPatterns), Clock.systemUTC());
-    }
-
-    /**
-     * Full wiring. {@code coverageIndex}, {@code canonicalizer}, {@code dataChangeDetector} and
-     * {@code cubeCatalog} are optional: without a canonicalizer Layer 2 only warms queries seen since start,
-     * without a detector forced overwrites come only from operators, and without a catalog there is no cube
-     * to invalidate.
-     */
-    public WarmingOrchestrator(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
-                               GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
-                               QueryPopularityPort popularityTracker, CoverageIndexPort coverageIndex,
-                               SqlCanonicalizerPort canonicalizer, DataChangeDetector dataChangeDetector,
-                               CubeShapeCatalog cubeCatalog, WarmingConfiguration configuration, Clock clock) {
+        if (maximumPatterns < 1) throw new IllegalArgumentException("maximumPatterns must be positive");
+        this.maximumPatterns = maximumPatterns;
         this.cacheBackend = cacheBackend;
         this.sparkExecutor = sparkExecutor;
         this.gapQueryRewriter = gapQueryRewriter;
         this.warmingQueue = warmingQueue;
         this.popularityTracker = popularityTracker;
         this.coverageIndex = coverageIndex;
-        this.canonicalizer = canonicalizer;
-        this.dataChangeDetector = dataChangeDetector;
-        this.cubeCatalog = cubeCatalog;
-        this.configuration = configuration;
-        this.clock = clock;
+        this.bucketSeconds = bucketSeconds > 0 ? bucketSeconds : 86_400L;
+        this.topNQueries = Math.max(0, topNQueries);
     }
 
     /**
@@ -129,60 +109,45 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     @Override
     public synchronized void recordQuery(QueryHash queryHash, CanonicalQueryObject canonicalObject) {
         canonicalRegistry.put(queryHash, canonicalObject);
-        if (canonicalRegistry.size() > configuration.maximumPatterns()) {
+        if (canonicalRegistry.size() > maximumPatterns) {
             var oldest = canonicalRegistry.keySet().iterator();
             oldest.next();
             oldest.remove();
         }
         warmingQueue.vote(queryHash);
-        popularityTracker.recordObservation(queryHash, canonicalObject.physicalSql());
+        popularityTracker.recordObservation(queryHash);
     }
 
-    private synchronized Optional<CanonicalQueryObject> findCanonicalQuery(QueryHash queryHash) {
-        return Optional.ofNullable(canonicalRegistry.get(queryHash));
+    private synchronized CanonicalQueryObject findCanonicalQuery(QueryHash queryHash) {
+        return canonicalRegistry.get(queryHash);
     }
 
-    /**
-     * The scheduled cycle: warm every complete bucket of the lookback window, first asking the data-change
-     * canary whether already-cached history moved. The validation window leaves out the oldest bucket (it
-     * is about to slide out), the live bucket and the bucket before it (late data still lands there).
-     */
+    /** One warming cycle over {@code [warmStartTs, warmEndTs]} — Layer 1 then Layer 2, de-duplicated. */
     @Override
-    public WarmingReport warmLookbackWindow(long nowSeconds, Duration lookback) {
-        long bucketSeconds = configuration.bucketSeconds();
-        long currentBucketStart = Math.floorDiv(nowSeconds, bucketSeconds) * bucketSeconds;
-        long warmStart = nowSeconds - lookback.toSeconds();
-        long validationStart = Math.floorDiv(warmStart, bucketSeconds) * bucketSeconds + bucketSeconds;
-        long validationEnd = currentBucketStart - bucketSeconds - 1;
-        boolean historyChanged = dataChangeDetector != null && validationEnd >= validationStart
-                && dataChangeDetector.hasHistoricalDataChanged(new TimeRange(validationStart, validationEnd));
-        return warmCycle(warmStart, currentBucketStart - 1, historyChanged);
-    }
-
-    /**
-     * One warming cycle over {@code [warmStartTs, warmEndTs]} — Layer 1 then Layer 2, de-duplicated. The
-     * window is clamped to buckets that have finished, whatever end the caller asked for.
-     */
-    @Override
-    public WarmingReport warmCycle(long warmStartTimestampSeconds, long requestedWarmEndTimestampSeconds,
+    public WarmingReport warmCycle(long warmStartTimestampSeconds, long warmEndTimestampSeconds,
                                    boolean forceOverwrite) {
-        long nowSeconds = clock.instant().getEpochSecond();
-        long warmEndTimestampSeconds = Math.min(requestedWarmEndTimestampSeconds,
-                Math.floorDiv(nowSeconds, configuration.bucketSeconds()) * configuration.bucketSeconds() - 1);
-        if (forceOverwrite && cubeCatalog != null) {
-            // Catalogued full-window answers were computed from the same history that is being rewritten.
-            cubeCatalog.clear();
-        }
         // LAYER 1: recent patterns voted by the read path.
         List<QueryHash> layer1 = warmingQueue.consumeAll();
         try {
             Map<QueryHash, CanonicalQueryObject> toWarm = new LinkedHashMap<>();
-            layer1.forEach(hash -> findCanonicalQuery(hash).ifPresent(canonical -> toWarm.put(hash, canonical)));
+            for (QueryHash hash : layer1) {
+                CanonicalQueryObject canonical = findCanonicalQuery(hash);
+                if (canonical != null) {
+                    toWarm.put(hash, canonical);
+                }
+            }
+
             // LAYER 2: persistent top-N popular queries, skipping anything Layer 1 already covered.
-            popularityTracker.topByPopularity(configuration.topNQueries()).stream()
-                    .filter(popularQuery -> !toWarm.containsKey(popularQuery.queryHash()))
-                    .forEach(popularQuery -> resolveCanonicalQuery(popularQuery)
-                            .ifPresent(canonical -> toWarm.put(popularQuery.queryHash(), canonical)));
+            for (QueryHash hash : popularityTracker.topByPopularity(topNQueries)) {
+                if (toWarm.containsKey(hash)) {
+                    continue;
+                }
+                CanonicalQueryObject canonical = findCanonicalQuery(hash);
+                if (canonical != null) {
+                    toWarm.put(hash, canonical);
+                }
+            }
+
             int patternsWarmed = 0;
             int bucketsWarmed = 0;
             int bucketsSkipped = 0;
@@ -209,23 +174,6 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         }
     }
 
-    /** Queries seen since start come from the registry; anything older is rebuilt from its persisted SQL. */
-    private Optional<CanonicalQueryObject> resolveCanonicalQuery(PopularQuery popularQuery) {
-        return findCanonicalQuery(popularQuery.queryHash())
-                .or(() -> Optional.ofNullable(canonicalizer).flatMap(parser -> canonicalize(parser, popularQuery)));
-    }
-
-    private Optional<CanonicalQueryObject> canonicalize(SqlCanonicalizerPort parser, PopularQuery popularQuery) {
-        try {
-            return Optional.of(parser.canonicalize(popularQuery.physicalSql()));
-        } catch (CancellationException cancelled) {
-            throw cancelled;
-        } catch (RuntimeException unsupported) {
-            LOGGER.fine("popular query " + popularQuery.queryHash() + " can no longer be canonicalised; skipping");
-            return Optional.empty();
-        }
-    }
-
     /** Warm a single pattern's buckets, ported from {@code _warm_single_pattern_sequential}. */
     public PatternWarmingResult warmSinglePattern(QueryHash queryHash, CanonicalQueryObject canonicalObject,
                                                   long warmStartTimestampSeconds, long warmEndTimestampSeconds,
@@ -233,7 +181,6 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         if (warmEndTimestampSeconds < warmStartTimestampSeconds) {
             return new PatternWarmingResult(0, 0);
         }
-        long bucketSeconds = configuration.bucketSeconds();
         BigInteger width = BigInteger.valueOf(bucketSeconds);
         BigInteger minimumTimestamp = BigInteger.valueOf(Long.MIN_VALUE);
         BigInteger maximumTimestamp = BigInteger.valueOf(Long.MAX_VALUE);
@@ -252,18 +199,22 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         ensureWarmWindowWithinLimit(firstRepresentableBucketStart, warmEndTimestampSeconds);
         int bucketsWarmed = 0;
         int bucketsSkipped = 0;
+
         // Never re-warm what is already cached: one coverage-bitmap load answers presence for the
-        // whole lookback window (plan J.1) instead of one EXISTS round-trip per bucket. No bitmap (or
+        // whole lookback window (plan J.1) instead of one EXISTS round-trip per bucket — a 55-day
+        // window steady-state costs one fetch and warms only the missing buckets. No bitmap (or
         // forceOverwrite) falls back to the per-bucket EXISTS check. A stale present-bit can only
         // skip a warm, never corrupt data: the read path's vanished-bucket guard recomputes that
         // bucket live as a gap.
         Optional<BucketCoverageBitmap> coverage = (coverageIndex != null && !forceOverwrite)
                 ? coverageIndex.load(queryHash, bucketSeconds)
                 : Optional.empty();
+
         // README caveat 1: warm only COMPLETE buckets. The bucket key claims the FULL window
         // [bucketStart, bucketStart + bucketSeconds - 1]; storing a frame truncated at warmEnd under
-        // that key would permanently undercount. The trailing partial bucket is simply not warmed;
-        // the read path computes it live as a gap, exactly as on any miss.
+        // that key would permanently undercount — the EXISTS-skip then sees the bucket as present and
+        // never recomputes it, so the hole can never self-heal. The trailing partial bucket is simply
+        // not warmed; the read path computes it live as a gap, exactly as on any miss.
         long currentBucketStart = firstRepresentableBucketStart;
         while (true) {
             QueryExecutionScope.current().ifPresent(cancellation -> cancellation.requireActive());
@@ -277,6 +228,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                 break;
             }
             String key = CacheKeyFactory.buildBucketKey(queryHash, currentBucketStart, bucketSeconds);
+
             boolean alreadyWarmed;
             if (forceOverwrite) {
                 alreadyWarmed = false;
@@ -288,11 +240,27 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             } else {
                 alreadyWarmed = isAlreadyWarmed(key);
             }
-            if (alreadyWarmed || !storeBucket(queryHash, canonicalObject, key, currentBucketStart, bucketEnd)) {
+            if (alreadyWarmed) {
                 bucketsSkipped++;
-            } else {
-                bucketsWarmed++;
+                try {
+                    currentBucketStart = Math.addExact(currentBucketStart, bucketSeconds);
+                } catch (ArithmeticException outsideLongDomain) {
+                    break;
+                }
+                continue;
             }
+
+            String bucketSql = gapQueryRewriter.buildGapQuery(
+                    canonicalObject.physicalSql(),
+                    new GapPlan(Optional.empty(), List.of(), Optional.of(new TimeRange(currentBucketStart, bucketEnd))));
+            // Cache empty results too (Python caches an empty frame to avoid re-querying).
+            ResultFrame frame = sparkExecutor.execute(bucketSql);
+            cacheBackend.store(key, frame);
+            if (coverageIndex != null) {
+                coverageIndex.markCached(queryHash, bucketSeconds, currentBucketStart);
+            }
+            bucketsWarmed++;
+
             try {
                 currentBucketStart = Math.addExact(currentBucketStart, bucketSeconds);
             } catch (ArithmeticException outsideLongDomain) {
@@ -302,34 +270,13 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         return new PatternWarmingResult(bucketsWarmed, bucketsSkipped);
     }
 
-    /**
-     * Computes one complete bucket and stores it with its time-to-live. Empty results are stored too (a
-     * cached empty frame is a valid "no data that day" hit); frames above the row cap are not, so a
-     * near-unique GROUP BY keeps being answered by Spark instead of filling the cache tier.
-     */
-    private boolean storeBucket(QueryHash queryHash, CanonicalQueryObject canonicalObject, String key,
-                                long bucketStart, long bucketEnd) {
-        String bucketSql = gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
-                new GapPlan(Optional.empty(), List.of(), Optional.of(new TimeRange(bucketStart, bucketEnd))));
-        ResultFrame frame = sparkExecutor.execute(bucketSql);
-        if (frame.rowCount() > configuration.maximumCachedRows()) {
-            LOGGER.fine("bucket " + key + " has " + frame.rowCount() + " rows, above the cache row cap; not stored");
-            return false;
-        }
-        cacheBackend.store(key, frame, configuration.bucketTimeToLive());
-        if (coverageIndex != null) {
-            coverageIndex.markCached(queryHash, configuration.bucketSeconds(), bucketStart);
-        }
-        return true;
-    }
-
     private boolean isAlreadyWarmed(String key) {
         List<Boolean> presence = cacheBackend.existsForKeys(List.of(key));
         return !presence.isEmpty() && Boolean.TRUE.equals(presence.get(0));
     }
 
     private void ensureWarmWindowWithinLimit(long startSeconds, long endSeconds) {
-        BigInteger width = BigInteger.valueOf(configuration.bucketSeconds());
+        BigInteger width = BigInteger.valueOf(bucketSeconds);
         BigInteger start = BigInteger.valueOf(startSeconds);
         BigInteger end = BigInteger.valueOf(endSeconds);
         BigInteger firstBucketStart = floorBucketStart(start, width);
@@ -357,4 +304,6 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     public synchronized Set<QueryHash> knownQueryHashes() {
         return new LinkedHashSet<>(canonicalRegistry.keySet());
     }
+
+
 }

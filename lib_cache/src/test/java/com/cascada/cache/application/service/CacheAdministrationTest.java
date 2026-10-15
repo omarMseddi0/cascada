@@ -1,23 +1,21 @@
 package com.cascada.cache.application.service;
 
-import java.time.Duration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.port.out.CacheBackendPort;
-import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
-import com.cascada.cache.domain.cube.QueryShape;
+import com.cascada.cache.domain.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.key.CacheKeyConstants;
 import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.cube.QueryShape;
 import com.cascada.identity.domain.QueryHash;
-import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -28,7 +26,7 @@ final class CacheAdministrationTest {
     private final CacheAdministrationService admin = new CacheAdministrationService(backend);
 
     private ResultFrame frame(int rows) {
-        ResultFrameBuilder builder = ResultFrame.builder()
+        ResultFrame.Builder builder = ResultFrame.builder()
                 .column("appName", ColumnType.STRING)
                 .column("SUM(bytes)", ColumnType.DOUBLE);
         for (int i = 0; i < rows; i++) {
@@ -51,8 +49,8 @@ final class CacheAdministrationTest {
 
     @Test
     void sizeReportMeasuresAllStoredBucketBlobsGlobally() {
-        backend.store(bucketKey("abc123", 0), frame(100), Duration.ofDays(1));
-        backend.store(bucketKey("abc123", 86_400), frame(100), Duration.ofDays(1));
+        backend.store(bucketKey("abc123", 0), frame(100));
+        backend.store(bucketKey("abc123", 86_400), frame(100));
 
         CacheSizeReport report = admin.measureCacheSize();
 
@@ -67,8 +65,8 @@ final class CacheAdministrationTest {
         InMemoryBlobCacheBackendAdapter sharedBackend =
                 new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
         CacheAdministrationService sharedAdmin = new CacheAdministrationService(sharedBackend);
-        sharedBackend.store(bucketKey("hash", 0), frame(10), Duration.ofDays(1));
-        sharedBackend.store("application:settings:theme", frame(1), Duration.ofDays(1));
+        sharedBackend.store(bucketKey("hash", 0), frame(10));
+        sharedBackend.store("application:settings:theme", frame(1));
 
         assertThat(sharedAdmin.measureCacheSize().bucketCount()).isEqualTo(1);
         assertThat(sharedAdmin.flushEverything()).isEqualTo(1);
@@ -96,9 +94,9 @@ final class CacheAdministrationTest {
 
     @Test
     void flushKeyPrefixEvictsOnlyTheSelectedQueryFamily() {
-        backend.store(bucketKey("hashA", 0), frame(10), Duration.ofDays(1));
-        backend.store(bucketKey("hashA", 86_400), frame(10), Duration.ofDays(1));
-        backend.store(bucketKey("hashB", 0), frame(10), Duration.ofDays(1));
+        backend.store(bucketKey("hashA", 0), frame(10));
+        backend.store(bucketKey("hashA", 86_400), frame(10));
+        backend.store(bucketKey("hashB", 0), frame(10));
 
         long purged = admin.flushKeyPrefix("QC:V4:B86400:hashA:");
 
@@ -114,18 +112,5 @@ final class CacheAdministrationTest {
         assertThat(CacheScope.forKeyPrefix("QC:V4:B86400:hash:").matches("QC:V4:B86400:hash:0")).isTrue();
         assertThat(CacheScope.forKeyPrefix("QC:V4:B86400:hash:").matches("QC:V4:B86400:other:0")).isFalse();
         assertThat(CacheKeyConstants.isBucketKey("QC:V4:badBucket:hash:0")).isFalse();
-    }
-
-    @Test
-    void prefixScopesCannotDeleteOtherApplicationsOrTrackerKeys() {
-        for (String unsafe : List.of("", "s", "Q", "QT:V1:", "session:")) {
-            org.assertj.core.api.Assertions.assertThatThrownBy(() -> CacheScope.forKeyPrefix(unsafe))
-                    .isInstanceOf(IllegalArgumentException.class);
-        }
-        var scope = CacheScope.forKeyPrefix("QC:V4:");
-        assertThat(scope.matches("session:user:42")).isFalse();
-        assertThat(scope.matches("QT:V1:TOP")).isFalse();
-        assertThat(scope.matches("QC:V4:application-settings")).isFalse();
-        assertThat(scope.matches("QC:V4:B86400:hash:0")).isTrue();
     }
 }

@@ -14,9 +14,6 @@ public final class CacheKeyConstants {
     private static final Pattern BUCKET_KEY = Pattern.compile(
             Pattern.quote(CACHE_KEY_PREFIX) + ":B[1-9][0-9]*:[^:]+:-?[0-9]+");
 
-    /** Fixed key of the data-change canary baseline; deliberately not a bucket key, so flush keeps it. */
-    public static final String VALIDATION_BASELINE_KEY = CACHE_KEY_PREFIX + ":validation:lookback_value";
-
     /** Query-tracker sorted-set of popularity: members = query hash, score = cumulative hits. */
     public static final String QUERY_TRACKER_TOP_SORTED_SET_KEY = "QT:V1:TOP";
 

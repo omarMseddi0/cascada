@@ -1,11 +1,12 @@
 package com.cascada.cache.adapter.out.serialization;
 
+import com.cascada.cache.exception.CacheSerializationException;
+
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
-import com.cascada.cache.exception.CacheSerializationException;
 import com.github.luben.zstd.Zstd;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -65,7 +66,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         out.writeInt(columns.size());
         for (int column = 0; column < columns.size(); column++) {
             out.writeString(columns.get(column));
-            readers[column] = frame.columnReader(column);
+            readers[column] = frame.frameColumnReader(column);
             out.writeByte(readers[column].type().ordinal());
         }
         out.writeInt(frame.rowCount());
@@ -86,8 +87,6 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         return out;
     }
 
-    /** Call-owned storage: safe concurrent use, with no retained giant thread-local buffers. */
-
     private ResultFrame decode(byte[] encoded) {
         PortableFrameReader in = new PortableFrameReader(encoded);
         if (in.readInt() != UTF8_FORMAT) return decodeLegacy(encoded);
@@ -95,7 +94,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         if (columns < 0 || columns > in.remaining() / 5) throw new IllegalArgumentException("invalid column count");
         ColumnType[] types = new ColumnType[columns];
         ColumnType[] knownTypes = ColumnType.values();
-        ResultFrameBuilder builder = ResultFrame.builder();
+        ResultFrameBuilder builder = new ResultFrameBuilder();
         for (int column = 0; column < columns; column++) {
             String name = in.readString();
             int type = in.readByte();
@@ -123,8 +122,6 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         return builder.build();
     }
 
-    /** Logical bounds remain checked even if Agrona's global bounds checking is disabled. */
-
     /** Only pre-UTF8 portable blobs need Java's modified-UTF codec. */
     private ResultFrame decodeLegacy(byte[] encoded) {
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(encoded))) {
@@ -132,7 +129,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
             if (columnCount < 0 || columnCount > in.available() / 3) throw new IOException("invalid column count");
             ColumnType[] types = new ColumnType[columnCount];
             ColumnType[] knownTypes = ColumnType.values();
-            ResultFrameBuilder builder = ResultFrame.builder();
+            ResultFrameBuilder builder = new ResultFrameBuilder();
             for (int column = 0; column < columnCount; column++) {
                 String name = in.readUTF();
                 int type = in.readUnsignedByte();

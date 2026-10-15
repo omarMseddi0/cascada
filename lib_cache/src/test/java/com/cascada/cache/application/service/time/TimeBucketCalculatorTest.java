@@ -1,14 +1,19 @@
 package com.cascada.cache.application.service.time;
 
-import com.cascada.cache.domain.time.DailyBuckets;
 import com.cascada.cache.domain.time.GapPlan;
+
 import com.cascada.cache.domain.time.TimeRange;
+
+import com.cascada.cache.domain.time.DailyBuckets;
+
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
-import java.util.List;
+
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.constraints.LongRange;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -137,19 +142,5 @@ class TimeBucketCalculatorTest {
         DailyBuckets buckets = calculator.getDailyBuckets(start, end);
         buckets.head().ifPresent(head -> assertThat(head.startTimestampSeconds()).isEqualTo(start));
         buckets.tail().ifPresent(tail -> assertThat(tail.endTimestampSeconds()).isEqualTo(end));
-    }
-
-    @Test
-    void aBodyBucketStillInProgressMovesWithEverythingAfterItIntoTheTail() {
-        DailyBuckets buckets = calculator.getCompletedBuckets(0, 4 * DAY - 1, 2 * DAY + 3_600);
-
-        assertThat(buckets.body()).containsExactly(0L, DAY);
-        assertThat(buckets.tail()).contains(new TimeRange(2 * DAY, 4 * DAY - 1));
-    }
-
-    @Test
-    void finishedWindowsAreUnchangedByTheClock() {
-        assertThat(calculator.getCompletedBuckets(0, 3 * DAY - 1, 3 * DAY))
-                .isEqualTo(calculator.getDailyBuckets(0, 3 * DAY - 1));
     }
 }

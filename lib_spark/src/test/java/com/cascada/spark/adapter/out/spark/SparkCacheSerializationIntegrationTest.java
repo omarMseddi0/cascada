@@ -3,11 +3,10 @@ package com.cascada.spark.adapter.out.spark;
 import com.cascada.cache.adapter.out.serialization.ArrowResultFrameSerializer;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
-import java.util.List;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
-
+import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Real local Spark execution, opt-in because it starts a JVM-local engine and worker threads. */
@@ -33,7 +32,7 @@ class SparkCacheSerializationIntegrationTest {
                     NULL AS nil
                 FROM range(1000000)
                 """);
-            var frame = new SparkDeltaQueryExecutor(spark).toResultFrame(dataset);
+            var frame = new SparkResultFrameMapper(1_000_000).map(dataset.schema(), dataset.toLocalIterator());
             assertThat(frame.rowCount()).isEqualTo(1_000_000);
             assertThat(frame.longAt(0,frame.columnIndex("l"))).isEqualTo(9_007_199_254_740_993L);
             assertThat(frame.isNullAt(0,frame.columnIndex("s"))).isTrue();

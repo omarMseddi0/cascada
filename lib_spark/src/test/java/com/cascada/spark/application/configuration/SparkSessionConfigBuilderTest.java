@@ -1,11 +1,11 @@
 package com.cascada.spark.application.configuration;
 
 import com.cascada.spark.domain.SparkSessionConfig;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Proves the Spark config contract without a Spark runtime: Delta is always enabled, local and cluster
@@ -35,7 +35,7 @@ class SparkSessionConfigBuilderTest {
         SparkSessionConfig config = SparkSessionConfigBuilder.forLocal()
                 .withEnvironment(name -> null).build();
         assertThat(config.sparkProperties())
-                .containsEntry("spark.sql.extensions", SparkSessionConfigBuilder.DELTA_EXTENSIONS + "," + SparkSessionConfigBuilder.GLUTEN_EXTENSIONS)
+                .containsEntry("spark.sql.extensions", SparkSessionConfigBuilder.DELTA_EXTENSIONS)
                 .containsEntry("spark.sql.catalog.spark_catalog", SparkSessionConfigBuilder.DELTA_CATALOG);
     }
 
@@ -90,74 +90,7 @@ class SparkSessionConfigBuilderTest {
 
     private Map<String, String> deltaWiring() {
         return Map.of(
-                "spark.sql.extensions", SparkSessionConfigBuilder.DELTA_EXTENSIONS + "," + SparkSessionConfigBuilder.GLUTEN_EXTENSIONS,
+                "spark.sql.extensions", SparkSessionConfigBuilder.DELTA_EXTENSIONS,
                 "spark.sql.catalog.spark_catalog", SparkSessionConfigBuilder.DELTA_CATALOG);
-    }
-
-    @Test void veloxIsExplicitAndPreservesOtherPluginsAndDelta() {
-        var config = SparkSessionConfigBuilder.forLocal().withProperty("spark.plugins", "example.OtherPlugin")
-                .withVelox(536870912L).withVelox(536870912L).build();
-        assertThat(config.sparkProperties()).containsEntry("spark.plugins", "example.OtherPlugin,org.apache.gluten.GlutenPlugin")
-                .containsEntry("spark.shuffle.manager", SparkSessionConfigBuilder.GLUTEN_SHUFFLE)
-                .containsEntry("spark.memory.offHeap.enabled", "true")
-                .containsEntry("spark.gluten.memory.isolation", "true")
-                .containsEntry("spark.gluten.sql.columnar.backend.velox.spillStrategy", "auto")
-                .containsEntry("spark.sql.ansi.enabled", "false")
-                .containsEntry("spark.memory.offHeap.size", "536870912")
-                .containsAllEntriesOf(deltaWiring());
-        assertThat(SparkSessionConfigBuilder.forLocal().withEnvironment(Map.of("CASCADA_GLUTEN_ENABLED", "false")::get)
-                .build().sparkProperties()).doesNotContainKey("spark.plugins");
-        assertThat(SparkSessionConfigBuilder.forLocal().withProperty("spark.gluten.memory.isolation", "false")
-                .withVelox(536870912L).build().sparkProperties())
-                .containsEntry("spark.gluten.memory.isolation", "false");
-    }
-
-    @Test void veloxEnvironmentEnablesTheSharedSessionConfiguration() {
-        Map<String, String> env = Map.of("CASCADA_GLUTEN_ENABLED", "true", "CASCADA_GLUTEN_OFFHEAP_BYTES", "268435456",
-                "CASCADA_GLUTEN_JAR", "/opt/gluten/gluten-spark42.jar", "SPARK_MASTER", "local[2]");
-        var config = SparkSessionConfigBuilder.forLocal().withEnvironment(env::get)
-                .withProperty("spark.jars", "/opt/other.jar").build();
-        assertThat(config.master()).isEqualTo("local[2]");
-        assertThat(config.sparkProperties()).containsEntry("spark.memory.offHeap.size", "268435456")
-                .containsEntry("spark.jars", "/opt/other.jar,/opt/gluten/gluten-spark42.jar");
-    }
-
-    @Test void enablingVeloxWithoutAMemoryOverridePreservesConfiguredBudget() {
-        var config = SparkSessionConfigBuilder.forLocal()
-                .withProperty("spark.memory.offHeap.size", "6g")
-                .withEnvironment(Map.of("CASCADA_GLUTEN_ENABLED", "true")::get).build();
-        assertThat(config.sparkProperties()).containsEntry("spark.memory.offHeap.size", "6g")
-                .containsEntry("spark.gluten.sql.columnar.maxBatchSize", "4096")
-                .containsEntry("spark.gluten.memory.dynamic.offHeap.sizing.enabled", "false");
-    }
-
-    @Test void explicitlyDisabledVeloxRemovesOnlyItsPluginAndShuffle() {
-        var config = SparkSessionConfigBuilder.forLocal().withVelox(536870912)
-                .withProperty("spark.plugins", "example.OtherPlugin," + SparkSessionConfigBuilder.GLUTEN_PLUGIN)
-                .withEnvironment(Map.of("CASCADA_GLUTEN_ENABLED", "false")::get).build();
-        assertThat(config.sparkProperties()).containsEntry("spark.plugins", "example.OtherPlugin")
-                .doesNotContainKey("spark.shuffle.manager")
-                .containsEntry("spark.sql.extensions", SparkSessionConfigBuilder.DELTA_EXTENSIONS);
-    }
-
-    @Test void explicitDeltaExtensionFromJsonDoesNotSilentlyDisableNativeRules() {
-        var config = SparkSessionConfigBuilder.forLocal()
-                .withGroup(Map.of("spark.sql.extensions", SparkSessionConfigBuilder.DELTA_EXTENSIONS)).build();
-        assertThat(config.sparkProperties()).containsEntry("spark.sql.extensions",
-                SparkSessionConfigBuilder.DELTA_EXTENSIONS + "," + SparkSessionConfigBuilder.GLUTEN_EXTENSIONS);
-    }
-
-    @Test void operatorsCanExplicitlyKeepAnsiSemanticsWithNativeFallback() {
-        var config = SparkSessionConfigBuilder.forLocal().withGroup(Map.of("spark.sql.ansi.enabled", "true")).build();
-        assertThat(config.sparkProperties()).containsEntry("spark.sql.ansi.enabled", "true");
-    }
-
-    @Test void invalidNativeMemoryAndEnableValuesAreRejected() {
-        assertThatThrownBy(() -> SparkSessionConfigBuilder.forLocal().withVelox(0)).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> SparkSessionConfigBuilder.forLocal()
-                .withEnvironment(Map.of("CASCADA_GLUTEN_ENABLED", "yes")::get).build()).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> SparkSessionConfigBuilder.forLocal().withEnvironment(Map.of(
-                "CASCADA_GLUTEN_ENABLED", "true", "CASCADA_GLUTEN_OFFHEAP_BYTES", "bad")::get).build())
-                .isInstanceOf(IllegalArgumentException.class);
     }
 }

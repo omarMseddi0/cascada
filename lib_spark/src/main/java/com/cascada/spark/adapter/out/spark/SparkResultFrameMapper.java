@@ -1,23 +1,21 @@
 package com.cascada.spark.adapter.out.spark;
 
-import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
-import java.util.ArrayList;
-import java.util.List;
-import org.apache.spark.sql.catalyst.CatalystTypeConverters;
-import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.Row;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-import scala.Function1;
 
-/** Converts collected Spark rows into the cache's framework-free frame contract. */
+import java.util.Iterator;
+
+/** Converts Spark's external rows into the cache's framework-free frame contract. */
 final class SparkResultFrameMapper {
 
+    private static final int INITIAL_ROW_CAPACITY = 1_024;
     private static final byte READ_BYTE = 0;
     private static final byte READ_SHORT = 1;
     private static final byte READ_INT = 2;
@@ -29,52 +27,55 @@ final class SparkResultFrameMapper {
     private static final byte READ_BOOLEAN = 8;
     private static final byte READ_EXTERNAL_STRING = 9;
 
-    /**
-     * Reads Spark's internal rows directly: primitives without boxing, strings straight from UTF-8, and only
-     * date/time columns through Spark's own external conversion so their text form matches {@code collect()}.
-     */
-    ResultFrame map(StructType schema, InternalRow[] rows) {
+    private final int maxResultRows;
+
+    SparkResultFrameMapper(int maxResultRows) {
+        if (maxResultRows <= 0) {
+            throw new IllegalArgumentException("maxResultRows must be > 0, but was: " + maxResultRows);
+        }
+        this.maxResultRows = maxResultRows;
+    }
+
+    ResultFrame map(StructType schema, Iterator<Row> rows) {
         StructField[] fields = schema.fields();
+        ColumnType[] columnTypes = new ColumnType[fields.length];
         byte[] getters = new byte[fields.length];
-        List<Function1<Object, Object>> externalConverters = new ArrayList<>(fields.length);
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(rows.length);
+        ResultFrameBuilder builder = new ResultFrameBuilder()
+                .expectedRows(Math.min(maxResultRows, INITIAL_ROW_CAPACITY));
         for (int index = 0; index < fields.length; index++) {
             SparkColumnPlan column = columnPlan(fields[index].dataType());
+            columnTypes[index] = column.type();
             getters[index] = column.getter();
-            externalConverters.add(column.getter() == READ_EXTERNAL_STRING
-                    ? CatalystTypeConverters.createToScalaConverter(fields[index].dataType())
-                    : null);
-            builder.column(fields[index].name(), column.type());
+            builder.column(fields[index].name(), columnTypes[index]);
         }
 
-        var cancellation = QueryExecutionScope.current().orElse(null);
-        for (InternalRow row : rows) {
-            if (cancellation != null) cancellation.requireActive();
+        int rowCount = 0;
+        while (rows.hasNext()) {
+            if (rowCount >= maxResultRows) {
+                throw new IllegalStateException("query result exceeds the " + maxResultRows
+                        + "-row driver ceiling; add a LIMIT or aggregate further");
+            }
+            Row row = rows.next();
             for (int index = 0; index < getters.length; index++) {
                 if (row.isNullAt(index)) {
                     builder.appendNull();
-                    continue;
-                }
-                DataType dataType = fields[index].dataType();
-                switch (getters[index]) {
-                    case READ_BYTE -> builder.appendLong(row.getByte(index));
-                    case READ_SHORT -> builder.appendLong(row.getShort(index));
-                    case READ_INT -> builder.appendLong(row.getInt(index));
-                    case READ_LONG -> builder.appendLong(row.getLong(index));
-                    case READ_FLOAT -> builder.appendDouble(row.getFloat(index));
-                    case READ_DOUBLE -> builder.appendDouble(row.getDouble(index));
-                    case READ_DECIMAL -> {
-                        DecimalType decimalType = (DecimalType) dataType;
-                        builder.appendDecimal(row.getDecimal(index, decimalType.precision(), decimalType.scale())
-                                .toJavaBigDecimal());
+                } else {
+                    switch (getters[index]) {
+                        case READ_BYTE -> builder.appendLong(row.getByte(index));
+                        case READ_SHORT -> builder.appendLong(row.getShort(index));
+                        case READ_INT -> builder.appendLong(row.getInt(index));
+                        case READ_LONG -> builder.appendLong(row.getLong(index));
+                        case READ_FLOAT -> builder.appendDouble(row.getFloat(index));
+                        case READ_DOUBLE -> builder.appendDouble(row.getDouble(index));
+                        case READ_DECIMAL -> builder.appendDecimal(row.getDecimal(index));
+                        case READ_STRING -> builder.appendString(row.getString(index));
+                        case READ_BOOLEAN -> builder.appendString(Boolean.toString(row.getBoolean(index)));
+                        case READ_EXTERNAL_STRING -> builder.appendString(String.valueOf(row.get(index)));
+                        default -> throw new AssertionError("unknown Spark result getter " + getters[index]);
                     }
-                    case READ_STRING -> builder.appendString(row.getUTF8String(index).toString());
-                    case READ_BOOLEAN -> builder.appendString(Boolean.toString(row.getBoolean(index)));
-                    case READ_EXTERNAL_STRING -> builder.appendString(String.valueOf(
-                            externalConverters.get(index).apply(row.get(index, dataType))));
-                    default -> throw new AssertionError("unknown Spark result getter " + getters[index]);
                 }
             }
+            rowCount++;
         }
         return builder.build();
     }

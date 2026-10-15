@@ -29,7 +29,6 @@ class SparkHexagonBoundaryTest {
     static void importClasses() {
         moduleClasses = new ClassFileImporter()
                 .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-            .withImportOption(location -> !location.asURI().toString().contains("/test-classes/"))
                 .importPackages("com.cascada.spark");
     }
 

@@ -1,22 +1,18 @@
 package com.cascada.spark.adapter.out.spark;
 
-import com.cascada.cache.adapter.out.serialization.ArrowResultFrameSerializer;
-import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+import org.junit.jupiter.api.Test;
+
 import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
-import org.apache.spark.sql.RowFactory;
-import org.apache.spark.sql.catalyst.CatalystTypeConverters;
-import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
-import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,9 +29,9 @@ class SparkResultFrameMapperTest {
                 field("active", DataTypes.BooleanType),
                 field("day", DataTypes.DateType));
         Date day = Date.valueOf("2026-10-03");
-        ResultFrame frame = new SparkResultFrameMapper().map(schema, internalRows(schema, List.of(RowFactory.create(
+        ResultFrame frame = new SparkResultFrameMapper(10).map(schema, List.of(RowFactory.create(
                 12L, 0.25d, new BigDecimal("4.20"), "north", true, day),
-                RowFactory.create(0L, null, null, null, false, null)).iterator()));
+                RowFactory.create(0L, null, null, null, false, null)).iterator());
 
         assertThat(frame.columnTypes()).containsEntry("count", ColumnType.LONG)
                 .containsEntry("ratio", ColumnType.DOUBLE)
@@ -57,8 +53,8 @@ class SparkResultFrameMapperTest {
         long exactLong = 9_007_199_254_740_993L;
         BigDecimal exactDecimal = new BigDecimal("123456789012345678.12345678");
         Date day = Date.valueOf("2026-10-03");
-        Timestamp timestamp = Timestamp.valueOf("2026-10-03 10:11:12.123456");
-        LocalDateTime timestampNtz = LocalDateTime.of(2026, 10, 3, 10, 11, 12, 123_456_000);
+        Timestamp timestamp = Timestamp.valueOf("2026-10-03 10:11:12.123456789");
+        LocalDateTime timestampNtz = LocalDateTime.of(2026, 10, 3, 10, 11, 12, 123_456_789);
         StructType schema = schema(
                 field("byte", DataTypes.ByteType), field("short", DataTypes.ShortType),
                 field("integer", DataTypes.IntegerType), field("long", DataTypes.LongType),
@@ -68,11 +64,11 @@ class SparkResultFrameMapperTest {
                 field("date", DataTypes.DateType), field("timestamp", DataTypes.TimestampType),
                 field("timestamp_ntz", DataTypes.TimestampNTZType), field("null", DataTypes.NullType));
 
-        ResultFrame frame = new SparkResultFrameMapper().map(schema, internalRows(schema, List.of(RowFactory.create(
+        ResultFrame frame = new SparkResultFrameMapper(10).map(schema, List.of(RowFactory.create(
                 Byte.MIN_VALUE, Short.MAX_VALUE, Integer.MIN_VALUE, exactLong, 0.1f, -7.25d,
                 exactDecimal, "north", false, day, timestamp, timestampNtz, null),
                 RowFactory.create(null, null, null, null, null, null, null, null, null, null, null, null, null))
-                .iterator()));
+                .iterator());
 
         assertThat(frame.columnNames()).containsExactly("byte", "short", "integer", "long", "float",
                 "double", "decimal", "string", "boolean", "date", "timestamp", "timestamp_ntz", "null");
@@ -108,7 +104,7 @@ class SparkResultFrameMapperTest {
     void mapsEmptyIteratorToAnEmptyFrameWithTheDeclaredSchema() {
         StructType schema = schema(field("id", DataTypes.LongType), field("label", DataTypes.StringType));
 
-        ResultFrame frame = new SparkResultFrameMapper().map(schema, internalRows(schema, List.<org.apache.spark.sql.Row>of().iterator()));
+        ResultFrame frame = new SparkResultFrameMapper(10).map(schema, List.<org.apache.spark.sql.Row>of().iterator());
 
         assertThat(frame.rowCount()).isZero();
         assertThat(frame.columnNames()).containsExactly("id", "label");
@@ -119,7 +115,7 @@ class SparkResultFrameMapperTest {
     void acceptsAResultExactlyAtTheConfiguredRowCeiling() {
         StructType schema = schema(field("id", DataTypes.LongType));
 
-        ResultFrame frame = new SparkResultFrameMapper().map(schema, internalRows(schema, List.of(RowFactory.create(42L)).iterator()));
+        ResultFrame frame = new SparkResultFrameMapper(1).map(schema, List.of(RowFactory.create(42L)).iterator());
 
         assertThat(frame.rowCount()).isEqualTo(1);
         assertThat(frame.longAt(0, frame.columnIndex("id"))).isEqualTo(42L);
@@ -129,21 +125,25 @@ class SparkResultFrameMapperTest {
     void rejectsValuesTheFrameContractCannotPreserve() {
         StructType schema = schema(field("payload", DataTypes.BinaryType));
 
-        assertThatThrownBy(() -> new SparkResultFrameMapper()
-                .map(schema, internalRows(schema, List.of(RowFactory.create(new byte[]{1, 2, 3})).iterator())))
+        assertThatThrownBy(() -> new SparkResultFrameMapper(10)
+                .map(schema, List.of(RowFactory.create(new byte[]{1, 2, 3})).iterator()))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessageContaining("binary");
     }
 
-    private StructField field(String name, org.apache.spark.sql.types.DataType type) {
-        return DataTypes.createStructField(name, type, true);
+    @Test
+    void rejectsRowsBeyondTheConfiguredCeiling() {
+        StructType schema = schema(field("id", DataTypes.IntegerType));
+
+        assertThatThrownBy(() -> new SparkResultFrameMapper(1).map(schema, List.of(
+                RowFactory.create(1), RowFactory.create(2)).iterator()))
+                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("1-row driver ceiling");
     }
 
-    private static InternalRow[] internalRows(StructType schema, java.util.Iterator<org.apache.spark.sql.Row> rows) {
-        var toCatalyst = CatalystTypeConverters.createToCatalystConverter(schema);
-        var converted = new java.util.ArrayList<InternalRow>();
-        rows.forEachRemaining(row -> converted.add((InternalRow) toCatalyst.apply(row)));
-        return converted.toArray(InternalRow[]::new);
+    private StructField field(String name, org.apache.spark.sql.types.DataType type) {
+        return DataTypes.createStructField(name, type, true);
     }
 
     private StructType schema(StructField... fields) {
@@ -156,17 +156,9 @@ class SparkResultFrameMapperTest {
                 DataTypes.createMapType(DataTypes.StringType, DataTypes.LongType),
                 DataTypes.createStructType(new StructField[]{field("nested",DataTypes.LongType)}));
         for (var type : types) {
-            assertThatThrownBy(() -> new SparkResultFrameMapper().map(
-                    schema(field("unsupported",type)), new InternalRow[0]))
+            assertThatThrownBy(() -> new SparkResultFrameMapper(10).map(
+                    schema(field("unsupported",type)), List.of(RowFactory.create((Object)null)).iterator()))
                     .isInstanceOf(UnsupportedOperationException.class);
         }
-    }
-    @Test
-    void mapsAllRowsBeyondTheFormerApplicationCeiling() {
-        StructType schema = schema(field("id", DataTypes.LongType));
-        var rows = java.util.stream.LongStream.range(0, 1_000_001).mapToObj(RowFactory::create).iterator();
-        ResultFrame result = new SparkResultFrameMapper().map(schema, internalRows(schema, rows));
-        assertThat(result.rowCount()).isEqualTo(1_000_001);
-        assertThat(result.longAt(1_000_000, 0)).isEqualTo(1_000_000);
     }
 }

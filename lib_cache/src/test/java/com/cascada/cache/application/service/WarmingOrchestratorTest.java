@@ -1,31 +1,31 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.result.PatternWarmingResult;
-
-import com.cascada.cache.application.result.WarmingReport;
-
-import com.cascada.cache.application.port.in.WarmCacheUseCase;
-import com.cascada.cache.application.port.out.CacheBackendPort;
+import java.time.Duration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.application.port.out.CacheBackendPort;
+import com.cascada.cache.application.port.out.GapQueryRewriterPort;
+import com.cascada.cache.application.result.PatternWarmingResult;
+import com.cascada.cache.application.result.WarmingReport;
+import com.cascada.cache.application.service.warming.WarmingQueue;
+import com.cascada.cache.domain.admin.CacheScope;
+import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
 import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.frame.ColumnType;
-import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.admin.CacheSizeReport;
-import com.cascada.cache.application.port.out.GapQueryRewriterPort;
-import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.identity.domain.QueryHash;
-import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -255,7 +255,10 @@ class WarmingOrchestratorTest {
             @Override public List<Optional<ResultFrame>> multiGet(List<String> keys) {
                 return backend.multiGet(keys);
             }
-            @Override public void store(String key, ResultFrame frame) { backend.store(key, frame); }
+            @Override public void store(String key, ResultFrame frame, Duration timeToLive) { backend.store(key, frame, timeToLive); }
+            @Override public void evict(String key) { }
+            @Override public Optional<com.cascada.cache.domain.validation.ValidationBaseline> loadValidationBaseline() { return Optional.empty(); }
+            @Override public void saveValidationBaseline(com.cascada.cache.domain.validation.ValidationBaseline baseline, Duration timeToLive) { }
             @Override public CacheSizeReport sizeReport() { return backend.sizeReport(); }
             @Override public long flush(com.cascada.cache.domain.admin.CacheScope scope) {
                 return backend.flush(scope);

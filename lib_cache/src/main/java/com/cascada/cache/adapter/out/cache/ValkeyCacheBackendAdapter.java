@@ -1,26 +1,29 @@
 package com.cascada.cache.adapter.out.cache;
 
+import com.cascada.cache.application.port.out.CacheBackendPort;
+import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyConstants;
-import com.cascada.cache.application.port.out.CacheBackendPort;
-import com.cascada.cache.application.port.out.CacheValueSerializerPort;
+import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.validation.ValidationBaseline;
+import com.cascada.cache.exception.CacheSerializationException;
 import io.lettuce.core.KeyScanCursor;
 import io.lettuce.core.KeyValue;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisFuture;
 import io.lettuce.core.ScanArgs;
 import io.lettuce.core.ScanCursor;
+import io.lettuce.core.SetArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.async.RedisAsyncCommands;
 import io.lettuce.core.api.sync.RedisCommands;
 import io.lettuce.core.codec.ByteArrayCodec;
-
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
@@ -171,7 +174,7 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
                 for (int index = 0; index < values.size(); index++) {
                     KeyValue<byte[], byte[]> keyValue = values.get(index);
                     visitor.accept(chunk.startIndex() + index, keyValue.hasValue()
-                            ? Optional.of(serializer.deserialize(keyValue.getValue()))
+                            ? decodeOrEvict(keys.get(chunk.startIndex() + index), keyValue.getValue())
                             : Optional.empty());
                 }
                 if (monitor) decodeNanos += System.nanoTime() - decoding;
@@ -194,9 +197,54 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         }
     }
 
+    /**
+     * A corrupt blob is reported as absent: the engine's vanished-bucket guard recomputes only that bucket,
+     * and the delete lets the warmer rewrite it instead of skipping a key that merely exists.
+     */
+    private Optional<ResultFrame> decodeOrEvict(String key, byte[] blob) {
+        try {
+            return Optional.of(serializer.deserialize(blob));
+        } catch (CacheSerializationException corrupt) {
+            LOGGER.warning("evicting undecodable cache bucket " + key);
+            connection.async().del(toBytes(key));
+            return Optional.empty();
+        }
+    }
+
     @Override
-    public void store(String key, ResultFrame frame) {
-        connection.sync().set(toBytes(key), serializer.serialize(frame));
+    public void store(String key, ResultFrame frame, Duration timeToLive) {
+        connection.sync().set(toBytes(key), serializer.serialize(frame), SetArgs.Builder.ex(timeToLive));
+    }
+
+    @Override
+    public void evict(String key) {
+        connection.sync().del(toBytes(key));
+    }
+
+    @Override
+    public Optional<ValidationBaseline> loadValidationBaseline() {
+        return Optional.ofNullable(connection.sync().get(toBytes(CacheKeyConstants.VALIDATION_BASELINE_KEY)))
+                .map(stored -> new String(stored, StandardCharsets.UTF_8).split(":", 3))
+                .filter(parts -> parts.length == 3)
+                .flatMap(ValkeyCacheBackendAdapter::parseBaseline);
+    }
+
+    @Override
+    public void saveValidationBaseline(ValidationBaseline baseline, Duration timeToLive) {
+        String encoded = baseline.window().startTimestampSeconds() + ":" + baseline.window().endTimestampSeconds()
+                + ":" + baseline.signature();
+        connection.sync().set(toBytes(CacheKeyConstants.VALIDATION_BASELINE_KEY),
+                encoded.getBytes(StandardCharsets.UTF_8), SetArgs.Builder.ex(timeToLive));
+    }
+
+    /** An unreadable baseline counts as missing, which starts a fresh epoch rather than failing warming. */
+    private static Optional<ValidationBaseline> parseBaseline(String[] parts) {
+        try {
+            return Optional.of(new ValidationBaseline(
+                    new TimeRange(Long.parseLong(parts[0]), Long.parseLong(parts[1])), parts[2]));
+        } catch (IllegalArgumentException unreadable) {
+            return Optional.empty();
+        }
     }
 
     /**

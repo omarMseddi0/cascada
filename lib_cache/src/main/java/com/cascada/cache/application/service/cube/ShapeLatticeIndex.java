@@ -88,9 +88,7 @@ public final class ShapeLatticeIndex {
                 admitted.add(shape);
             }
         }
-        admitted.sort(Comparator
-                .<IndexedShape>comparingInt(shape -> shape.entry().shape().groupBy().size())
-                .thenComparing(shape -> -shape.entry().shape().filters().size()));
+        admitted.sort(Comparator.comparing(IndexedShape::entry, CubeShapeAnalysis.CHEAPEST_FIRST));
         return admitted.stream().map(IndexedShape::entry).toList();
     }
 

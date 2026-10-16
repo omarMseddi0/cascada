@@ -1,5 +1,6 @@
 package com.cascada.sparkconfig.application.service;
 
+import com.cascada.sparkconfig.domain.SparkReference;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -30,10 +31,10 @@ public final class StaticSparkInfrastructureSettings {
         // --- common (infrastructure subset; executor/driver sizing is derived) ---
         entries.put("spark.submit.deployMode", "client");
         entries.put("spark.driver.host", "spark-master.default.svc.cluster.local");
-        entries.put("spark.driver.port", "8002");
-        entries.put("spark.blockManager.port", "8001");
+        entries.put("spark.driver.port", Integer.toString(SparkReference.DRIVER_PORT));
+        entries.put("spark.blockManager.port", Integer.toString(SparkReference.BLOCK_MANAGER_PORT));
         entries.put("spark.kubernetes.namespace", "default");
-        entries.put("spark.kubernetes.container.image", "cascada:0.1.0");
+        entries.put("spark.kubernetes.container.image", SparkReference.CONTAINER_IMAGE);
         entries.put("spark.kubernetes.container.image.pullPolicy", "IfNotPresent");
         entries.put("spark.kubernetes.authenticate.driver.serviceAccountName", "spark");
         entries.put("spark.kubernetes.authenticate.executor.serviceAccountName", "spark");

@@ -39,7 +39,7 @@ public final class ResultFrameBuilder {
     /** Compatibility path for callers at object-oriented boundaries. */
     public ResultFrameBuilder row(Map<String, Object> values) {
         for (String name : names) {
-            appendObject(values.get(name));
+            appendValue(values.get(name));
         }
         return this;
     }
@@ -50,7 +50,7 @@ public final class ResultFrameBuilder {
             throw new IllegalArgumentException("expected " + names.size() + " values but got " + values.length);
         }
         for (Object value : values) {
-            appendObject(value);
+            appendValue(value);
         }
         return this;
     }
@@ -128,18 +128,18 @@ public final class ResultFrameBuilder {
         return new ResultFrame(names, types, trimmedColumns, trimmedPresent, rowCount);
     }
 
-    void appendObject(Object value) {
+    /** Appends a boxed value converted to the next column's type; {@code null} appends a NULL. */
+    public ResultFrameBuilder appendValue(Object value) {
         if (value == null) {
-            appendNull();
-            return;
+            return appendNull();
         }
         initialize();
-        switch (indexedTypes[nextColumn]) {
+        return switch (indexedTypes[nextColumn]) {
             case LONG -> appendLong(((Number) value).longValue());
             case DOUBLE -> appendDouble(((Number) value).doubleValue());
             case STRING -> appendString(value.toString());
             case DECIMAL -> appendDecimal((java.math.BigDecimal) value);
-        }
+        };
     }
 
     void requireType(ColumnType expected) {
@@ -204,7 +204,8 @@ public final class ResultFrameBuilder {
         bitmap[rowCount >>> 6] &= ~(1L << (rowCount & 63));
     }
 
-    static Object newColumn(ColumnType type, int length) {
+    /** A typed column array (long[], double[], String[] or BigDecimal[]) of {@code length} cells. */
+    public static Object newColumn(ColumnType type, int length) {
         return switch (type) {
             case LONG -> new long[length];
             case DOUBLE -> new double[length];
@@ -213,7 +214,8 @@ public final class ResultFrameBuilder {
         };
     }
 
-    static Object growColumn(Object source, ColumnType type, int length) {
+    /** {@code source} copied into a typed column array of {@code length} cells. */
+    public static Object growColumn(Object source, ColumnType type, int length) {
         return switch (type) {
             case LONG -> java.util.Arrays.copyOf((long[]) source, length);
             case DOUBLE -> java.util.Arrays.copyOf((double[]) source, length);

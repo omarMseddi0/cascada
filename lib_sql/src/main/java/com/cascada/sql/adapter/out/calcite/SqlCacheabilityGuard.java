@@ -5,7 +5,6 @@ import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
-import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlIdentifier;
@@ -18,7 +17,6 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 /** Fails closed when a parsed query cannot be represented by the cache's single-window model. */
 final class SqlCacheabilityGuard {
 
-    private static final Set<String> BUILT_IN_AGGREGATES = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX");
     private static final Set<String> CONTEXT_DEPENDENT_FUNCTIONS = Set.of(
             "CURRENT_TIMESTAMP", "CURRENT_TIME", "CURRENT_DATE",
             "LOCALTIME", "LOCALTIMESTAMP", "CURRENT_USER", "SESSION_USER",
@@ -84,7 +82,7 @@ final class SqlCacheabilityGuard {
         String functionName = name.getSimple().toUpperCase(Locale.ROOT);
         // These aggregate names are SQL syntax, and COUNT(*) does not match the standard table's
         // ordinary function arity. Their merge behavior is separately constrained by the factory.
-        if (BUILT_IN_AGGREGATES.contains(functionName)) {
+        if (com.cascada.cache.domain.merge.AggregateFunction.fromSqlName(functionName).isPresent()) {
             return parsedOperator;
         }
 
@@ -103,7 +101,7 @@ final class SqlCacheabilityGuard {
             return;
         }
         for (SqlNode expression : group) {
-            if (expression instanceof SqlIdentifier identifier && isTimeColumn(identifier, dimensions)) {
+            if (expression instanceof SqlIdentifier identifier && SqlTrees.isTimeColumn(identifier, dimensions)) {
                 continue;
             }
             if (CanonicalTimeSeriesAnalyzer.floorBucketStep(expression, dimensions).isPresent()) {
@@ -117,7 +115,11 @@ final class SqlCacheabilityGuard {
 
     private void rejectMultipleTimeColumns(SqlNode root, TimeDimensionMap dimensions) {
         Set<String> referencedColumns = new HashSet<>();
-        collectTimeColumnReferences(root, dimensions, referencedColumns);
+        SqlTrees.forEachColumnReference(root, identifier -> {
+            if (SqlTrees.isTimeColumn(identifier, dimensions)) {
+                referencedColumns.add(SqlTrees.lastName(identifier).toLowerCase(Locale.ROOT));
+            }
+        });
         if (referencedColumns.size() > 1) {
             throw new UnsupportedSqlException("queries referencing multiple time columns cannot be cached");
         }
@@ -134,73 +136,26 @@ final class SqlCacheabilityGuard {
         if (from == null) {
             return 0;
         }
-        if (from instanceof SqlIdentifier) {
-            return 1;
-        }
-        if (from instanceof SqlSelect select) {
+        if (SqlTrees.containsDerivedSource(from)) {
             throw new UnsupportedSqlException("derived-table time scopes cannot be safely rewritten for caching");
         }
-        if (from instanceof SqlNodeList nodeList) {
+        SqlNode source = SqlTrees.stripAlias(from);
+        if (source instanceof SqlIdentifier) {
+            return 1;
+        }
+        if (source instanceof org.apache.calcite.sql.SqlJoin join) {
+            return countTableSources(join.getLeft()) + countTableSources(join.getRight());
+        }
+        if (source instanceof SqlNodeList nodeList) {
             return nodeList.stream().mapToInt(this::countTableSources).sum();
         }
-        if (from instanceof SqlCall call) {
-            if (call.getKind() == org.apache.calcite.sql.SqlKind.AS && call instanceof SqlBasicCall asCall) {
-                return countTableSources(asCall.operand(0));
-            }
-            if (call instanceof org.apache.calcite.sql.SqlJoin join) {
-                return countTableSources(join.getLeft()) + countTableSources(join.getRight());
-            }
+        if (source instanceof SqlCall call) {
             return call.getOperandList().stream().mapToInt(this::countTableSources).sum();
         }
         return 0;
     }
 
     private boolean referencesTimeColumn(SqlNode node, TimeDimensionMap dimensions) {
-        if (node == null) {
-            return false;
-        }
-        if (node instanceof SqlIdentifier identifier) {
-            return isTimeColumn(identifier, dimensions);
-        }
-        if (node instanceof SqlNodeList nodeList) {
-            return nodeList.stream().anyMatch(child -> referencesTimeColumn(child, dimensions));
-        }
-        if (node instanceof SqlCall call) {
-            return call.getOperandList().stream().anyMatch(operand -> referencesTimeColumn(operand, dimensions));
-        }
-        return false;
-    }
-
-    private void collectTimeColumnReferences(SqlNode node, TimeDimensionMap dimensions, Set<String> collector) {
-        if (node == null) {
-            return;
-        }
-        if (node instanceof SqlIdentifier identifier) {
-            if (isTimeColumn(identifier, dimensions)) {
-                collector.add(simpleName(identifier).toLowerCase(Locale.ROOT));
-            }
-            return;
-        }
-        if (node instanceof SqlNodeList nodeList) {
-            for (SqlNode child : nodeList) {
-                collectTimeColumnReferences(child, dimensions, collector);
-            }
-        } else if (node instanceof SqlCall call) {
-            if (call.getKind() == org.apache.calcite.sql.SqlKind.AS && call instanceof SqlBasicCall asCall) {
-                collectTimeColumnReferences(asCall.operand(0), dimensions, collector);
-                return;
-            }
-            for (SqlNode operand : call.getOperandList()) {
-                collectTimeColumnReferences(operand, dimensions, collector);
-            }
-        }
-    }
-
-    private boolean isTimeColumn(SqlIdentifier identifier, TimeDimensionMap dimensions) {
-        return dimensions.isTimeColumn(simpleName(identifier));
-    }
-
-    private String simpleName(SqlIdentifier identifier) {
-        return identifier.names.get(identifier.names.size() - 1);
+        return SqlTrees.anyColumnReference(node, identifier -> SqlTrees.isTimeColumn(identifier, dimensions));
     }
 }

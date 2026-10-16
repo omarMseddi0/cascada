@@ -56,11 +56,9 @@ class LocalSparkConsistencyIntegrationTest {
         boolean nativeMode = Boolean.parseBoolean(System.getenv("CASCADA_GLUTEN_ENABLED"));
         String master = System.getenv().getOrDefault("SPARK_MASTER","local[2]");
         if (nativeMode) {
-            var config = com.cascada.spark.application.configuration.SparkSessionConfigBuilder.forLocal()
+            var config = LocalSparkFixtures.localConfig()
                     .master(master).withEnvironment(System::getenv)
                     .withProperty("spark.sql.warehouse.dir", warehouse.toUri().toString())
-                    .withProperty("spark.ui.enabled", "false").withProperty("spark.driver.host", "127.0.0.1")
-                    .withProperty("spark.driver.bindAddress", "127.0.0.1")
                     .withProperty("spark.sql.shuffle.partitions", "2").withProperty("spark.default.parallelism", "2")
                     .withProperty("spark.sql.session.timeZone", "UTC")
                     .withProperty("spark.sql.ansi.enabled", "false")
@@ -69,14 +67,11 @@ class LocalSparkConsistencyIntegrationTest {
                     .withProperty("spark.driver.maxResultSize", "128m").build();
             physicalAdapter = new SparkDeltaQueryExecutor(config);
             spark = SparkSession.active();
-        } else spark = SparkSession.builder().master(master).appName("cascada-epoch-sql-consistency")
+        } else spark = LocalSparkFixtures.localDeltaSession().master(master).appName("cascada-epoch-sql-consistency")
                 .config("spark.sql.warehouse.dir", warehouse.toUri().toString())
-                .config("spark.ui.enabled", "false").config("spark.driver.host", "127.0.0.1")
-                .config("spark.driver.bindAddress", "127.0.0.1").config("spark.sql.shuffle.partitions", "2")
+                .config("spark.sql.shuffle.partitions", "2")
                 .config("spark.default.parallelism", "2").config("spark.sql.session.timeZone", "UTC")
                 .config("spark.sql.ansi.enabled", "false")
-                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-                .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
                 .config("spark.databricks.delta.snapshotPartitions", "2")
                 .config("spark.driver.maxResultSize", "128m").getOrCreate();
         spark.sparkContext().setLogLevel("ERROR");

@@ -29,6 +29,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import static com.cascada.cache.application.service.EngineTestFixtures.appFrame;
+import static com.cascada.cache.application.service.EngineTestFixtures.globalAggregateOverThreeDays;
+
 /**
  * The coverage-bitmap fast path (plan Appendix J.1) at engine level: presence comes from ONE bitmap
  * lookup (zero EXISTS round trips), and a stale present-bit degrades to a surgical single-bucket
@@ -40,20 +43,6 @@ class CoverageIndexedEngineTest {
 
     private final PortableFrameSerializer serializer = new PortableFrameSerializer();
     private final QueryHashGenerator hashGenerator = new QueryHashGenerator();
-
-    private CanonicalQueryObject globalAggregateOverThreeDays() {
-        HashComponents components = HashComponents.of(List.of("appName"), List.of("SUM(bytes)"), List.of());
-        return new CanonicalQueryObject(components, new TimeRange(0, 3 * DAY - 1),
-                PostProcessing.none(), QueryMetadata.globalAggregate(), "FULL_SQL", List.of("traffic"), List.of());
-    }
-
-    private ResultFrame appFrame(String app, double bytes) {
-        return ResultFrame.builder()
-                .column("appName", ColumnType.STRING)
-                .column("bytes", ColumnType.DOUBLE)
-                .row(Map.of("appName", app, "bytes", bytes))
-                .build();
-    }
 
     /** Counts EXISTS round trips so the test can prove the bitmap replaced them. */
     private static final class CountingBackend implements CacheBackendPort {

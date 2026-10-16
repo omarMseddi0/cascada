@@ -1,10 +1,8 @@
 package com.cascada.app.bootstrap;
 
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
-import com.cascada.spark.application.configuration.SparkSessionConfigBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.*;
-import java.security.MessageDigest;
 import java.util.*;
 import org.apache.spark.sql.*;
 
@@ -15,9 +13,8 @@ public final class GlutenMemoryBudgetDiagnostics {
         var json=new ObjectMapper();
         long offHeap=Long.parseLong(System.getenv("CASCADA_GLUTEN_OFFHEAP_BYTES"));
         boolean isolation=Boolean.parseBoolean(System.getenv().getOrDefault("CASCADA_BENCH_MEMORY_ISOLATION","false"));
-        var config=SparkSessionConfigBuilder.forLocal().master("local[6]").withEnvironment(System::getenv)
-                .withProperty("spark.sql.ansi.enabled","false").withProperty("spark.ui.enabled","false")
-                .withProperty("spark.driver.host","127.0.0.1").withProperty("spark.driver.bindAddress","127.0.0.1")
+        var config=LocalSparkFixtures.localConfig().master("local[6]").withEnvironment(System::getenv)
+                .withProperty("spark.sql.ansi.enabled","false")
                 .withProperty("spark.sql.shuffle.partitions","48").withProperty("spark.default.parallelism","6")
                 .withProperty("spark.databricks.delta.snapshotPartitions","6")
                 .withProperty("spark.memory.offHeap.enabled","true").withProperty("spark.memory.offHeap.size",Long.toString(offHeap))
@@ -40,7 +37,7 @@ public final class GlutenMemoryBudgetDiagnostics {
                 double warmSeconds=(System.nanoTime()-warmStart)/1e9;
                 var measured=spark.sql(sql);long start=System.nanoTime();var rows=measured.collectAsList();
                 double seconds=(System.nanoTime()-start)/1e9;
-                String hash=digest(rows,json),warmHash=digest(warmRows,json);
+                String hash=LocalSparkFixtures.digest(rows),warmHash=LocalSparkFixtures.digest(warmRows);
                 if(!hash.equals(warmHash)||!hash.equals(query.get("sha256").asText()))throw new IllegalStateException("Result mismatch "+name);
                 var plans=planMetrics(measured.queryExecution().executedPlan());
                 var result=new LinkedHashMap<String,Object>();
@@ -55,11 +52,6 @@ public final class GlutenMemoryBudgetDiagnostics {
         }
     }
 
-    private static String digest(List<Row> rows,ObjectMapper json) throws Exception {
-        var digest=MessageDigest.getInstance("SHA-256");
-        for(var row:rows){var cells=new ArrayList<Object>();for(int c=0;c<row.size();c++)cells.add(row.get(c));digest.update(json.writeValueAsBytes(cells));digest.update((byte)'\n');}
-        return HexFormat.of().formatHex(digest.digest());
-    }
 
     private static List<Map<String,Object>> planMetrics(org.apache.spark.sql.execution.SparkPlan root) {
         var seen=Collections.newSetFromMap(new IdentityHashMap<org.apache.spark.sql.execution.SparkPlan,Boolean>());

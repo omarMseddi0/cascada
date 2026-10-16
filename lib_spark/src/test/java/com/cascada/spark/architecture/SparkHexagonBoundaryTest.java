@@ -78,7 +78,9 @@ class SparkHexagonBoundaryTest {
     void applicationDependsOnlyOnItsOwnTypesDomainAndTheJdk() {
         noClasses().that().resideInAPackage("com.cascada.spark.application..")
                 .should().dependOnClassesThat().resideOutsideOfPackages(
-                        "com.cascada.spark.application..", "com.cascada.spark.domain..", "java..")
+                        "com.cascada.spark.application..", "com.cascada.spark.domain..",
+                        // The shared Spark reference values (Gluten defaults, ports) are pure domain constants.
+                        "com.cascada.sparkconfig.domain..", "java..")
                 .check(moduleClasses);
     }
 }

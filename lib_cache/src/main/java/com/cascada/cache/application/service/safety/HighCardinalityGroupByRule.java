@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.safety;
 
+import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.safety.BypassReason;
 import com.cascada.cache.domain.safety.CacheConfiguration;
@@ -19,21 +20,12 @@ public final class HighCardinalityGroupByRule implements SafetyRule {
     @Override
     public Optional<BypassReason> evaluate(CanonicalQueryObject canonicalObject, CacheConfiguration configuration) {
         for (String highCardinalityColumn : configuration.highCardinalityColumns()) {
-            if (canonicalObject.hashComponents().groupBy().stream().anyMatch(group -> normalize(group).equals(normalize(highCardinalityColumn)))) {
+            String wanted = ColumnNames.unqualified(highCardinalityColumn);
+            if (canonicalObject.hashComponents().groupBy().stream()
+                    .anyMatch(group -> ColumnNames.unqualified(group).equals(wanted))) {
                 return Optional.of(BypassReason.HIGH_CARDINALITY_GROUP_BY);
             }
         }
         return Optional.empty();
-    }
-
-    private static String normalize(String name) {
-        String cleaned = name.replace("`", "").replace("\"", "").trim();
-        int qualifier = cleaned.lastIndexOf('.');
-        return cleaned.substring(qualifier + 1).toLowerCase(java.util.Locale.ROOT);
-    }
-
-    @Override
-    public String ruleName() {
-        return "HighCardinalityGroupByRule";
     }
 }

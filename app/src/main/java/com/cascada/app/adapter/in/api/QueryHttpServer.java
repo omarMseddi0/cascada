@@ -25,12 +25,11 @@ import java.util.concurrent.*;
 
 /** Transport binding only; query, cache and cluster operations use their existing inbound ports. */
 public final class QueryHttpServer implements AutoCloseable {
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = QueryResponseEncoder.JSON;
     private final HttpServer server;
     private final InetSocketAddress address;
     private final RequestExecutor requests;
     private final ExecuteLogicalQueryUseCase queries;
-    private final java.util.Set<QueryCancellation> activeQueries = ConcurrentHashMap.newKeySet();
     private final ServerSettings settings;
     private boolean started;
 
@@ -61,28 +60,29 @@ public final class QueryHttpServer implements AutoCloseable {
         });
         route("/cache/flush", "POST", exchange -> {
             JsonNode request = readRequest(exchange);
+            java.util.Optional<String> prefix = java.util.Optional.empty();
             if (request.has("prefix")) {
-                try { com.cascada.cache.domain.admin.CacheScope.forKeyPrefix(requiredText(request, "prefix")); }
-                catch (IllegalArgumentException invalid) { throw new InvalidRequestException("prefix must select Cascada bucket keys (QC:V4:)"); }
+                if (!request.path("prefix").isTextual()) throw new InvalidRequestException("prefix must be a string");
+                prefix = java.util.Optional.of(request.path("prefix").asText());
             }
-            long purged = request.has("prefix") ? flush.flushKeyPrefix(requiredText(request, "prefix")) : flush.flushEverything();
-            json(exchange, Map.of("bucketsPurged", purged));
+            json(exchange, Map.of("bucketsPurged", AdministrationRequests.flush(flush, prefix)));
         });
         route("/cache/warm", "POST", exchange -> {
             JsonNode request = readRequest(exchange);
-            long start = requiredTimestamp(request, "start");
-            long end = requiredTimestamp(request, "end");
-            if (start > end) throw new InvalidRequestException("start must be <= end");
-            json(exchange, warm.warmCycle(start, end, request.path("forceOverwrite").asBoolean(false)));
+            json(exchange, AdministrationRequests.warm(warm, requiredTimestamp(request, "start"),
+                    requiredTimestamp(request, "end"), request.path("forceOverwrite").asBoolean(false)));
         });
     }
 
     public void bindClusterLifecycle(ManageClusterLifecycleUseCase clusters, PrepareClusterSettingsUseCase preparation) {
-        route("/cluster/deploy", "POST", exchange -> json(exchange, Map.of("resources", clusters.deploy(clusterValues(exchange, preparation)))));
-        route("/cluster/stop", "POST", exchange -> { clusters.stop(clusterValues(exchange, preparation)); json(exchange, Map.of("status", "stopped")); });
-        route("/cluster/start", "POST", exchange -> { clusters.start(clusterValues(exchange, preparation)); json(exchange, Map.of("status", "started")); });
-        route("/cluster/restart", "POST", exchange -> { clusters.restart(clusterValues(exchange, preparation)); json(exchange, Map.of("status", "restarted")); });
-        route("/cluster/delete", "POST", exchange -> { clusters.delete(clusterValues(exchange, preparation)); json(exchange, Map.of("status", "deleted")); });
+        for (ClusterChange operation : ClusterChange.values()) {
+            route("/cluster/" + operation.name().toLowerCase(java.util.Locale.ROOT), "POST", exchange -> {
+                var result = AdministrationRequests.changeCluster(clusters, preparation, operation, clusterSettings(exchange));
+                json(exchange, operation == ClusterChange.DEPLOY
+                        ? Map.of("status", result.status(), "resources", result.resources())
+                        : Map.of("status", result.status()));
+            });
+        }
     }
 
     private void route(String path, String method, HttpHandler operation) {
@@ -95,17 +95,16 @@ public final class QueryHttpServer implements AutoCloseable {
                 try (exchange) { exchange.getResponseHeaders().set("Allow", method); exchange.sendResponseHeaders(405, -1); }
                 return;
             }
-            try { requests.submit(() -> serve(exchange, operation)); }
+            QueryCancellation cancellation = new QueryCancellation();
+            try { requests.submit(cancellation, () -> serve(exchange, operation, cancellation), exchange::close); }
             catch (RejectedExecutionException busy) {
                 try (exchange) { error(exchange, ApiFailure.from(busy)); }
             }
         });
     }
 
-    private void serve(HttpExchange exchange, HttpHandler operation) {
-        QueryCancellation cancellation = new QueryCancellation();
-        activeQueries.add(cancellation);
-        try (exchange; var scope = new QueryExecutionScope(cancellation)) {
+    private void serve(HttpExchange exchange, HttpHandler operation, QueryCancellation cancellation) {
+        try (exchange) {
             try { operation.handle(exchange); }
             catch (Throwable failure) {
                 ApiFailure error = ApiFailure.from(failure);
@@ -116,7 +115,7 @@ public final class QueryHttpServer implements AutoCloseable {
             }
         } catch (IOException disconnected) {
             cancellation.cancel();
-        } finally { activeQueries.remove(cancellation); }
+        }
     }
 
     public void start() throws IOException { server.bind(address, 64); server.start(); started = true; }
@@ -138,8 +137,8 @@ public final class QueryHttpServer implements AutoCloseable {
             try (var parquet = new ParquetResult(QueryResponseEncoder.parquet(result.frame()))) {
                 exchange.getResponseHeaders().set("Content-Type", "application/vnd.apache.parquet");
                 exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=result.parquet");
-                exchange.sendResponseHeaders(200, Files.size(parquet.path()));
-                Files.copy(parquet.path(), exchange.getResponseBody());
+                exchange.sendResponseHeaders(200, parquet.size());
+                parquet.copyTo(exchange.getResponseBody());
             }
         }
     }
@@ -157,15 +156,14 @@ public final class QueryHttpServer implements AutoCloseable {
         if (!request.path(name).isIntegralNumber() || !request.path(name).canConvertToLong()) throw new InvalidRequestException(name + " must be an epoch-second integer");
         return request.path(name).longValue();
     }
-    private static ClusterValues clusterValues(HttpExchange exchange, PrepareClusterSettingsUseCase preparation) throws IOException {
+    private static Map<String, String> clusterSettings(HttpExchange exchange) throws IOException {
         JsonNode request = readRequest(exchange);
         Map<String, String> values = new java.util.LinkedHashMap<>();
         request.fields().forEachRemaining(entry -> {
             if (!entry.getValue().isTextual()) throw new InvalidRequestException("Cluster settings must be strings");
             values.put(entry.getKey(), entry.getValue().textValue());
         });
-        try { return preparation.prepareClusterSettings(values); }
-        catch (IllegalArgumentException invalid) { throw new InvalidRequestException("Invalid cluster settings"); }
+        return values;
     }
     private static void json(HttpExchange exchange, Object response) throws IOException {
         byte[] body = JSON.writeValueAsBytes(response);
@@ -180,7 +178,6 @@ public final class QueryHttpServer implements AutoCloseable {
         exchange.getResponseBody().write(body);
     }
     @Override public void close() {
-        activeQueries.forEach(QueryCancellation::cancel);
         if (started) server.stop(1);
         requests.close();
     }

@@ -218,7 +218,6 @@ public final class ResultFrame {
     }
 
     /** Typed column builder. Use append methods in internal/vectorized paths to avoid row maps. */
-
     public static ResultFrameBuilder builder() {
         return new ResultFrameBuilder();
     }

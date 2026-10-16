@@ -11,9 +11,7 @@ import static org.assertj.core.api.Assertions.*;
 @EnabledIfSystemProperty(named="cascada.large.result.integration", matches="true")
 class LargeResultIntegrationTest {
     @Test void returnsFiftyFiveMillionRowsUnderOperatorControlledSparkConfiguration() throws Exception {
-        SparkSession session = SparkSession.builder().master("local[4]").appName("cascada-55-million-result")
-                .config("spark.ui.enabled", "false").config("spark.driver.host", "127.0.0.1")
-                .config("spark.driver.bindAddress", "127.0.0.1")
+        SparkSession session = LocalSparkFixtures.localSession().master("local[4]").appName("cascada-55-million-result")
                 .config("spark.driver.maxResultSize", "0").getOrCreate();
         try (var executor = new SparkDeltaQueryExecutor(session)) {
             session.sparkContext().setLogLevel("ERROR");

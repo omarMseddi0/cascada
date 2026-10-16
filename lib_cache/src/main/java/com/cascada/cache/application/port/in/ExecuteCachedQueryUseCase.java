@@ -26,10 +26,4 @@ public interface ExecuteCachedQueryUseCase {
      */
     QueryResult execute(CanonicalQueryObject canonicalObject);
 
-    /**
-     * The answer plus how it was obtained. {@code servedThroughCache == false} means a safety
-     * guardrail forced a bypass and the physical SQL ran directly against the executor — the answer is
-     * still correct, it just cost a full scan.
-     */
-
 }

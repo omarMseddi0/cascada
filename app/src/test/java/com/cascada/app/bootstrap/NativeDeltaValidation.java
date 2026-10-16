@@ -1,7 +1,6 @@
 package com.cascada.app.bootstrap;
 
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
-import com.cascada.spark.application.configuration.SparkSessionConfigBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Path;
 import java.security.SecureRandom;
@@ -24,9 +23,8 @@ public final class NativeDeltaValidation {
         if (args.length != 1) throw new IllegalArgumentException("/validation/result.json");
         seed = new SecureRandom().nextLong() & Long.MAX_VALUE;
         output = Path.of(args[0]);
-        var config = SparkSessionConfigBuilder.forLocal().master("local[6]").withEnvironment(System::getenv)
-                .appName("cascada-native-delta-gate").withProperty("spark.ui.enabled","false")
-                .withProperty("spark.driver.host","127.0.0.1").withProperty("spark.driver.bindAddress","127.0.0.1")
+        var config = LocalSparkFixtures.localConfig().master("local[6]").withEnvironment(System::getenv)
+                .appName("cascada-native-delta-gate")
                 .withProperty("spark.sql.shuffle.partitions","12").withProperty("spark.sql.session.timeZone","UTC")
                 .withProperty("spark.sql.ansi.enabled","false")
                 .withProperty("spark.gluten.sql.native.writer.enabled","false")

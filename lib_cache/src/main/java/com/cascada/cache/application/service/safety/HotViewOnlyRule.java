@@ -10,5 +10,4 @@ public final class HotViewOnlyRule implements SafetyRule {
     @Override public Optional<BypassReason> evaluate(CanonicalQueryObject query, CacheConfiguration configuration) {
         return query.metadata().usesHotBatch() ? Optional.empty() : Optional.of(BypassReason.HOT_VIEW_ONLY);
     }
-    @Override public String ruleName() { return "HotViewOnlyRule"; }
 }

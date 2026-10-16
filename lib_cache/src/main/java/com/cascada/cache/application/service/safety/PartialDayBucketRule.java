@@ -3,6 +3,7 @@ package com.cascada.cache.application.service.safety;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.safety.BypassReason;
 import com.cascada.cache.domain.safety.CacheConfiguration;
+import com.cascada.cache.domain.time.BucketMath;
 import com.cascada.cache.domain.time.TimeRange;
 import java.util.Optional;
 
@@ -25,8 +26,8 @@ public final class PartialDayBucketRule implements SafetyRule {
         long bucketSeconds = (long) configuration.cacheBucketHours() * SECONDS_PER_HOUR;
 
         TimeRange timeRange = canonicalObject.timeRange();
-        long startBucket = Math.floorDiv(timeRange.startTimestampSeconds(), bucketSeconds) * bucketSeconds;
-        long endBucket = Math.floorDiv(timeRange.endTimestampSeconds(), bucketSeconds) * bucketSeconds;
+        long startBucket = BucketMath.floor(timeRange.startTimestampSeconds(), bucketSeconds);
+        long endBucket = BucketMath.floor(timeRange.endTimestampSeconds(), bucketSeconds);
 
         boolean isSingleBucket = startBucket == endBucket;
         long durationSeconds = timeRange.durationSeconds();
@@ -35,10 +36,5 @@ public final class PartialDayBucketRule implements SafetyRule {
             return Optional.of(BypassReason.PARTIAL_DAY_BUCKET);
         }
         return Optional.empty();
-    }
-
-    @Override
-    public String ruleName() {
-        return "PartialDayBucketRule";
     }
 }

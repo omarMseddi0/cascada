@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -54,11 +53,4 @@ public final class ClusterManifestRenderer implements ClusterManifestRenderingPo
         return out;
     }
 
-    /** Indent every non-empty line by {@code spaces}, so a file can be embedded under a YAML {@code |}. */
-    static String indent(String text, int spaces) {
-        String padding = " ".repeat(spaces);
-        return Arrays.stream(text.split("\n", -1))
-                .map(line -> line.isEmpty() ? line : padding + line)
-                .collect(Collectors.joining("\n"));
-    }
 }

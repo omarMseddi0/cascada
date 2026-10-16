@@ -33,8 +33,8 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
     private final Clock clock;
     private final AtomicLong existsCalls = new AtomicLong();
     private long writes;
-    private volatile String revision = java.util.UUID.randomUUID().toString();
-    private String warmingGeneration = java.util.UUID.randomUUID().toString();
+    private volatile String revision = newToken();
+    private String warmingGeneration = newToken();
 
     public InMemoryBlobCacheBackendAdapter(CacheValueSerializerPort serializer) {
         this(serializer, Clock.systemUTC());
@@ -63,18 +63,22 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
 
     @Override
     public synchronized void store(String key, ResultFrame frame, Duration timeToLive) {
+        if (timeToLive.isNegative() || timeToLive.isZero()) {
+            // Same contract as the Valkey backend: a bucket always expires.
+            throw new IllegalArgumentException("bucket TTL must be positive");
+        }
         if ((writes++ & 63) == 0) {
             var now = clock.instant();
             blobsByKey.entrySet().removeIf(entry -> !now.isBefore(entry.getValue().expiresAt()));
         }
         blobsByKey.put(key, new StoredBlob(serializer.serialize(frame), clock.instant().plus(timeToLive)));
-        revision = java.util.UUID.randomUUID().toString();
+        revision = newToken();
     }
 
     @Override
     public synchronized void evict(String key) {
         blobsByKey.remove(key);
-        revision = java.util.UUID.randomUUID().toString();
+        revision = newToken();
     }
 
     @Override public synchronized Optional<String> revision() { return Optional.of(revision); }
@@ -127,10 +131,10 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
 
     @Override
     public synchronized long flush(CacheScope scope) {
-        warmingGeneration = java.util.UUID.randomUUID().toString();
+        warmingGeneration = newToken();
         List<String> matchingKeys = blobsByKey.keySet().stream().filter(scope::matches).toList();
         matchingKeys.forEach(blobsByKey::remove);
-        revision = java.util.UUID.randomUUID().toString();
+        revision = newToken();
         return matchingKeys.size();
     }
 
@@ -163,5 +167,9 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
             evict(key);
             return Optional.empty();
         }
+    }
+
+    private static String newToken() {
+        return java.util.UUID.randomUUID().toString();
     }
 }

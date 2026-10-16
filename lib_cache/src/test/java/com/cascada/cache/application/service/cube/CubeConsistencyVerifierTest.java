@@ -15,6 +15,10 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import static com.cascada.cache.application.service.cube.CubeTestFixtures.finest;
+import static com.cascada.cache.application.service.cube.CubeTestFixtures.finestFrame;
+import static com.cascada.cache.application.service.cube.CubeTestFixtures.row;
+
 /**
  * Proves the cube's data-inconsistency guard ({@link CubeConsistencyVerifier}): a faithful roll-up is
  * confirmed, while every way a roll-up could silently return a wrong number — a tampered cell, a
@@ -26,38 +30,6 @@ class CubeConsistencyVerifierTest {
 
     private final CubeSubsumptionPlanner planner = new CubeSubsumptionPlanner();
     private final CubeConsistencyVerifier verifier = new CubeConsistencyVerifier();
-
-    /** Finest cached grain (appName, deviceType, region) with SUM+COUNT so AVG can be reconstructed. */
-    private ResultFrame finestFrame() {
-        return ResultFrame.builder()
-                .column("appName", ColumnType.STRING)
-                .column("deviceType", ColumnType.STRING)
-                .column("region", ColumnType.STRING)
-                .column("SUM(latency)", ColumnType.DOUBLE)
-                .column("COUNT(latency)", ColumnType.DOUBLE)
-                .row(row("netflix", "mobile", "eu", 100.0, 4.0))
-                .row(row("netflix", "tablet", "eu", 50.0, 1.0))
-                .row(row("netflix", "mobile", "us", 30.0, 2.0))
-                .row(row("youtube", "mobile", "eu", 20.0, 2.0))
-                .build();
-    }
-
-    private Map<String, Object> row(String app, String device, String region, double sum, double count) {
-        Map<String, Object> values = new HashMap<>();
-        values.put("appName", app);
-        values.put("deviceType", device);
-        values.put("region", region);
-        values.put("SUM(latency)", sum);
-        values.put("COUNT(latency)", count);
-        return values;
-    }
-
-    private CachedShapeEntry finest() {
-        return new CachedShapeEntry(
-                new QueryShape(Set.of("appName", "deviceType", "region"), Set.of(),
-                        Set.of("SUM(latency)", "COUNT(latency)")),
-                finestFrame());
-    }
 
     @Test
     void rollsUpAnAliasedMaxByMaximumNotSum() {

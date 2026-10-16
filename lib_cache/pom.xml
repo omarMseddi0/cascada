@@ -109,7 +109,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <!-- Agrona, Arrow and DataSketches require access to these JDK modules. -->
-                    <argLine>${agrona.jvm.args} --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED</argLine>
+                    <argLine>${agrona.jvm.args}</argLine>
                 </configuration>
             </plugin>
         </plugins>

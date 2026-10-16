@@ -20,7 +20,7 @@ import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 public final class ApplicationSettingsReader {
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = SettingValues.JSON;
     public ApplicationSettings read(Function<String, String> environment) {
         ApplicationSettings defaults = ApplicationSettings.defaults();
         String path = environment.apply("CASCADA_CONFIG_PATH");
@@ -83,8 +83,8 @@ public final class ApplicationSettingsReader {
             throw new IllegalArgumentException(name + " must be an integer");
         return section.path(name).intValue();
     }
+    /** Port 0 asks the OS for an ephemeral port (used by tests); anything else is a real TCP port. */
     private static int port(Function<String, String> environment, String name, int fallback) {
-        return Optional.ofNullable(environment.apply(name)).filter(value -> !value.isBlank())
-                .map(Integer::parseInt).orElse(fallback);
+        return SettingValues.intValue(name, environment.apply(name), fallback, 0, 65_535);
     }
 }

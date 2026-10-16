@@ -4,6 +4,7 @@ import com.cascada.spark.application.port.out.EnvironmentPort;
 import com.cascada.spark.domain.SparkSessionConfig;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import com.cascada.sparkconfig.domain.SparkReference;
 import java.util.LinkedHashSet;
 import java.util.Arrays;
 
@@ -25,11 +26,11 @@ import java.util.Arrays;
  */
 public final class SparkSessionConfigBuilder {
 
-    public static final String DELTA_EXTENSIONS = "io.delta.sql.DeltaSparkSessionExtension";
-    public static final String DELTA_CATALOG = "org.apache.spark.sql.delta.catalog.DeltaCatalog";
-    public static final String GLUTEN_PLUGIN = "org.apache.gluten.GlutenPlugin";
-    public static final String GLUTEN_EXTENSIONS = "org.apache.gluten.extension.GlutenSessionExtensions";
-    public static final String GLUTEN_SHUFFLE = "org.apache.spark.shuffle.sort.ColumnarShuffleManager";
+    public static final String DELTA_EXTENSIONS = SparkReference.DELTA_EXTENSION;
+    public static final String DELTA_CATALOG = SparkReference.DELTA_CATALOG;
+    public static final String GLUTEN_PLUGIN = SparkReference.GLUTEN_PLUGIN;
+    public static final String GLUTEN_EXTENSIONS = SparkReference.GLUTEN_SESSION_EXTENSIONS;
+    public static final String GLUTEN_SHUFFLE = SparkReference.COLUMNAR_SHUFFLE_MANAGER;
     public static final long DEFAULT_VELOX_OFFHEAP_BYTES = 512L * 1024 * 1024;
 
     private static final String DEFAULT_KUBERNETES_MASTER =
@@ -109,35 +110,33 @@ public final class SparkSessionConfigBuilder {
     /** Configure Velox. The matching Gluten bundle must already be on the driver JVM classpath. */
     public SparkSessionConfigBuilder withVelox(long offHeapBytes) {
         if (offHeapBytes <= 0) throw new IllegalArgumentException("Velox off-heap bytes must be positive");
-        LinkedHashSet<String> plugins = new LinkedHashSet<>();
-        Arrays.stream(properties.getOrDefault("spark.plugins", "").split(","))
-                .map(String::trim).filter(value -> !value.isEmpty()).forEach(plugins::add);
+        LinkedHashSet<String> plugins = commaList("spark.plugins");
         plugins.add(GLUTEN_PLUGIN);
         properties.put("spark.plugins", String.join(",", plugins));
         properties.put("spark.gluten.enabled", "true");
-        // Gluten 1.7 falls back for Spark 4's default ANSI mode. This native profile is explicit
-        // about legacy arithmetic/cast semantics; an operator's subsequent true override wins.
-        properties.putIfAbsent("spark.sql.ansi.enabled", "false");
         properties.put("spark.shuffle.manager", GLUTEN_SHUFFLE);
         properties.put("spark.memory.offHeap.enabled", "true");
         properties.put("spark.memory.offHeap.size", Long.toString(offHeapBytes));
-        // Apache Gluten recommends task memory isolation when concurrent queries share a session.
-        // Task-slot quotas are derived by Gluten from Spark's resources; don't hardcode its
-        // internal per-task byte settings or bypass tracked memory/spilling.
-        properties.putIfAbsent("spark.gluten.memory.isolation", "true");
-        properties.putIfAbsent("spark.gluten.sql.columnar.backend.velox.spillStrategy", "auto");
-        properties.putIfAbsent("spark.gluten.sql.columnar.maxBatchSize", "4096");
-        properties.putIfAbsent("spark.gluten.memory.dynamic.offHeap.sizing.enabled", "false");
+        // Gluten 1.7 falls back for Spark 4's default ANSI mode, so the native profile is explicit about
+        // legacy arithmetic/cast semantics; Apache Gluten also recommends task memory isolation when
+        // concurrent queries share a session. Each default yields to an operator's explicit value.
+        SparkReference.GLUTEN_TUNING_DEFAULTS.forEach(properties::putIfAbsent);
         synchronizeVeloxExtensions();
         return this;
     }
 
+    /** The trimmed, non-empty, de-duplicated entries of a comma-separated Spark property, in order. */
+    private LinkedHashSet<String> commaList(String key) {
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        Arrays.stream(properties.getOrDefault(key, "").split(","))
+                .map(String::trim).filter(value -> !value.isEmpty()).forEach(values::add);
+        return values;
+    }
+
     private void synchronizeVeloxExtensions() {
-        boolean enabled = Arrays.stream(properties.getOrDefault("spark.plugins", "").split(","))
-                .map(String::trim).anyMatch(GLUTEN_PLUGIN::equals);
-        LinkedHashSet<String> extensions = new LinkedHashSet<>();
-        Arrays.stream(properties.getOrDefault("spark.sql.extensions", "").split(","))
-                .map(String::trim).filter(value -> !value.isEmpty() && !value.equals(GLUTEN_EXTENSIONS)).forEach(extensions::add);
+        boolean enabled = commaList("spark.plugins").contains(GLUTEN_PLUGIN);
+        LinkedHashSet<String> extensions = commaList("spark.sql.extensions");
+        extensions.remove(GLUTEN_EXTENSIONS);
         if (enabled) extensions.add(GLUTEN_EXTENSIONS);
         properties.put("spark.sql.extensions", String.join(",", extensions));
     }
@@ -145,13 +144,11 @@ public final class SparkSessionConfigBuilder {
     private void applyVeloxEnvironment() {
         String enabled = environment.get("CASCADA_GLUTEN_ENABLED");
         if (enabled == null || enabled.isBlank()) return;
-        if (!enabled.equalsIgnoreCase("true") && !enabled.equalsIgnoreCase("false"))
-            throw new IllegalArgumentException("CASCADA_GLUTEN_ENABLED must be true or false");
-        if (Boolean.parseBoolean(enabled)) {
+        if (SparkReference.parseGlutenEnabled(enabled, true)) {
             String bytes = environment.get("CASCADA_GLUTEN_OFFHEAP_BYTES");
             String configuredMemory = properties.get("spark.memory.offHeap.size");
             long memory;
-            try { memory = bytes == null || bytes.isBlank() ? DEFAULT_VELOX_OFFHEAP_BYTES : Long.parseLong(bytes); }
+            try { memory = bytes == null || bytes.isBlank() ? DEFAULT_VELOX_OFFHEAP_BYTES : Long.parseLong(bytes.trim()); }
             catch (NumberFormatException invalid) {
                 throw new IllegalArgumentException("CASCADA_GLUTEN_OFFHEAP_BYTES must be positive integer bytes", invalid);
             }
@@ -161,17 +158,15 @@ public final class SparkSessionConfigBuilder {
                 properties.put("spark.memory.offHeap.size", configuredMemory);
             String jar = environment.get("CASCADA_GLUTEN_JAR");
             if (jar != null && !jar.isBlank()) {
-                LinkedHashSet<String> jars = new LinkedHashSet<>();
-                Arrays.stream(properties.getOrDefault("spark.jars", "").split(","))
-                        .map(String::trim).filter(value -> !value.isEmpty()).forEach(jars::add);
+                LinkedHashSet<String> jars = commaList("spark.jars");
                 jars.add(jar);
                 properties.put("spark.jars", String.join(",", jars));
             }
         } else {
             properties.put("spark.gluten.enabled", "false");
-            String plugins = Arrays.stream(properties.getOrDefault("spark.plugins", "").split(","))
-                    .map(String::trim).filter(value -> !value.isEmpty() && !value.equals(GLUTEN_PLUGIN))
-                    .collect(java.util.stream.Collectors.joining(","));
+            LinkedHashSet<String> remaining = commaList("spark.plugins");
+            remaining.remove(GLUTEN_PLUGIN);
+            String plugins = String.join(",", remaining);
             if (plugins.isEmpty()) properties.remove("spark.plugins");
             else properties.put("spark.plugins", plugins);
             if (GLUTEN_SHUFFLE.equals(properties.get("spark.shuffle.manager"))) properties.remove("spark.shuffle.manager");

@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.merge;
 
+import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -80,17 +81,12 @@ public final class AggregateFunctionResolver {
 
     /** Maps a SQL aggregate keyword to its combine op; {@code null} for anything not distributive. */
     public static AggregateFunction functionForName(String name) {
-        return switch (name.toUpperCase(Locale.ROOT)) {
-            case "SUM" -> AggregateFunction.SUM;
-            case "COUNT" -> AggregateFunction.COUNT;
-            case "MIN" -> AggregateFunction.MINIMUM;
-            case "MAX" -> AggregateFunction.MAXIMUM;
-            default -> null;
-        };
+        return AggregateFunction.fromSqlName(name)
+                .filter(function -> function != AggregateFunction.AVERAGE)
+                .orElse(null);
     }
 
-    /** Case/space/backtick-insensitive column identity, matching the merge path's own resolution. */
     private static String normalize(String column) {
-        return column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT);
+        return ColumnNames.identity(column);
     }
 }

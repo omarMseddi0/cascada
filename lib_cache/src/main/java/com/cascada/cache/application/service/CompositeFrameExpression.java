@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.query.ArithmeticOperator;
@@ -21,14 +22,9 @@ final class CompositeFrameExpression {
     }
 
     private static CompositeExpressionNode column(String name, ResultFrame schema) {
-        int column = -1;
-        for (int index = 0; index < schema.columnNames().size(); index++) {
-            if (schema.columnNames().get(index).equalsIgnoreCase(name)) {
-                if (column >= 0) throw new IllegalArgumentException("ambiguous composite column " + name);
-                column = index;
-            }
-        }
-        if (column < 0) throw new IllegalArgumentException("missing composite ingredient " + name);
+        String columnName = ColumnNames.resolve(name, schema.columnNames());
+        if (columnName == null) throw new IllegalArgumentException("missing composite ingredient " + name);
+        int column = schema.columnIndex(columnName);
         int resolved = column;
         ColumnType type = schema.columnTypeAt(column);
         if (type == ColumnType.STRING) throw new IllegalArgumentException("non-numeric composite operand");
@@ -57,9 +53,10 @@ final class CompositeFrameExpression {
                 Number a = left.value(frame, row), b = right.value(frame, row);
                 if (a == null || b == null || operator == ArithmeticOperator.DIVIDE && b.doubleValue() == 0) return null;
                 if (type == ColumnType.LONG) return switch (operator) {
-                    case ADD -> a.longValue() + b.longValue();
-                    case SUBTRACT -> a.longValue() - b.longValue();
-                    case MULTIPLY -> a.longValue() * b.longValue();
+                    // Overflow fails the cached answer so the engine falls back to Spark's own result.
+                    case ADD -> Math.addExact(a.longValue(), b.longValue());
+                    case SUBTRACT -> Math.subtractExact(a.longValue(), b.longValue());
+                    case MULTIPLY -> Math.multiplyExact(a.longValue(), b.longValue());
                     default -> throw new IllegalArgumentException("unsupported integer operator");
                 };
                 return switch (operator) {

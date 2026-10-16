@@ -1,10 +1,12 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.service.merge.AggregateFunctionResolver;
-import com.cascada.cache.application.service.merge.AverageReconstructionService;
+import com.cascada.cache.application.service.merge.IntStableSort;
 import com.cascada.cache.application.service.merge.SparkAverage;
+import com.cascada.cache.application.service.merge.SparkValues;
 import com.cascada.cache.application.service.merge.TypedFrameAccumulator;
 import com.cascada.cache.application.service.merge.TypedFrameAggregator;
+import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
@@ -15,23 +17,17 @@ import com.cascada.cache.domain.query.OrderByClause;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.function.IntBinaryOperator;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Coordinates typed frame aggregation, AVG/composite reconstruction, and deferred post-processing. */
 public final class FrameMergeService {
 
-    private static final Logger LOGGER = Logger.getLogger(FrameMergeService.class.getName());
-
     private static final Pattern AVG_SPEC =
             Pattern.compile("(?i)AVG\\s*\\(\\s*([^)]+?)\\s*\\)(?:\\s+AS\\s+([A-Za-z_][A-Za-z0-9_]*))?");
 
-    private final AverageReconstructionService averageReconstructionService = new AverageReconstructionService();
     private final int fixedStepSeconds;
     private final String timeColumnName;
 
@@ -45,6 +41,7 @@ public final class FrameMergeService {
         return new IncrementalFrameMerge(this, canonicalObject);
     }
 
+    /** Batch form of {@link #incremental}: the same validation, aggregation and finishing. */
     public ResultFrame mergeAndReconstruct(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
         if (frames.isEmpty()) {
             return ResultFrame.empty();
@@ -52,30 +49,9 @@ public final class FrameMergeService {
         // Validate even zero-row partials. A schema mismatch must not be hidden just because the
         // mismatching cached frame happened to contain no rows for this particular bucket.
         TypedFrameAggregator.validateCompatibleSchemas(frames);
-        List<ResultFrame> nonEmpty = frames.stream().filter(frame -> !frame.isEmpty()).toList();
-        if (nonEmpty.isEmpty()) {
-            // Empty Spark results still carry their projected schema. Keep it intact so callers
-            // receive the same columns and types as they would from a non-empty merge.
-            return finishMergedFrame(frames.get(0), canonicalObject);
-        }
-
-        boolean monitor = LOGGER.isLoggable(Level.FINE);
-        long started = monitor ? System.nanoTime() : 0L;
-        ResultFrame merged = canonicalObject.metadata().isTimeSeries()
-                ? mergeTimeSeries(nonEmpty, canonicalObject)
-                : mergeGlobalAggregate(nonEmpty, canonicalObject);
-
-        long aggregated = monitor ? System.nanoTime() : 0L;
-        ResultFrame result = finishMergedFrame(merged, canonicalObject);
-        if (monitor) {
-            long finished = System.nanoTime();
-            long inputRows = 0;
-            for (ResultFrame frame : frames) inputRows += frame.rowCount();
-            LOGGER.fine("Cache merge: input_rows=" + inputRows + " output_rows=" + result.rowCount()
-                    + " aggregate_ms=" + (aggregated - started) / 1_000_000.0
-                    + " reconstruct_and_sort_ms=" + (finished - aggregated) / 1_000_000.0);
-        }
-        return result;
+        IncrementalFrameMerge merge = incremental(canonicalObject);
+        frames.forEach(merge::add);
+        return merge.finish();
     }
 
     TypedFrameAccumulator createAccumulator(ResultFrame schema, CanonicalQueryObject canonicalObject) {
@@ -120,14 +96,7 @@ public final class FrameMergeService {
         for (int row = 0; row < frame.rowCount(); row++) {
             for (int column = 0; column < frame.columnNames().size(); column++) builder.appendCell(frame, row, column);
             for (CompositeExpressionNode formula : formulas.values()) {
-                Number value = formula.value(frame, row);
-                if (value == null) builder.appendNull();
-                else switch (formula.type()) {
-                    case LONG -> builder.appendLong(value.longValue());
-                    case DOUBLE -> builder.appendDouble(value.doubleValue());
-                    case DECIMAL -> builder.appendDecimal((java.math.BigDecimal) value);
-                    default -> throw new IllegalArgumentException("non-numeric composite result");
-                }
+                builder.appendValue(formula.value(frame, row));
             }
         }
         return builder.build();
@@ -148,43 +117,17 @@ public final class FrameMergeService {
         return builder.build();
     }
 
-    private String resolveColumn(String token, List<String> availableColumns) {
-        if (availableColumns.contains(token)) return token;
-        String normalizedToken = token.replace("`", "").replace(" ", "").toLowerCase(Locale.ROOT);
-        String resolved = null;
-        for (String column : availableColumns) {
-            if (column.replace("`", "").replace(" ", "").toLowerCase(Locale.ROOT).equals(normalizedToken)) {
-                if (resolved != null) throw new IllegalArgumentException("Ambiguous result column: " + token);
-                resolved = column;
-            }
-        }
-        return resolved;
+    private static String resolveColumn(String token, List<String> availableColumns) {
+        return ColumnNames.resolve(token, availableColumns);
     }
 
-    // --- time-series path -----------------------------------------------------------------------
-
-    private ResultFrame mergeTimeSeries(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
-        List<String> dimensions = new ArrayList<>();
-        dimensions.add(timeColumnName);
-        dimensions.addAll(dimensionColumns(frames.get(0), canonicalObject, true));
-        return typedMerge(frames, canonicalObject, dimensions,
-                timeSeriesStep(canonicalObject));
-    }
+    // --- time-series step -----------------------------------------------------------------------
 
     private int timeSeriesStep(CanonicalQueryObject canonicalObject) {
         // A raw GROUP BY ts is already at epoch-second granularity. Rounding it to the internal
         // storage step merges distinct SQL groups and changes their timestamps and aggregates.
         return canonicalObject.metadata().preserveRawTimeSeries()
                 ? 1 : canonicalObject.userStepSeconds().orElse(fixedStepSeconds);
-    }
-
-    private ResultFrame mergeGlobalAggregate(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
-        return typedMerge(frames, canonicalObject, dimensionColumns(frames.get(0), canonicalObject, false), fixedStepSeconds);
-    }
-
-    private ResultFrame typedMerge(List<ResultFrame> frames, CanonicalQueryObject canonicalObject,
-                                   List<String> dimensions, int step) {
-        return TypedFrameAggregator.aggregate(frames, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step);
     }
 
     private Map<String, AggregateFunction> resolvedFunctions(CanonicalQueryObject canonicalObject) {
@@ -209,7 +152,7 @@ public final class FrameMergeService {
     }
 
     private static String normalizedName(String column) {
-        return column.replace("`", "").replaceAll("\\s+", "").toUpperCase(Locale.ROOT);
+        return ColumnNames.identity(column);
     }
 
     // --- AVG reconstruction (RC4) ----------------------------------------------------------------
@@ -236,8 +179,9 @@ public final class FrameMergeService {
         java.util.Set<String> sumCountColumnsToDrop = new java.util.HashSet<>();
         Map<String, int[]> ingredients = new LinkedHashMap<>();
         for (var entry : averageAliasToColumn.entrySet()) {
-            String sum = "SUM(" + entry.getValue() + ")", count = "COUNT(" + entry.getValue() + ")";
-            if (frame.columnNames().contains(sum) && frame.columnNames().contains(count)) {
+            String sum = resolveColumn("SUM(" + entry.getValue() + ")", frame.columnNames());
+            String count = resolveColumn("COUNT(" + entry.getValue() + ")", frame.columnNames());
+            if (sum != null && count != null) {
                 ingredients.put(entry.getKey(), new int[]{frame.columnIndex(sum), frame.columnIndex(count)});
                 sumCountColumnsToDrop.add(sum);
                 sumCountColumnsToDrop.add(count);
@@ -260,16 +204,8 @@ public final class FrameMergeService {
             for (int column = 0; column < finalColumns.size(); column++) {
                 int[] pair = ingredients.get(finalColumns.get(column));
                 if (pair != null) {
-                    if (frame.isNullAt(row, pair[1])) {
-                        finalBuilder.appendNull();
-                        continue;
-                    }
-                    long count = frame.columnTypeAt(pair[1]) == ColumnType.LONG
-                            ? frame.longAt(row, pair[1]) : Math.round(asDouble(frame.valueAt(row, pair[1])));
-                    if (count < 0) throw new IllegalArgumentException("AVG count ingredient cannot be negative");
-                    if (count == 0 || frame.isNullAt(row, pair[0])) finalBuilder.appendNull();
-                    else finalBuilder.appendDouble(averageReconstructionService.reconstructAverageFromStoredSumAndCount(
-                            asDouble(frame.valueAt(row, pair[0])), count));
+                    finalBuilder.appendValue(SparkAverage.average(
+                            frame.valueAt(row, pair[0]), frame.valueAt(row, pair[1])));
                 } else if (sourceColumns[column] >= 0) {
                     finalBuilder.appendCell(frame, row, sourceColumns[column]);
                 } else finalBuilder.appendNull();
@@ -317,7 +253,7 @@ public final class FrameMergeService {
                     compared = switch (frame.columnTypeAt(column)) {
                         case LONG -> Long.compare(frame.longAt(left, column), frame.longAt(right, column));
                         case DOUBLE -> Double.compare(frame.doubleAt(left, column), frame.doubleAt(right, column));
-                        case STRING -> TypedFrameAggregator.compareSparkStrings(
+                        case STRING -> SparkValues.compareStrings(
                                 frame.stringAt(left, column), frame.stringAt(right, column));
                         case DECIMAL -> ((java.math.BigDecimal) frame.valueAt(left, column))
                                 .compareTo((java.math.BigDecimal) frame.valueAt(right, column));
@@ -354,10 +290,10 @@ public final class FrameMergeService {
                     rows[slot] = row;
                 }
             }
-            sortRows(rows, comparator);
+            IntStableSort.sort(rows, comparator);
         } else if (limit > 0) {
             for (int row = 0; row < limit; row++) rows[row] = row;
-            if (!orderBy.isEmpty()) sortRows(rows, comparator);
+            if (!orderBy.isEmpty()) IntStableSort.sort(rows, comparator);
         }
 
         ResultFrameBuilder builder = ResultFrame.builder().expectedRows(limit);
@@ -368,25 +304,6 @@ public final class FrameMergeService {
             for (int column = 0; column < frame.columnNames().size(); column++) builder.appendCell(frame, row, column);
         }
         return builder.build();
-    }
-
-    /** Stable primitive-index merge sort; avoids one boxed index or row adapter per output row. */
-    private static void sortRows(int[] rows, IntBinaryOperator comparator) {
-        if (rows.length < 2) return;
-        int[] source = rows, target = new int[rows.length];
-        for (long width = 1; width < rows.length; width *= 2) {
-            for (long start = 0; start < rows.length; start += width * 2) {
-                int left = (int) start, middle = (int) Math.min(start + width, rows.length);
-                int right = middle, end = (int) Math.min(start + width * 2, rows.length), out = left;
-                while (left < middle && right < end) {
-                    target[out++] = comparator.applyAsInt(source[left], source[right]) <= 0 ? source[left++] : source[right++];
-                }
-                while (left < middle) target[out++] = source[left++];
-                while (right < end) target[out++] = source[right++];
-            }
-            int[] swap = source; source = target; target = swap;
-        }
-        if (source != rows) System.arraycopy(source, 0, rows, 0, rows.length);
     }
 
     // --- helpers ---------------------------------------------------------------------------------
@@ -401,9 +318,5 @@ public final class FrameMergeService {
             }
         }
         return dimensions;
-    }
-
-    private double asDouble(Object value) {
-        return ((Number) value).doubleValue();
     }
 }

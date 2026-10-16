@@ -18,11 +18,8 @@ import static org.assertj.core.api.Assertions.*;
 @EnabledIfSystemProperty(named="cascada.spark.integration", matches="true")
 class SharedSparkSessionIntegrationTest {
     @Test void fiftyTwoVirtualRequestsUseOneRealSparkSessionWithIndependentJobGroups() throws Exception {
-        SparkSession session = SparkSession.builder().master("local[4]").appName("cascada-shared-session-java25")
-                .config("spark.ui.enabled", "false").config("spark.driver.host", "127.0.0.1")
-                .config("spark.driver.bindAddress", "127.0.0.1").config("spark.sql.shuffle.partitions", "4")
-                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-                .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        SparkSession session = LocalSparkFixtures.localDeltaSession().master("local[4]").appName("cascada-shared-session-java25")
+                .config("spark.sql.shuffle.partitions", "4")
                 .getOrCreate();
         java.util.Set<String> observedGroups = ConcurrentHashMap.newKeySet();
         session.sparkContext().addSparkListener(new SparkListener() {

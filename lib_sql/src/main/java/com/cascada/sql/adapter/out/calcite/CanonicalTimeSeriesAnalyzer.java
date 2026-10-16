@@ -6,9 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.TreeSet;
-import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlIdentifier;
-import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlSelect;
@@ -17,8 +15,7 @@ import org.apache.calcite.sql.SqlSelect;
 final class CanonicalTimeSeriesAnalyzer {
 
     CanonicalTimeRangeExtraction extractTimeRangeAndFilters(SqlSelect select, TimeDimensionMap dimensions) {
-        List<SqlNode> conjuncts = new ArrayList<>();
-        flattenAndConjuncts(select.getWhere(), conjuncts);
+        List<SqlNode> conjuncts = SqlTrees.conjuncts(select.getWhere());
 
         Long start = null;
         Long end = null;
@@ -56,75 +53,15 @@ final class CanonicalTimeSeriesAnalyzer {
             }
         }
         for (SqlNode expression : group) {
-            if (expression instanceof SqlIdentifier identifier && isTimeColumn(identifier, dimensions)) {
+            if (expression instanceof SqlIdentifier identifier && SqlTrees.isTimeColumn(identifier, dimensions)) {
                 return new CanonicalTimeSeriesShape(true, Optional.empty(), true);
             }
         }
         return new CanonicalTimeSeriesShape(false, Optional.empty(), false);
     }
 
+    /** The step of a recognised {@code FLOOR(t / N) * N} bucket on a time column. */
     static Optional<Integer> floorBucketStep(SqlNode expression, TimeDimensionMap dimensions) {
-        SqlNode node = unwrapCast(expression);
-        if (node.getKind() != SqlKind.TIMES || !(node instanceof SqlBasicCall times)) {
-            return Optional.empty();
-        }
-        SqlNode left = times.operand(0);
-        SqlNode right = times.operand(1);
-        SqlNode floor;
-        SqlNode multiplierNode;
-        if (left.getKind() == SqlKind.FLOOR) {
-            floor = left;
-            multiplierNode = right;
-        } else if (right.getKind() == SqlKind.FLOOR) {
-            floor = right;
-            multiplierNode = left;
-        } else {
-            return Optional.empty();
-        }
-        if (!(floor instanceof SqlBasicCall floorCall)) {
-            return Optional.empty();
-        }
-        SqlNode divide = floorCall.operand(0);
-        if (divide.getKind() != SqlKind.DIVIDE || !(divide instanceof SqlBasicCall division)) {
-            return Optional.empty();
-        }
-        if (!(division.operand(0) instanceof SqlIdentifier column) || !isTimeColumn(column, dimensions)) {
-            return Optional.empty();
-        }
-        Long step = SqlNumericLiteralValue.asLong(division.operand(1));
-        Long multiplier = SqlNumericLiteralValue.asLong(multiplierNode);
-        if (step == null || multiplier == null || step <= 0 || step > Integer.MAX_VALUE
-                || !step.equals(multiplier)) {
-            return Optional.empty();
-        }
-        return Optional.of(step.intValue());
-    }
-
-    private void flattenAndConjuncts(SqlNode where, List<SqlNode> collector) {
-        if (where == null) {
-            return;
-        }
-        if (where.getKind() == SqlKind.AND) {
-            for (SqlNode operand : ((SqlBasicCall) where).getOperandList()) {
-                flattenAndConjuncts(operand, collector);
-            }
-        } else {
-            collector.add(where);
-        }
-    }
-
-    private static boolean isTimeColumn(SqlIdentifier identifier, TimeDimensionMap dimensions) {
-        return dimensions.isTimeColumn(simpleName(identifier));
-    }
-
-    private static String simpleName(SqlIdentifier identifier) {
-        return identifier.names.get(identifier.names.size() - 1);
-    }
-
-    private static SqlNode unwrapCast(SqlNode node) {
-        if (node.getKind() == SqlKind.CAST && node instanceof SqlBasicCall cast) {
-            return cast.operand(0);
-        }
-        return node;
+        return TimeBuckets.match(expression, dimensions).map(TimeBucket::step);
     }
 }

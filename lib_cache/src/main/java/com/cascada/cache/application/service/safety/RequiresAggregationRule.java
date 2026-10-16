@@ -26,9 +26,4 @@ public final class RequiresAggregationRule implements SafetyRule {
         }
         return Optional.empty();
     }
-
-    @Override
-    public String ruleName() {
-        return "RequiresAggregationRule";
-    }
 }

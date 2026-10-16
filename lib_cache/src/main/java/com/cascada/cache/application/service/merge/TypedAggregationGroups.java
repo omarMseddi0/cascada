@@ -10,10 +10,16 @@ import java.util.List;
 
 import static com.cascada.cache.application.service.merge.TypedFrameAggregator.*;
 
+/**
+ * Open-addressing group table over typed column arrays. Keys and measures are stored one typed array
+ * per column ({@code long[]}, {@code double[]}, {@code String[]} or {@code BigDecimal[]}), allocated
+ * and grown by {@link ResultFrameBuilder}, so the hot loops read primitives without boxing.
+ */
 final class TypedAggregationGroups {
     private final ResultFrame schema;
     private final int[] dimensionColumns;
     private final ColumnType[] dimensionTypes;
+    private final ColumnType[] keyStorageTypes;
     private final boolean[] timeDimensions;
     private final int step;
     private final int[] measureColumns;
@@ -27,15 +33,9 @@ final class TypedAggregationGroups {
     private int groupCapacity = INITIAL_CAPACITY;
     private int[] groupHashes = new int[groupCapacity];
     private final boolean[][] keyPresent;
-    private final long[][] keyLongs;
-    private final double[][] keyDoubles;
-    private final String[][] keyStrings;
-    private final BigDecimal[][] keyDecimals;
+    private final Object[] keys;
     private final boolean[][] measurePresent;
-    private final long[][] longValues;
-    private final double[][] doubleValues;
-    private final String[][] stringValues;
-    private final BigDecimal[][] decimalValues;
+    private final Object[] measures;
 
     TypedAggregationGroups(ResultFrame schema, int[] dimensionColumns, ColumnType[] dimensionTypes,
                        boolean[] timeDimensions, int step, int[] measureColumns,
@@ -50,33 +50,18 @@ final class TypedAggregationGroups {
         this.measureFunctions = measureFunctions;
         int keyCount = dimensionColumns.length;
         keyPresent = new boolean[keyCount][groupCapacity];
-        keyLongs = new long[keyCount][];
-        keyDoubles = new double[keyCount][];
-        keyStrings = new String[keyCount][];
-        keyDecimals = new BigDecimal[keyCount][];
+        keyStorageTypes = new ColumnType[keyCount];
+        keys = new Object[keyCount];
         for (int dimension = 0; dimension < keyCount; dimension++) {
             if (dimensionColumns[dimension] < 0) continue;
-            if (timeDimensions[dimension]) keyLongs[dimension] = new long[groupCapacity];
-            else switch (dimensionTypes[dimension]) {
-                case LONG -> keyLongs[dimension] = new long[groupCapacity];
-                case DOUBLE -> keyDoubles[dimension] = new double[groupCapacity];
-                case STRING -> keyStrings[dimension] = new String[groupCapacity];
-                case DECIMAL -> keyDecimals[dimension] = new BigDecimal[groupCapacity];
-            }
+            // A time dimension is floored to an epoch-second bucket start and kept as a LONG.
+            keyStorageTypes[dimension] = timeDimensions[dimension] ? ColumnType.LONG : dimensionTypes[dimension];
+            keys[dimension] = ResultFrameBuilder.newColumn(keyStorageTypes[dimension], groupCapacity);
         }
-        int measures = measureColumns.length;
-        measurePresent = new boolean[measures][groupCapacity];
-        longValues = new long[measures][];
-        doubleValues = new double[measures][];
-        stringValues = new String[measures][];
-        decimalValues = new BigDecimal[measures][];
-        for (int measure = 0; measure < measures; measure++) {
-            switch (measureTypes[measure]) {
-                case LONG -> longValues[measure] = new long[groupCapacity];
-                case DOUBLE -> doubleValues[measure] = new double[groupCapacity];
-                case STRING -> stringValues[measure] = new String[groupCapacity];
-                case DECIMAL -> decimalValues[measure] = new BigDecimal[groupCapacity];
-            }
+        measurePresent = new boolean[measureColumns.length][groupCapacity];
+        measures = new Object[measureColumns.length];
+        for (int measure = 0; measure < measureColumns.length; measure++) {
+            measures[measure] = ResultFrameBuilder.newColumn(measureTypes[measure], groupCapacity);
         }
         Arrays.fill(slots, EMPTY);
     }
@@ -120,9 +105,9 @@ final class TypedAggregationGroups {
             } else {
                 valueHash = switch (dimensionTypes[dimension]) {
                     case LONG -> Long.hashCode(input[column].longValue(row));
-                    case DOUBLE -> Double.hashCode(input[column].doubleValue(row));
+                    case DOUBLE -> Double.hashCode(SparkValues.canonicalDouble(input[column].doubleValue(row)));
                     case STRING -> input[column].stringValue(row).hashCode();
-                    case DECIMAL -> (input[column].decimalValue(row)).stripTrailingZeros().hashCode();
+                    case DECIMAL -> SparkValues.canonicalDecimal(input[column].decimalValue(row)).hashCode();
                 };
             }
             hash = 31 * hash + valueHash;
@@ -138,12 +123,12 @@ final class TypedAggregationGroups {
             int column = dimensionColumns[dimension];
             if (column < 0 || input[column].isNullAt(row)) continue;
             keyPresent[dimension][group] = true;
-            if (timeDimensions[dimension]) keyLongs[dimension][group] = timeValue(input, row, dimension);
+            if (timeDimensions[dimension]) ((long[]) keys[dimension])[group] = timeValue(input, row, dimension);
             else switch (dimensionTypes[dimension]) {
-                case LONG -> keyLongs[dimension][group] = input[column].longValue(row);
-                case DOUBLE -> keyDoubles[dimension][group] = input[column].doubleValue(row);
-                case STRING -> keyStrings[dimension][group] = input[column].stringValue(row);
-                case DECIMAL -> keyDecimals[dimension][group] = input[column].decimalValue(row);
+                case LONG -> ((long[]) keys[dimension])[group] = input[column].longValue(row);
+                case DOUBLE -> ((double[]) keys[dimension])[group] = SparkValues.canonicalDouble(input[column].doubleValue(row));
+                case STRING -> ((String[]) keys[dimension])[group] = input[column].stringValue(row);
+                case DECIMAL -> ((BigDecimal[]) keys[dimension])[group] = input[column].decimalValue(row);
             }
         }
     }
@@ -156,15 +141,15 @@ final class TypedAggregationGroups {
             if (present != keyPresent[dimension][group]) return false;
             if (!present) continue;
             if (timeDimensions[dimension]) {
-                if (timeValue(input, row, dimension) != keyLongs[dimension][group]) return false;
+                if (timeValue(input, row, dimension) != ((long[]) keys[dimension])[group]) return false;
                 continue;
             }
             boolean equal = switch (dimensionTypes[dimension]) {
-                case LONG -> input[column].longValue(row) == keyLongs[dimension][group];
-                case DOUBLE -> Double.doubleToLongBits(input[column].doubleValue(row))
-                        == Double.doubleToLongBits(keyDoubles[dimension][group]);
-                case STRING -> input[column].stringValue(row).equals(keyStrings[dimension][group]);
-                case DECIMAL -> (input[column].decimalValue(row)).compareTo(keyDecimals[dimension][group]) == 0;
+                case LONG -> input[column].longValue(row) == ((long[]) keys[dimension])[group];
+                case DOUBLE -> Double.doubleToLongBits(SparkValues.canonicalDouble(input[column].doubleValue(row)))
+                        == Double.doubleToLongBits(((double[]) keys[dimension])[group]);
+                case STRING -> input[column].stringValue(row).equals(((String[]) keys[dimension])[group]);
+                case DECIMAL -> input[column].decimalValue(row).compareTo(((BigDecimal[]) keys[dimension])[group]) == 0;
             };
             if (!equal) return false;
         }
@@ -179,7 +164,7 @@ final class TypedAggregationGroups {
             case DECIMAL -> (frame[column].decimalValue(row)).longValue();
             case STRING -> ((Number) (Object) frame[column].stringValue(row)).longValue();
         };
-        return Math.floorDiv(timestamp, step) * (long) step;
+        return com.cascada.cache.domain.time.BucketMath.floor(timestamp, step);
     }
 
     void accumulate(int group, FrameColumnReader[] input, int row) {
@@ -198,13 +183,14 @@ final class TypedAggregationGroups {
     }
 
     void accumulateLong(int group, int measure, long incoming) {
+        long[] values = (long[]) measures[measure];
         if (!measurePresent[measure][group]) {
-            longValues[measure][group] = incoming;
+            values[group] = incoming;
             measurePresent[measure][group] = true;
             return;
         }
-        long previous = longValues[measure][group];
-        longValues[measure][group] = switch (measureFunctions[measure]) {
+        long previous = values[group];
+        values[group] = switch (measureFunctions[measure]) {
             case SUM, COUNT -> Math.addExact(previous, incoming);
             case MINIMUM -> Math.min(previous, incoming);
             case MAXIMUM -> Math.max(previous, incoming);
@@ -212,43 +198,43 @@ final class TypedAggregationGroups {
     }
 
     void accumulateDouble(int group, int measure, double incoming) {
+        double[] values = (double[]) measures[measure];
         if (!measurePresent[measure][group]) {
-            doubleValues[measure][group] = incoming;
+            values[group] = incoming;
             measurePresent[measure][group] = true;
             return;
         }
-        doubleValues[measure][group] = measureFunctions[measure].combine(doubleValues[measure][group], incoming);
+        values[group] = measureFunctions[measure].combine(values[group], incoming);
     }
 
     void accumulateString(int group, int measure, String incoming) {
+        String[] values = (String[]) measures[measure];
         if (!measurePresent[measure][group]) {
-            stringValues[measure][group] = incoming;
+            values[group] = incoming;
             measurePresent[measure][group] = true;
             return;
         }
-        String previous = stringValues[measure][group];
-        stringValues[measure][group] = switch (measureFunctions[measure]) {
-            case MINIMUM -> compareSparkStrings(previous, incoming) <= 0 ? previous : incoming;
-            case MAXIMUM -> compareSparkStrings(previous, incoming) >= 0 ? previous : incoming;
+        String previous = values[group];
+        values[group] = switch (measureFunctions[measure]) {
+            case MINIMUM -> SparkValues.compareStrings(previous, incoming) <= 0 ? previous : incoming;
+            case MAXIMUM -> SparkValues.compareStrings(previous, incoming) >= 0 ? previous : incoming;
             case SUM, COUNT -> throw new IllegalArgumentException(
                     "STRING aggregate column requires MIN or MAX, got " + measureFunctions[measure]);
         };
     }
 
     void accumulateDecimal(int group, int measure, BigDecimal incoming) {
-        AggregateOperation function = measureFunctions[measure];
-        if (function == AggregateOperation.SUM || function == AggregateOperation.COUNT) {
-            requireSparkDecimalPrecision(incoming, schema.columnNames().get(measureColumns[measure]));
-        }
+        BigDecimal[] values = (BigDecimal[]) measures[measure];
+        String column = schema.columnNames().get(measureColumns[measure]);
+        SparkValues.requireDecimal(incoming, column);
         if (!measurePresent[measure][group]) {
-            decimalValues[measure][group] = incoming;
+            values[group] = incoming;
             measurePresent[measure][group] = true;
             return;
         }
-        BigDecimal previous = decimalValues[measure][group];
-        decimalValues[measure][group] = switch (function) {
-            case SUM, COUNT -> checkedSparkDecimalSum(previous, incoming,
-                    schema.columnNames().get(measureColumns[measure]));
+        BigDecimal previous = values[group];
+        values[group] = switch (measureFunctions[measure]) {
+            case SUM, COUNT -> SparkValues.decimalSum(previous, incoming, column);
             case MINIMUM -> previous.min(incoming);
             case MAXIMUM -> previous.max(incoming);
         };
@@ -262,23 +248,13 @@ final class TypedAggregationGroups {
         groupHashes = Arrays.copyOf(groupHashes, grown);
         for (int dimension = 0; dimension < dimensionColumns.length; dimension++) {
             keyPresent[dimension] = Arrays.copyOf(keyPresent[dimension], grown);
-            if (dimensionColumns[dimension] < 0) continue;
-            if (timeDimensions[dimension]) keyLongs[dimension] = Arrays.copyOf(keyLongs[dimension], grown);
-            else switch (dimensionTypes[dimension]) {
-                case LONG -> keyLongs[dimension] = Arrays.copyOf(keyLongs[dimension], grown);
-                case DOUBLE -> keyDoubles[dimension] = Arrays.copyOf(keyDoubles[dimension], grown);
-                case STRING -> keyStrings[dimension] = Arrays.copyOf(keyStrings[dimension], grown);
-                case DECIMAL -> keyDecimals[dimension] = Arrays.copyOf(keyDecimals[dimension], grown);
+            if (keys[dimension] != null) {
+                keys[dimension] = ResultFrameBuilder.growColumn(keys[dimension], keyStorageTypes[dimension], grown);
             }
         }
         for (int measure = 0; measure < measureColumns.length; measure++) {
             measurePresent[measure] = Arrays.copyOf(measurePresent[measure], grown);
-            switch (measureTypes[measure]) {
-                case LONG -> longValues[measure] = Arrays.copyOf(longValues[measure], grown);
-                case DOUBLE -> doubleValues[measure] = Arrays.copyOf(doubleValues[measure], grown);
-                case STRING -> stringValues[measure] = Arrays.copyOf(stringValues[measure], grown);
-                case DECIMAL -> decimalValues[measure] = Arrays.copyOf(decimalValues[measure], grown);
-            }
+            measures[measure] = ResultFrameBuilder.growColumn(measures[measure], measureTypes[measure], grown);
         }
         groupCapacity = grown;
     }
@@ -307,54 +283,27 @@ final class TypedAggregationGroups {
         return capacity * 2;
     }
 
-    int[] sortedGroupIds(List<String> dimensions, int[] columns, ColumnType[] types,
-                                 boolean[] timeDimensions, int step) {
+    int[] sortedGroupIds(List<String> dimensions) {
         int[] order = new int[groupCount];
         for (int group = 0; group < groupCount; group++) {
             order[group] = group;
         }
-        if (groupCount < 2 || dimensions.isEmpty()) {
-            return order;
-        }
-        int[] scratch = new int[groupCount];
-        for (long width = 1; width < groupCount; width *= 2) {
-            for (long start = 0; start < groupCount; start += 2 * width) {
-                int left = (int) start;
-                int middle = (int) Math.min(start + width, groupCount);
-                int end = (int) Math.min(start + 2 * width, groupCount);
-                int a = left;
-                int b = middle;
-                int out = left;
-                while (a < middle && b < end) {
-                    if (compareGroups(order[a], order[b], dimensions.size(), columns, types,
-                            timeDimensions, step) <= 0) {
-                        scratch[out++] = order[a++];
-                    } else {
-                        scratch[out++] = order[b++];
-                    }
-                }
-                while (a < middle) scratch[out++] = order[a++];
-                while (b < end) scratch[out++] = order[b++];
-            }
-            int[] swap = order;
-            order = scratch;
-            scratch = swap;
+        if (!dimensions.isEmpty()) {
+            IntStableSort.sort(order, (left, right) -> compareGroups(left, right, dimensions.size()));
         }
         return order;
     }
 
-    int compareGroups(int left, int right, int dimensionCount, int[] columns,
-                              ColumnType[] types, boolean[] time, int step) {
+    int compareGroups(int left, int right, int dimensionCount) {
         for (int dimension = 0; dimension < dimensionCount; dimension++) {
             boolean a = keyPresent[dimension][left], b = keyPresent[dimension][right];
             int comparison;
             if (!a || !b) comparison = a == b ? 0 : a ? 1 : -1;
-            else if (time[dimension]) comparison = Long.compare(keyLongs[dimension][left], keyLongs[dimension][right]);
-            else comparison = switch (types[dimension]) {
-                case LONG -> Long.compare(keyLongs[dimension][left], keyLongs[dimension][right]);
-                case DOUBLE -> Double.compare(keyDoubles[dimension][left], keyDoubles[dimension][right]);
-                case STRING -> keyStrings[dimension][left].compareTo(keyStrings[dimension][right]);
-                case DECIMAL -> keyDecimals[dimension][left].compareTo(keyDecimals[dimension][right]);
+            else comparison = switch (keyStorageTypes[dimension]) {
+                case LONG -> Long.compare(((long[]) keys[dimension])[left], ((long[]) keys[dimension])[right]);
+                case DOUBLE -> Double.compare(((double[]) keys[dimension])[left], ((double[]) keys[dimension])[right]);
+                case STRING -> SparkValues.compareStrings(((String[]) keys[dimension])[left], ((String[]) keys[dimension])[right]);
+                case DECIMAL -> ((BigDecimal[]) keys[dimension])[left].compareTo(((BigDecimal[]) keys[dimension])[right]);
             };
             if (comparison != 0) return comparison;
         }
@@ -365,7 +314,7 @@ final class TypedAggregationGroups {
                                  ColumnType outputType, boolean time) {
         if (!keyPresent[dimension][group]) { output.appendNull(); return; }
         if (time) {
-            long value = keyLongs[dimension][group];
+            long value = ((long[]) keys[dimension])[group];
             switch (outputType) {
                 case LONG -> output.appendLong(value);
                 case DOUBLE -> output.appendDouble(value);
@@ -376,12 +325,7 @@ final class TypedAggregationGroups {
             }
             return;
         }
-        switch (outputType) {
-            case LONG -> output.appendLong(keyLongs[dimension][group]);
-            case DOUBLE -> output.appendDouble(keyDoubles[dimension][group]);
-            case STRING -> output.appendString(keyStrings[dimension][group]);
-            case DECIMAL -> output.appendDecimal(keyDecimals[dimension][group]);
-        }
+        appendStored(output, keys[dimension], outputType, group);
     }
 
     void appendMeasure(ResultFrameBuilder output, int group, int measure) {
@@ -389,11 +333,15 @@ final class TypedAggregationGroups {
             output.appendNull();
             return;
         }
-        switch (measureTypes[measure]) {
-            case LONG -> output.appendLong(longValues[measure][group]);
-            case DOUBLE -> output.appendDouble(doubleValues[measure][group]);
-            case STRING -> output.appendString(stringValues[measure][group]);
-            case DECIMAL -> output.appendDecimal(decimalValues[measure][group]);
+        appendStored(output, measures[measure], measureTypes[measure], group);
+    }
+
+    private static void appendStored(ResultFrameBuilder output, Object column, ColumnType type, int group) {
+        switch (type) {
+            case LONG -> output.appendLong(((long[]) column)[group]);
+            case DOUBLE -> output.appendDouble(((double[]) column)[group]);
+            case STRING -> output.appendString(((String[]) column)[group]);
+            case DECIMAL -> output.appendDecimal(((BigDecimal[]) column)[group]);
         }
     }
 }

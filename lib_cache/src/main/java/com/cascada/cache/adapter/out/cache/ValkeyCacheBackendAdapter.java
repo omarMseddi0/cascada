@@ -47,6 +47,11 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
 
     private static final String WARMING_GENERATION_KEY = "QC:V4:warming_generation";
     private static final String REVISION_KEY = "QC:V4:revision";
+    /** KEYS: bucket, revision, warming generation. ARGV: blob, TTL ms, new revision, expected generation or "". */
+    private static final String STORE_SCRIPT =
+            "if ARGV[4] ~= '' and redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end; "
+            + "redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2]); "
+            + "redis.call('SET', KEYS[2], ARGV[3]); return 1";
     private static final Logger LOGGER = Logger.getLogger(ValkeyCacheBackendAdapter.class.getName());
 
     /** Keep compressed MGET replies bounded while allowing one following request to be prefetched. */
@@ -111,25 +116,14 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
             existsFutures.add(async.exists(toBytes(key)));
         }
 
-        List<Boolean> presence = new ArrayList<>(keys.size());
-        try {
+        return awaiting("pipelined EXISTS", () -> cancelAll(existsFutures), () -> {
+            List<Boolean> presence = new ArrayList<>(keys.size());
             for (RedisFuture<Long> future : existsFutures) {
-                Long exists = await(future, "EXISTS");
+                Long exists = await(future);
                 presence.add(exists != null && exists > 0);
             }
-        } catch (InterruptedException interrupted) {
-            cancelAll(existsFutures);
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("interrupted while awaiting pipelined EXISTS against Valkey",
-                    interrupted);
-        } catch (ExecutionException | TimeoutException | CancellationException failure) {
-            cancelAll(existsFutures);
-            throw new IllegalStateException("pipelined EXISTS against Valkey failed", failure);
-        } catch (RuntimeException | Error failure) {
-            cancelAll(existsFutures);
-            throw failure;
-        }
-        return presence;
+            return presence;
+        });
     }
 
     @Override
@@ -148,11 +142,11 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         RedisAsyncCommands<byte[], byte[]> async = connection.async();
         boolean monitor = LOGGER.isLoggable(Level.FINE);
         long started = monitor ? System.nanoTime() : 0L;
-        long waitNanos = 0L, decodeNanos = 0L;
+        long[] nanos = new long[2]; // reply wait, decode and consume
         Deque<PendingMget> pending = new ArrayDeque<>(MAX_MGET_IN_FLIGHT);
-        int nextStart = 0;
 
-        try {
+        awaiting("bounded MGET", () -> cancelPending(pending), () -> {
+            int nextStart = 0;
             while (nextStart < keys.size() || !pending.isEmpty()) {
                 while (nextStart < keys.size() && pending.size() < MAX_MGET_IN_FLIGHT) {
                     int chunkSize = Math.min(MGET_CHUNK_SIZE, keys.size() - nextStart);
@@ -167,9 +161,9 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
 
                 PendingMget chunk = pending.peekFirst();
                 long waiting = monitor ? System.nanoTime() : 0L;
-                List<KeyValue<byte[], byte[]>> values = await(chunk.future(), "MGET");
+                List<KeyValue<byte[], byte[]>> values = await(chunk.future());
                 long decoding = monitor ? System.nanoTime() : 0L;
-                if (monitor) waitNanos += decoding - waiting;
+                if (monitor) nanos[0] += decoding - waiting;
                 if (values == null || values.size() != chunk.keyCount()) {
                     throw new IllegalStateException("Valkey MGET returned an unexpected value count");
                 }
@@ -179,23 +173,14 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
                             ? decodeOrEvict(keys.get(chunk.startIndex() + index), keyValue.getValue())
                             : Optional.empty());
                 }
-                if (monitor) decodeNanos += System.nanoTime() - decoding;
+                if (monitor) nanos[1] += System.nanoTime() - decoding;
                 pending.removeFirst();
             }
-        } catch (InterruptedException interrupted) {
-            cancelPending(pending);
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("interrupted while awaiting bounded MGET against Valkey", interrupted);
-        } catch (ExecutionException | TimeoutException | CancellationException failure) {
-            cancelPending(pending);
-            throw new IllegalStateException("bounded MGET against Valkey failed", failure);
-        } catch (RuntimeException | Error failure) {
-            cancelPending(pending);
-            throw failure;
-        }
+            return null;
+        });
         if (monitor) {
             LOGGER.fine("Valkey fetch: keys=" + keys.size() + " elapsed_ms=" + (System.nanoTime() - started) / 1_000_000.0
-                    + " reply_wait_ms=" + waitNanos / 1_000_000.0 + " decode_and_consume_ms=" + decodeNanos / 1_000_000.0);
+                    + " reply_wait_ms=" + nanos[0] / 1_000_000.0 + " decode_and_consume_ms=" + nanos[1] / 1_000_000.0);
         }
     }
 
@@ -215,33 +200,33 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
 
     @Override
     public void store(String key, ResultFrame frame, Duration timeToLive) {
-        long ttlMillis = timeToLive.toMillis();
-        if (ttlMillis <= 0) throw new IllegalArgumentException("bucket TTL must be positive");
-        connection.sync().eval("redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2]); "
-                        + "redis.call('SET', KEYS[2], ARGV[3]); return 1", io.lettuce.core.ScriptOutputType.INTEGER,
-                new byte[][] {toBytes(key), toBytes(REVISION_KEY)}, serializer.serialize(frame),
-                toBytes(Long.toString(ttlMillis)), toBytes(java.util.UUID.randomUUID().toString()));
+        storeAtomically(key, frame, timeToLive, "");
     }
 
     @Override
     public void evict(String key) {
         connection.sync().eval("redis.call('DEL', KEYS[1]); redis.call('SET', KEYS[2], ARGV[1]); return 1",
                 io.lettuce.core.ScriptOutputType.INTEGER, new byte[][] {toBytes(key), toBytes(REVISION_KEY)},
-                toBytes(java.util.UUID.randomUUID().toString()));
+                newToken());
     }
 
     @Override public Optional<String> warmingGeneration() { return token(WARMING_GENERATION_KEY); }
 
     @Override public boolean storeForGeneration(String key, ResultFrame frame, Duration ttl, String generation) {
-        long millis = ttl.toMillis();
+        if (generation.isEmpty()) throw new IllegalArgumentException("warming generation must not be empty");
+        return storeAtomically(key, frame, ttl, generation);
+    }
+
+    /**
+     * One atomic script for every bucket write: an optional warming-generation check, the bucket with
+     * its millisecond TTL, and a new revision token so readers see that the cache changed.
+     */
+    private boolean storeAtomically(String key, ResultFrame frame, Duration timeToLive, String generation) {
+        long millis = timeToLive.toMillis();
         if (millis <= 0) throw new IllegalArgumentException("bucket TTL must be positive");
-        Long stored = connection.sync().eval(
-                "if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end; "
-                + "redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2]); "
-                + "redis.call('SET', KEYS[2], ARGV[3]); return 1", io.lettuce.core.ScriptOutputType.INTEGER,
+        Long stored = connection.sync().eval(STORE_SCRIPT, io.lettuce.core.ScriptOutputType.INTEGER,
                 new byte[][] {toBytes(key), toBytes(REVISION_KEY), toBytes(WARMING_GENERATION_KEY)},
-                serializer.serialize(frame), toBytes(Long.toString(millis)),
-                toBytes(java.util.UUID.randomUUID().toString()), toBytes(generation));
+                serializer.serialize(frame), toBytes(Long.toString(millis)), newToken(), toBytes(generation));
         return Long.valueOf(1L).equals(stored);
     }
 
@@ -251,7 +236,7 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         RedisCommands<byte[], byte[]> sync = connection.sync();
         byte[] revision = sync.get(toBytes(key));
         if (revision == null) {
-            sync.setnx(toBytes(key), toBytes(java.util.UUID.randomUUID().toString()));
+            sync.setnx(toBytes(key), newToken());
             revision = sync.get(toBytes(key));
         }
         return Optional.ofNullable(revision).map(value -> new String(value, StandardCharsets.UTF_8));
@@ -260,21 +245,16 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     @Override public Optional<Duration> remainingTimeToLive(List<String> keys) {
         long started = System.nanoTime();
         List<RedisFuture<Long>> pending = keys.stream().map(key -> connection.async().pttl(toBytes(key))).toList();
-        long minimum = Long.MAX_VALUE;
-        try {
+        long minimum = awaiting("PTTL", () -> cancelAll(pending), () -> {
+            long least = Long.MAX_VALUE;
             for (RedisFuture<Long> future : pending) {
-                Long ttl = await(future, "PTTL");
-                if (ttl == null || ttl <= 0) return Optional.empty();
-                minimum = Math.min(minimum, ttl);
+                Long ttl = await(future);
+                if (ttl == null || ttl <= 0) return 0L;
+                least = Math.min(least, ttl);
             }
-        } catch (InterruptedException interrupted) {
-            cancelAll(pending);
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("interrupted awaiting PTTL", interrupted);
-        } catch (ExecutionException | TimeoutException failure) {
-            cancelAll(pending);
-            throw new IllegalStateException("PTTL failed", failure);
-        }
+            return least;
+        });
+        if (minimum <= 0) return Optional.empty();
         long remaining = minimum - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
         return !keys.isEmpty() && remaining > 0 ? Optional.of(Duration.ofMillis(remaining)) : Optional.empty();
     }
@@ -337,47 +317,38 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
                 memoryFutures.add(async.memoryUsage(key));
             }
             List<byte[]> fallbackKeys = new ArrayList<>();
-            for (int index = 0; index < bucketKeys.size(); index++) {
-                try {
-                    Long memoryUsage = await(memoryFutures.get(index), "MEMORY USAGE");
+            totalBytes += awaiting("MEMORY USAGE", () -> cancelAll(memoryFutures), () -> {
+                long pageBytes = 0L;
+                for (int index = 0; index < bucketKeys.size(); index++) {
+                    Long memoryUsage;
+                    try {
+                        memoryUsage = await(memoryFutures.get(index));
+                    } catch (ExecutionException unsupportedOrDenied) {
+                        // Older servers and restricted ACLs can reject MEMORY USAGE. Defer STRLEN
+                        // calls until every future in this page has been submitted and observed.
+                        memoryUsage = null;
+                    }
                     if (memoryUsage == null) {
                         fallbackKeys.add(bucketKeys.get(index));
                     } else {
-                        totalBytes += memoryUsage;
+                        pageBytes += memoryUsage;
                     }
-                } catch (ExecutionException unsupportedOrDenied) {
-                    // Older servers and restricted ACLs can reject MEMORY USAGE. Defer STRLEN
-                    // calls until every future in this page has been submitted and observed.
-                    fallbackKeys.add(bucketKeys.get(index));
-                } catch (InterruptedException interrupted) {
-                    cancelAll(memoryFutures);
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException("interrupted while measuring Valkey cache size",
-                            interrupted);
-                } catch (TimeoutException | CancellationException failure) {
-                    cancelAll(memoryFutures);
-                    throw new IllegalStateException("MEMORY USAGE against Valkey failed", failure);
                 }
-            }
+                return pageBytes;
+            });
 
             List<RedisFuture<Long>> lengthFutures = new ArrayList<>(fallbackKeys.size());
             for (byte[] key : fallbackKeys) {
                 lengthFutures.add(async.strlen(key));
             }
-            for (RedisFuture<Long> future : lengthFutures) {
-                try {
-                    Long length = await(future, "STRLEN");
-                    totalBytes += length == null ? 0L : length;
-                } catch (InterruptedException interrupted) {
-                    cancelAll(lengthFutures);
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException("interrupted while measuring Valkey cache size",
-                            interrupted);
-                } catch (ExecutionException | TimeoutException | CancellationException failure) {
-                    cancelAll(lengthFutures);
-                    throw new IllegalStateException("STRLEN fallback against Valkey failed", failure);
+            totalBytes += awaiting("STRLEN fallback", () -> cancelAll(lengthFutures), () -> {
+                long pageBytes = 0L;
+                for (RedisFuture<Long> future : lengthFutures) {
+                    Long length = await(future);
+                    pageBytes += length == null ? 0L : length;
                 }
-            }
+                return pageBytes;
+            });
             bucketCount += bucketKeys.size();
             cursor = page;
         } while (!cursor.isFinished());
@@ -396,8 +367,8 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         RedisCommands<byte[], byte[]> sync = connection.sync();
         ScanArgs scanArgs = ScanArgs.Builder.limit(512);
 
-        sync.set(toBytes(REVISION_KEY), toBytes(java.util.UUID.randomUUID().toString()));
-        sync.set(toBytes(WARMING_GENERATION_KEY), toBytes(java.util.UUID.randomUUID().toString()));
+        sync.set(toBytes(REVISION_KEY), newToken());
+        sync.set(toBytes(WARMING_GENERATION_KEY), newToken());
         long purged = 0L;
         ScanCursor cursor = ScanCursor.INITIAL;
         do {
@@ -409,7 +380,7 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
             }
             cursor = page;
         } while (!cursor.isFinished());
-        sync.set(toBytes(REVISION_KEY), toBytes(java.util.UUID.randomUUID().toString()));
+        sync.set(toBytes(REVISION_KEY), newToken());
         return purged;
     }
 
@@ -417,9 +388,33 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         return key.getBytes(StandardCharsets.UTF_8);
     }
 
-    private <T> T await(RedisFuture<T> future, String command)
+    private byte[] newToken() {
+        return toBytes(java.util.UUID.randomUUID().toString());
+    }
+
+    private <T> T await(RedisFuture<T> future)
             throws InterruptedException, ExecutionException, TimeoutException {
         return future.get(commandTimeout.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Awaits pipelined replies; on any failure the still-pending futures are cancelled. Interruption is
+     * restored, and Lettuce failures are reported with the command that failed.
+     */
+    private static <R> R awaiting(String command, Runnable cancelPending, ValkeyWait<R> body) {
+        try {
+            return body.run();
+        } catch (InterruptedException interrupted) {
+            cancelPending.run();
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while awaiting " + command + " against Valkey", interrupted);
+        } catch (ExecutionException | TimeoutException | CancellationException failure) {
+            cancelPending.run();
+            throw new IllegalStateException(command + " against Valkey failed", failure);
+        } catch (RuntimeException | Error failure) {
+            cancelPending.run();
+            throw failure;
+        }
     }
 
     private static void cancelPending(Iterable<? extends PendingMget> pending) {

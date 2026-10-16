@@ -11,7 +11,7 @@ import java.util.Map;
 
 /** Reads the flat Spark JSON ConfigMap mounted by the Kubernetes deployment. */
 public final class SparkConfigurationFileReader {
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = SettingValues.JSON;
 
     public Map<String, String> read(String path) {
         if (path == null || path.isBlank()) return Map.of();

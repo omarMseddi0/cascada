@@ -69,6 +69,6 @@ final class TimeBoundClassifier {
     }
 
     private static boolean isTimeColumn(SqlIdentifier identifier, TimeDimensionMap dimensions) {
-        return dimensions.isTimeColumn(identifier.names.get(identifier.names.size() - 1));
+        return SqlTrees.isTimeColumn(identifier, dimensions);
     }
 }

@@ -1,7 +1,6 @@
 package com.cascada.app.bootstrap;
 
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
-import com.cascada.spark.application.configuration.SparkSessionConfigBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.*;
 import java.security.*;
@@ -22,13 +21,10 @@ public final class DeltaTenGbBenchmark {
         if (args.length != 2 || !Set.of("generate", "measure").contains(args[0]))
             throw new IllegalArgumentException("generate|measure /validation/output.json");
         boolean nativeMode = Boolean.parseBoolean(System.getenv("CASCADA_GLUTEN_ENABLED"));
-        var config = SparkSessionConfigBuilder.forLocal().master("local[6]")
+        var config = LocalSparkFixtures.localConfig().master("local[6]")
                 .appName("cascada-random-delta-10gb-" + args[0])
                 .withEnvironment(System::getenv)
                 .withProperty("spark.sql.ansi.enabled", "false")
-                .withProperty("spark.ui.enabled", "false")
-                .withProperty("spark.driver.host", "127.0.0.1")
-                .withProperty("spark.driver.bindAddress", "127.0.0.1")
                 .withProperty("spark.sql.session.timeZone", "UTC")
                 .withProperty("spark.sql.shuffle.partitions", "48")
                 .withProperty("spark.default.parallelism", "6")
@@ -158,7 +154,7 @@ public final class DeltaTenGbBenchmark {
             long warmStarted=System.nanoTime();
             var warmRows=warm.collectAsList();
             double warmSeconds=(System.nanoTime()-warmStarted)/1e9;
-            String warmDigest=digest(warmRows);
+            String warmDigest=LocalSparkFixtures.digest(warmRows);
             result.put("warmupSeconds",warmSeconds);result.put("warmupRows",warmRows.size());result.put("warmupSha256",warmDigest);
             result.put("status","measurement-started");
             save(output,spark,nativeMode,results);
@@ -167,7 +163,7 @@ public final class DeltaTenGbBenchmark {
             long start=System.nanoTime();
             var rows=measured.collectAsList();
             double seconds=(System.nanoTime()-start)/1e9;
-            String checksum=digest(rows);
+            String checksum=LocalSparkFixtures.digest(rows);
             result.put("seconds",seconds);result.put("rows",rows.size());result.put("sha256",checksum);
             result.put("schema",measured.schema().json());
             if(!checksum.equals(warmDigest)) {
@@ -215,15 +211,6 @@ public final class DeltaTenGbBenchmark {
                 "offHeapBytes",OFF_HEAP,"memoryIsolation",MEMORY_ISOLATION,"results",results));
     }
 
-    private static String digest(List<Row> rows) throws Exception {
-        var digest=MessageDigest.getInstance("SHA-256");
-        for(var row:rows) {
-            var values=new ArrayList<Object>();
-            for(int column=0;column<row.size();column++) values.add(row.get(column));
-            digest.update(JSON.writeValueAsBytes(values));digest.update((byte)'\n');
-        }
-        return HexFormat.of().formatHex(digest.digest());
-    }
 
     private static List<String> executedClasses(org.apache.spark.sql.execution.SparkPlan root) {
         var seen=Collections.newSetFromMap(new IdentityHashMap<org.apache.spark.sql.execution.SparkPlan,Boolean>());

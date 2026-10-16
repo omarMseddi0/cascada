@@ -1,6 +1,7 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
@@ -337,21 +338,11 @@ public final class CacheExecutionEngine {
     }
 
     private static void requireActive() {
-        if (Thread.currentThread().isInterrupted()) {
-            throw new java.util.concurrent.CancellationException("Query was interrupted");
-        }
-        QueryExecutionScope.current().ifPresent(com.cascada.cache.application.execution.QueryCancellation::requireActive);
+        QueryCancellation.requireCurrentActive();
     }
 
     private static void propagateCancellation(RuntimeException failure) {
-        requireActive();
-        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
-            if (cause instanceof java.util.concurrent.CancellationException cancelled) throw cancelled;
-            if (cause instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-                throw new java.util.concurrent.CancellationException("Query was interrupted");
-            }
-        }
+        QueryCancellation.rethrowIfCancelled(failure);
     }
 
 }

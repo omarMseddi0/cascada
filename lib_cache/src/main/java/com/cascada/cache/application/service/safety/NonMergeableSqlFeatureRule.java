@@ -37,9 +37,4 @@ public final class NonMergeableSqlFeatureRule implements SafetyRule {
         }
         return Optional.empty();
     }
-
-    @Override
-    public String ruleName() {
-        return "NonMergeableSqlFeatureRule";
-    }
 }

@@ -145,11 +145,6 @@ class ClusterManifestRendererTest {
     }
 
     @Test
-    void indentSkipsBlankLinesAndPreservesThem() {
-        assertThat(ClusterManifestRenderer.indent("a\n\nb", 2)).isEqualTo("  a\n\n  b");
-    }
-
-    @Test
     void fillReplacesEveryTokenAndIsPrefixSafe() {
         String out = ClusterManifestRenderer.fill("${a}/${ab}", Map.of("a", "X", "ab", "Y"));
         assertThat(out).isEqualTo("X/Y");

@@ -4,6 +4,7 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The registry of logical tables, modelling the Python {@code ConfigLoader.get_table_by_path} lookup.
@@ -17,6 +18,13 @@ public final class TableCatalog {
     public TableCatalog register(RegisteredTable table) {
         tablesByLogicalName.put(table.logicalTableName().toLowerCase(Locale.ROOT), table);
         return this;
+    }
+
+    /** Physical names of every registered table's time columns. */
+    public Set<String> physicalTimeColumns() {
+        Set<String> columns = new java.util.HashSet<>();
+        tablesByLogicalName.values().forEach(table -> columns.addAll(table.physicalTimeColumns()));
+        return Set.copyOf(columns);
     }
 
     public Optional<RegisteredTable> findByLogicalName(String logicalTableName) {

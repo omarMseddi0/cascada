@@ -49,25 +49,10 @@ public final class EnvironmentSettingsReader {
     }
 
     private int intSetting(String name, int fallback) {
-        long value = longSetting(name, fallback);
-        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException(name + " must be between " + Integer.MIN_VALUE + " and "
-                    + Integer.MAX_VALUE + ", but was: " + value);
-        }
-        return (int) value;
+        return SettingValues.intValue(name, environment.apply(name), fallback, Integer.MIN_VALUE, Integer.MAX_VALUE);
     }
 
     private long longSetting(String name, long fallback) {
-        String raw = environment.apply(name);
-        if (raw == null) {
-            return fallback;
-        }
-        try {
-            return Long.parseLong(raw.trim());
-        } catch (NumberFormatException notANumber) {
-            // Fail loudly: silently falling back would start the engine with a bucket width the
-            // operator did not ask for, and every key written under it would be wrong.
-            throw new IllegalArgumentException(name + " must be an integer, but was: '" + raw + "'", notANumber);
-        }
+        return SettingValues.longValue(name, environment.apply(name), fallback, Long.MIN_VALUE, Long.MAX_VALUE);
     }
 }

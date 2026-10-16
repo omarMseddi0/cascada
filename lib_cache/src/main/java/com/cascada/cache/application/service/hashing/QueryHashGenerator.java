@@ -7,6 +7,7 @@ import com.cascada.identity.domain.QueryHash;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -78,13 +79,7 @@ public final class QueryHashGenerator {
     private static String md5Hexadecimal(String input) {
         try {
             MessageDigest digest = MessageDigest.getInstance("MD5");
-            byte[] hashed = digest.digest(input.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hexadecimal = new StringBuilder(hashed.length * 2);
-            for (byte singleByte : hashed) {
-                hexadecimal.append(Character.forDigit((singleByte >> 4) & 0xF, 16));
-                hexadecimal.append(Character.forDigit(singleByte & 0xF, 16));
-            }
-            return hexadecimal.toString();
+            return HexFormat.of().formatHex(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException("MD5 is a required JDK algorithm but was unavailable", impossible);
         }

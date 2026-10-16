@@ -6,7 +6,6 @@ import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.exception.CacheSerializationException;
-import com.github.luben.zstd.Zstd;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
@@ -25,7 +24,7 @@ import java.util.List;
  */
 public final class PortableFrameSerializer implements CacheValueSerializerPort {
 
-    public static final int DEFAULT_COMPRESSION_LEVEL = 3;
+    public static final int DEFAULT_COMPRESSION_LEVEL = ZstdFrameEnvelope.DEFAULT_COMPRESSION_LEVEL;
     private static final int UTF8_FORMAT = -1;
 
     private final int compressionLevel;
@@ -35,10 +34,7 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
     }
 
     public PortableFrameSerializer(int compressionLevel) {
-        if (compressionLevel < Zstd.minCompressionLevel() || compressionLevel > Zstd.maxCompressionLevel()) {
-            throw new IllegalArgumentException("compressionLevel is outside the supported Zstandard range");
-        }
-        this.compressionLevel = compressionLevel;
+        this.compressionLevel = ZstdFrameEnvelope.requireCompressionLevel(compressionLevel);
     }
 
     @Override
@@ -86,8 +82,6 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         return out;
     }
 
-    /** Call-owned storage: safe concurrent use, with no retained giant thread-local buffers. */
-
     private ResultFrame decode(byte[] encoded) {
         PortableFrameReader in = new PortableFrameReader(encoded);
         if (in.readInt() != UTF8_FORMAT) return decodeLegacy(encoded);
@@ -122,8 +116,6 @@ public final class PortableFrameSerializer implements CacheValueSerializerPort {
         if (in.remaining() != 0) throw new IllegalArgumentException("trailing frame data");
         return builder.build();
     }
-
-    /** Logical bounds remain checked even if Agrona's global bounds checking is disabled. */
 
     /** Only pre-UTF8 portable blobs need Java's modified-UTF codec. */
     private ResultFrame decodeLegacy(byte[] encoded) {

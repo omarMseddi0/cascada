@@ -19,9 +19,7 @@ final class ScopedLogicalSqlTranslator {
 
     ScopedLogicalSqlTranslator(TableCatalog catalog, String originalSql) {
         this.catalog = catalog;
-        String prefix = "CASCADA_SCOPED_SOURCE";
-        while (originalSql.toUpperCase(Locale.ROOT).contains(prefix)) prefix += "_X";
-        sentinelPrefix = prefix;
+        sentinelPrefix = SqlTrees.unusedSentinel(originalSql, "CASCADA_SCOPED_SOURCE");
     }
 
     String translate(SqlNode root) {
@@ -58,8 +56,7 @@ final class ScopedLogicalSqlTranslator {
             return with;
         }
         if (root instanceof SqlSelect select) return select(select, null, ctes, parents);
-        if (root instanceof SqlCall call && (root.getKind() == SqlKind.UNION
-                || root.getKind() == SqlKind.INTERSECT || root.getKind() == SqlKind.EXCEPT)) {
+        if (root instanceof SqlCall call && SqlTrees.isSetOperation(root)) {
             for (int index = 0; index < call.operandCount(); index++)
                 call.setOperand(index, query(call.operand(index), ctes, parents));
             return call;
@@ -75,12 +72,11 @@ final class ScopedLogicalSqlTranslator {
         visible.putAll(sources);
         Set<String> aliases = new HashSet<>();
         for (SqlNode projection : select.getSelectList())
-            if (projection.getKind() == SqlKind.AS && projection instanceof SqlCall as)
-                aliases.add(key(((SqlIdentifier) as.operand(1)).getSimple()));
+            if (projection.getKind() == SqlKind.AS) aliases.add(key(SqlTrees.outputName(projection)));
         Set<SqlNode> preserved = Collections.newSetFromMap(new IdentityHashMap<>());
-        preserveAliases(order == null ? select.getOrderList() : order.orderList, aliases, preserved);
-        preserveAliases(select.getGroup(), aliases, preserved);
-        preserveAliases(select.getHaving(), aliases, preserved);
+        SqlTrees.collectAliasReferences(order == null ? select.getOrderList() : order.orderList, aliases, preserved);
+        SqlTrees.collectAliasReferences(select.getGroup(), aliases, preserved);
+        SqlTrees.collectAliasReferences(select.getHaving(), aliases, preserved);
 
         SqlShuttle resolver = new SqlShuttle() {
             @Override public SqlNode visit(SqlIdentifier id) {
@@ -160,7 +156,7 @@ final class ScopedLogicalSqlTranslator {
             RegisteredTable registered = catalog.findByLogicalName(name).orElseThrow(() ->
                     new UnsupportedSqlException("no registered table for logical name '" + name + "'"));
             String sentinel = sentinelPrefix + "_" + paths.size();
-            paths.put(sentinel, "delta.`" + registered.deltaPath().replace("`", "``") + "`");
+            paths.put(sentinel, SqlTrees.deltaSource(registered.deltaPath()));
             SqlIdentifier binding = alias == null ? table : alias;
             if (!explicitColumns) sources.put(key(binding.getSimple()), registered);
             SqlNode physical = new SqlIdentifier(sentinel, SqlParserPos.ZERO);
@@ -183,8 +179,7 @@ final class ScopedLogicalSqlTranslator {
         SqlNode root = relation instanceof SqlOrderBy order ? order.query : relation;
         if (!(root instanceof SqlSelect select) || select.getSelectList().size() != 1
                 || !(select.getSelectList().get(0) instanceof SqlIdentifier star) || !star.isStar()) return null;
-        SqlNode source = select.getFrom();
-        if (source != null && source.getKind() == SqlKind.AS) source = ((SqlCall) source).operand(0);
+        SqlNode source = SqlTrees.stripAlias(select.getFrom());
         if (source instanceof SqlIdentifier table && table.isSimple()) {
             RegisteredTable inherited = wildcardRelations.get(key(table.getSimple()));
             return inherited != null ? inherited : catalog.findByLogicalName(table.getSimple()).orElse(null);
@@ -192,10 +187,5 @@ final class ScopedLogicalSqlTranslator {
         return source == null ? null : passthroughTable(source);
     }
 
-    private static void preserveAliases(SqlNode node, Set<String> aliases, Set<SqlNode> preserved) {
-        if (node instanceof SqlIdentifier id && id.isSimple() && aliases.contains(key(id.getSimple()))) preserved.add(id);
-        else if (node instanceof SqlNodeList list) list.forEach(child -> preserveAliases(child, aliases, preserved));
-        else if (node instanceof SqlCall call) call.getOperandList().forEach(child -> preserveAliases(child, aliases, preserved));
-    }
     private static String key(String value) { return value.toLowerCase(Locale.ROOT); }
 }

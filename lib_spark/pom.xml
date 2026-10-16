@@ -30,6 +30,11 @@
             <groupId>com.cascada</groupId>
             <artifactId>cascada-lib-cache</artifactId>
         </dependency>
+        <!-- Shared Spark/Delta/Gluten names and defaults (pure domain constants, no runtime dependencies). -->
+        <dependency>
+            <groupId>com.cascada</groupId>
+            <artifactId>cascada-lib-spark-config</artifactId>
+        </dependency>
 
         <!-- Supplied by the Spark cluster image at runtime (see deployment spark.jars); provided here. -->
         <dependency>

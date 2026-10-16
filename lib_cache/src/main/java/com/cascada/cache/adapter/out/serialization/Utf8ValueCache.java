@@ -8,8 +8,6 @@ import org.apache.arrow.vector.VarCharVector;
 
 /** Per-decode bounded dictionary, using Agrona's byte comparison, hashing and open-addressed map. */
 final class Utf8ValueCache {
-    private static final int MAX_ENTRIES = 16_384;
-    private static final int MAX_KEY_BYTES = 1_048_576;
     private final int sampleSize;
     // Lookup view is never inserted. Stored keys own their bytes, surviving Arrow buffer reuse.
     private final UnsafeBuffer lookup = new UnsafeBuffer(new byte[0]);
@@ -32,7 +30,7 @@ final class Utf8ValueCache {
         if (start < 0 || length < 0 || end > data.capacity()) {
             throw new IllegalArgumentException("invalid UTF-8 cell offsets");
         }
-        if (length > MAX_KEY_BYTES) return decode(vector.get(row));
+        if (length > Utf8CachePolicy.MAX_BYTES) return decode(vector.get(row));
         if (values == null) values = new Object2ObjectHashMap<>(256, 0.5f);
         // Arrow owns this memory throughout read(); never retain its address between calls.
         lookup.wrap(data.memoryAddress() + start, length);
@@ -45,12 +43,12 @@ final class Utf8ValueCache {
             }
             byte[] bytes = vector.get(row);
             String result = decode(bytes);
-            if (reads >= sampleSize && (long) hits * 10 < reads) {
+            if (Utf8CachePolicy.mostlyDistinct(reads, hits, sampleSize)) {
                 disabled = true;
                 values = null;
                 return result;
             }
-            if (values.size() < MAX_ENTRIES && length <= MAX_KEY_BYTES - keyBytes) {
+            if (Utf8CachePolicy.admits(values.size(), keyBytes, length)) {
                 values.put(new UnsafeBuffer(bytes), result);
                 keyBytes += length;
             }

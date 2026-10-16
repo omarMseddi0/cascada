@@ -104,7 +104,7 @@ public final class TypedFrameAccumulator {
             }
         }
 
-        int[] order = groups.sortedGroupIds(dimensions, dimensionColumns, dimensionTypes, timeDimensions, step);
+        int[] order = groups.sortedGroupIds(dimensions);
         for (int group : order) {
             for (int column = 0; column < schema.columnNames().size(); column++) {
                 int dimension = outputDimensions[column];

@@ -3,10 +3,12 @@ package com.cascada.sql.adapter.out.calcite;
 import com.cascada.cache.domain.merge.AverageIngredients;
 import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.sql.domain.TimeDimensionMap;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
@@ -46,11 +48,22 @@ public final class GapQueryBuilder {
 
     private static final String AVERAGE = "AVG";
 
+    private final TimeDimensionMap timeDimensions;
     private final String timeColumn;
     private final long bucketSeconds;
 
     public GapQueryBuilder(String timeColumn, long bucketSeconds) {
-        this.timeColumn = timeColumn.toLowerCase(Locale.ROOT);
+        this(new TimeDimensionMap(Set.of(timeColumn)), timeColumn, bucketSeconds);
+    }
+
+    /**
+     * Recognises bounds on every column in {@code timeDimensions} (the same set canonicalisation uses).
+     * The gap range is injected on the time column the query's own window is written on, or on
+     * {@code defaultTimeColumn} when the query names none.
+     */
+    public GapQueryBuilder(TimeDimensionMap timeDimensions, String defaultTimeColumn, long bucketSeconds) {
+        this.timeDimensions = timeDimensions;
+        this.timeColumn = defaultTimeColumn.toLowerCase(Locale.ROOT);
         this.bucketSeconds = bucketSeconds > 0 ? bucketSeconds : 86_400L;
     }
 
@@ -95,14 +108,14 @@ public final class GapQueryBuilder {
         // Drop ORDER BY / LIMIT from the gap fetch (Python removes exp.Order / exp.Limit).
         SqlNode root = parsed instanceof SqlOrderBy orderBy ? orderBy.query : parsed;
 
-        if (allSelects(root).stream().anyMatch(select -> isSubquerySource(select.getFrom()))) {
+        if (SqlTrees.allSelects(root).stream().anyMatch(select -> SqlTrees.containsDerivedSource(select.getFrom()))) {
             throw new com.cascada.sql.exception.UnsupportedSqlException(
                     "derived-table time scopes cannot be safely rewritten for gaps");
         }
 
-        SqlNode gapCondition = buildGapCondition(gapRanges);
+        SqlNode gapCondition = buildGapCondition(gapRanges, windowTimeColumn(root));
 
-        if (isUnionOrSubqueryStructure(root)) {
+        if (containsSetOperation(root)) {
             injectGapIntoInnerWhere(root, gapCondition);
         } else if (root instanceof SqlSelect select) {
             applyFlatGap(select, gapCondition);
@@ -116,16 +129,15 @@ public final class GapQueryBuilder {
 
     public String buildStorageQuery(String originalSql, GapPlan gapPlan, int fixedStepSeconds) {
         SqlNode parsed = CalciteSql.parseQuery(originalSql);
-        var dimensions = new com.cascada.sql.domain.TimeDimensionMap(java.util.Set.of(timeColumn));
-        for (SqlSelect select : allSelects(parsed)) {
+        for (SqlSelect select : SqlTrees.allSelects(parsed)) {
             SqlNodeList projections = new SqlNodeList(select.getParserPosition());
             for (SqlNode item : select.getSelectList())
-                projections.add(TimeStepNormalizer.bucketOutput(item, dimensions, fixedStepSeconds));
+                projections.add(TimeStepNormalizer.bucketOutput(item, timeDimensions, fixedStepSeconds));
             select.setSelectList(projections);
             if (select.getGroup() != null) {
                 SqlNodeList groups = new SqlNodeList(select.getParserPosition());
                 for (SqlNode group : select.getGroup())
-                    groups.add(TimeStepNormalizer.bucketOutput(group, dimensions, fixedStepSeconds));
+                    groups.add(TimeStepNormalizer.bucketOutput(group, timeDimensions, fixedStepSeconds));
                 select.setGroupBy(groups);
             }
         }
@@ -149,9 +161,7 @@ public final class GapQueryBuilder {
         for (SqlNode item : select.getSelectList()) {
             if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall alias
                     && alias.operand(0) instanceof SqlBasicCall expression
-                    && (expression.getKind() == SqlKind.PLUS || expression.getKind() == SqlKind.MINUS
-                    || expression.getKind() == SqlKind.TIMES || expression.getKind() == SqlKind.DIVIDE
-                    || expression.getKind() == SqlKind.MINUS_PREFIX || expression.getKind() == SqlKind.PLUS_PREFIX)) {
+                    && SqlTrees.ARITHMETIC.contains(expression.getKind())) {
                 expandIngredients(expression, expanded, emittedIngredients);
             } else expanded.add(item);
         }
@@ -170,8 +180,8 @@ public final class GapQueryBuilder {
             }
             String argument = CalciteSql.unparse(average.operand(0));
             String name = CalciteSql.unparse(alias.operand(1)).replace("`", "");
-            rewritten.add(aliased("SUM(" + argument + ")", AverageIngredients.sumColumn(name)));
-            rewritten.add(aliased("COUNT(" + argument + ")", AverageIngredients.countColumn(name)));
+            rewritten.add(aliased(AggregateNormalizer.sumIngredient(argument), AverageIngredients.sumColumn(name)));
+            rewritten.add(aliased(AggregateNormalizer.countIngredient(argument), AverageIngredients.countColumn(name)));
             rewritten.add(aliased("MIN(TYPEOF(" + argument + "))", AverageIngredients.typeColumn(name)));
         }
         select.setSelectList(rewritten);
@@ -179,8 +189,7 @@ public final class GapQueryBuilder {
 
     private void expandIngredients(SqlNode node, List<SqlNode> expanded, java.util.Set<String> emitted) {
         if (!(node instanceof SqlBasicCall call)) return;
-        String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
-        if (java.util.Set.of("SUM", "COUNT", "MIN", "MAX", "AVG").contains(name)) {
+        if (SqlTrees.isAggregateCall(call)) {
             String expression = CalciteSql.unparse(call);
             if (emitted.add(expression)) expanded.add(aliased(expression, CompositeIngredientNames.alias(expression)));
             return;
@@ -197,7 +206,7 @@ public final class GapQueryBuilder {
     public String stripTimeConditions(String sql) {
         SqlNode parsed = CalciteSql.parseQuery(sql);
         SqlNode root = parsed instanceof SqlOrderBy orderBy ? orderBy.query : parsed;
-        for (SqlSelect select : allSelects(root)) {
+        for (SqlSelect select : SqlTrees.allSelects(root)) {
             SqlNode where = select.getWhere();
             if (where != null) {
                 select.setWhere(filterOutTimeConditions(where));
@@ -222,91 +231,82 @@ public final class GapQueryBuilder {
         }
     }
 
-    /** Ported from {@code _is_union_or_subquery_structure}. */
-    private boolean isUnionOrSubqueryStructure(SqlNode root) {
-        if (containsUnion(root)) {
-            return true;
-        }
-        return allSelects(root).stream()
-                .anyMatch(select -> isSubquerySource(select.getFrom()));
-    }
-
-    private boolean containsUnion(SqlNode node) {
+    /** Ported from {@code _is_union_or_subquery_structure}; derived tables are rejected before this. */
+    private boolean containsSetOperation(SqlNode node) {
         if (node == null) {
             return false;
         }
-        if (node.getKind() == SqlKind.UNION || node.getKind() == SqlKind.INTERSECT
-                || node.getKind() == SqlKind.EXCEPT) {
-            return true;
-        }
-        return node instanceof SqlCall call
-                && call.getOperandList().stream().anyMatch(this::containsUnion);
-    }
-
-    private boolean isSubquerySource(SqlNode from) {
-        SqlNode source = stripAlias(from);
-        return source instanceof SqlSelect || source instanceof SqlOrderBy
-                || (source != null && (source.getKind() == SqlKind.UNION
-                || source.getKind() == SqlKind.INTERSECT || source.getKind() == SqlKind.EXCEPT));
+        return SqlTrees.isSetOperation(node)
+                || node instanceof SqlCall call && call.getOperandList().stream().anyMatch(this::containsSetOperation);
     }
 
     /** Ported from {@code _find_innermost_selects_with_from}: only SELECTs reading directly from a table. */
     private List<SqlSelect> findInnermostSelectsWithFrom(SqlNode root) {
-        return allSelects(root).stream()
+        return SqlTrees.allSelects(root).stream()
                 .filter(select -> readsDirectlyFromTable(select.getFrom()))
                 .collect(Collectors.toCollection(ArrayList::new));
     }
 
     private boolean readsDirectlyFromTable(SqlNode from) {
-        SqlNode source = stripAlias(from);
+        SqlNode source = SqlTrees.stripAlias(from);
         // Subquery wrappers cannot see the raw time column.
         return source instanceof SqlIdentifier
                 || source instanceof SqlJoin join && joinTouchesTable(join);
     }
 
     private boolean joinTouchesTable(SqlJoin join) {
-        return stripAlias(join.getLeft()) instanceof SqlIdentifier
-                || stripAlias(join.getRight()) instanceof SqlIdentifier;
-    }
-
-    private SqlNode stripAlias(SqlNode from) {
-        if (from != null && from.getKind() == SqlKind.AS && from instanceof SqlBasicCall call) {
-            return call.operand(0);
-        }
-        return from;
+        return SqlTrees.stripAlias(join.getLeft()) instanceof SqlIdentifier
+                || SqlTrees.stripAlias(join.getRight()) instanceof SqlIdentifier;
     }
 
     // --- time predicate analysis (ported from _has_time_only_subtree / _replace_time_condition) ---
 
     /** Ported from {@code _filter_out_time_conditions}: drop {@code timeCol >/>=/</<=} predicates. */
     private SqlNode filterOutTimeConditions(SqlNode condition) {
-        if (condition == null || isRangeBound(condition)) {
-            return null;
+        // OR, NOT, functions and time-dependent business filters retain their original meaning; only
+        // top-level conjuncts the canonicaliser read as the time window are dropped.
+        SqlNode kept = null;
+        for (SqlNode conjunct : SqlTrees.conjuncts(condition)) {
+            if (!isRangeBound(conjunct)) {
+                kept = combine(SqlKind.AND, kept, conjunct);
+            }
         }
-        if (condition.getKind() == SqlKind.AND && condition instanceof SqlBasicCall call) {
-            return combine(SqlKind.AND, filterOutTimeConditions(call.operand(0)),
-                    filterOutTimeConditions(call.operand(1)));
-        }
-        // OR, NOT, functions and time-dependent business filters retain their original meaning.
-        return condition;
+        return kept;
     }
 
     private boolean isRangeBound(SqlNode node) {
-        return TimeBoundClassifier.classify(node,
-                new com.cascada.sql.domain.TimeDimensionMap(java.util.Set.of(timeColumn))) != null;
+        return TimeBoundClassifier.classify(node, timeDimensions) != null;
+    }
+
+    /** The time column the query's window bounds are written on; the configured column otherwise. */
+    private String windowTimeColumn(SqlNode root) {
+        for (SqlSelect select : SqlTrees.allSelects(root)) {
+            for (SqlNode conjunct : SqlTrees.conjuncts(select.getWhere())) {
+                if (isRangeBound(conjunct)) {
+                    String[] column = {null};
+                    SqlTrees.forEachColumnReference(conjunct, identifier -> {
+                        if (column[0] == null && SqlTrees.isTimeColumn(identifier, timeDimensions)) {
+                            column[0] = SqlTrees.lastName(identifier);
+                        }
+                    });
+                    if (column[0] != null) return column[0];
+                }
+            }
+        }
+        return timeColumn;
     }
 
     // --- node construction -----------------------------------------------------------------------
 
-    private SqlNode buildGapCondition(List<TimeRange> ranges) {
+    private SqlNode buildGapCondition(List<TimeRange> ranges, String column) {
         SqlNode condition = null;
         for (TimeRange range : ranges) {
             SqlNode lower = SqlStdOperatorTable.GREATER_THAN_OR_EQUAL.createCall(SqlParserPos.ZERO,
-                    new SqlIdentifier(timeColumn, SqlParserPos.ZERO),
+                    new SqlIdentifier(column, SqlParserPos.ZERO),
                     org.apache.calcite.sql.SqlLiteral.createExactNumeric(
                             Long.toString(range.startTimestampSeconds()), SqlParserPos.ZERO));
             SqlNode upper = SqlStdOperatorTable.LESS_THAN_OR_EQUAL.createCall(SqlParserPos.ZERO,
-                    new SqlIdentifier(timeColumn, SqlParserPos.ZERO),
+                    new SqlIdentifier(column, SqlParserPos.ZERO),
                     org.apache.calcite.sql.SqlLiteral.createExactNumeric(
                             Long.toString(range.endTimestampSeconds()), SqlParserPos.ZERO));
             condition = combine(SqlKind.OR, condition, and(lower, upper));
@@ -332,33 +332,5 @@ public final class GapQueryBuilder {
     /** Re-parse the gap predicate so each injection site gets an independent subtree (Python copies). */
     private SqlNode cloneCondition(SqlNode gapCondition) {
         return gapCondition.clone(SqlParserPos.ZERO);
-    }
-
-    // --- tree walk -------------------------------------------------------------------------------
-
-    private List<SqlSelect> allSelects(SqlNode root) {
-        List<SqlSelect> selects = new ArrayList<>();
-        collectSelects(root, selects);
-        return selects;
-    }
-
-    private void collectSelects(SqlNode node, List<SqlSelect> collector) {
-        if (node == null) {
-            return;
-        }
-        if (node instanceof SqlSelect select) {
-            collector.add(select);
-            collectSelects(select.getFrom(), collector);
-            return;
-        }
-        if (node instanceof SqlOrderBy orderBy) {
-            collectSelects(orderBy.query, collector);
-            return;
-        }
-        if (node instanceof SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                collectSelects(operand, collector);
-            }
-        }
     }
 }

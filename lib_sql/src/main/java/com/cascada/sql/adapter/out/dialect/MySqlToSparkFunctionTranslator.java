@@ -1,6 +1,7 @@
 package com.cascada.sql.adapter.out.dialect;
 
 import com.cascada.sql.adapter.out.calcite.CalciteSql;
+import com.cascada.sql.adapter.out.calcite.SqlTextScanner;
 import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -115,16 +116,16 @@ public final class MySqlToSparkFunctionTranslator {
     }
 
     private String rewriteSupportedFunctionCalls(String sql) {
-        boolean[] code = codePositions(sql);
+        boolean[] code = SqlTextScanner.codePositions(sql);
         StringBuilder result = new StringBuilder(sql.length());
         int index = 0;
         while (index < sql.length()) {
-            if (!code[index] || !isIdentifierStart(sql.charAt(index))) {
+            if (!code[index] || !SqlTextScanner.isIdentifierStart(sql.charAt(index))) {
                 result.append(sql.charAt(index++));
                 continue;
             }
             int nameEnd = index + 1;
-            while (nameEnd < sql.length() && code[nameEnd] && isIdentifierPart(sql.charAt(nameEnd))) {
+            while (nameEnd < sql.length() && code[nameEnd] && SqlTextScanner.isIdentifierPart(sql.charAt(nameEnd))) {
                 nameEnd++;
             }
             String name = sql.substring(index, nameEnd);
@@ -138,7 +139,7 @@ public final class MySqlToSparkFunctionTranslator {
                 index = nameEnd;
                 continue;
             }
-            int openingParenthesis = skipWhitespace(sql, code, nameEnd);
+            int openingParenthesis = SqlTextScanner.skipWhitespace(sql, code, nameEnd);
             if (openingParenthesis >= sql.length() || !code[openingParenthesis]
                     || sql.charAt(openingParenthesis) != '(') {
                 result.append(sql, index, nameEnd);
@@ -210,13 +211,6 @@ public final class MySqlToSparkFunctionTranslator {
         return "get_json_object(" + document + ", " + path + ")";
     }
 
-    private int skipWhitespace(String sql, boolean[] code, int index) {
-        while (index < sql.length() && code[index] && Character.isWhitespace(sql.charAt(index))) {
-            index++;
-        }
-        return index;
-    }
-
     private int findClosingParenthesis(String sql, boolean[] code, int openingParenthesis) {
         int depth = 0;
         for (int index = openingParenthesis; index < sql.length(); index++) {
@@ -268,14 +262,14 @@ public final class MySqlToSparkFunctionTranslator {
             nameStart++;
         }
         int nameEnd = nameStart;
-        while (nameEnd < expression.length() && isIdentifierPart(expression.charAt(nameEnd))) {
+        while (nameEnd < expression.length() && SqlTextScanner.isIdentifierPart(expression.charAt(nameEnd))) {
             nameEnd++;
         }
         if (!expression.substring(nameStart, nameEnd).equalsIgnoreCase(expectedName)) {
             return null;
         }
-        boolean[] code = codePositions(expression);
-        int opening = skipWhitespace(expression, code, nameEnd);
+        boolean[] code = SqlTextScanner.codePositions(expression);
+        int opening = SqlTextScanner.skipWhitespace(expression, code, nameEnd);
         if (opening >= expression.length() || expression.charAt(opening) != '(') {
             return null;
         }
@@ -290,21 +284,13 @@ public final class MySqlToSparkFunctionTranslator {
         if (value.length() < 2 || value.charAt(0) != '\'' || value.charAt(value.length() - 1) != '\'') {
             return false;
         }
-        boolean[] code = codePositions(value);
+        boolean[] code = SqlTextScanner.codePositions(value);
         for (boolean isCode : code) {
             if (isCode) {
                 return false;
             }
         }
         return true;
-    }
-
-    private boolean isIdentifierStart(char value) {
-        return Character.isLetter(value) || value == '_';
-    }
-
-    private boolean isIdentifierPart(char value) {
-        return Character.isLetterOrDigit(value) || value == '_';
     }
 
     private String convertFormatTokens(String mySqlFormat) {
@@ -344,7 +330,7 @@ public final class MySqlToSparkFunctionTranslator {
 
     private static String replaceCode(String sql, Pattern pattern,
                                       java.util.function.Function<Matcher, String> replacement) {
-        boolean[] code = codePositions(sql);
+        boolean[] code = SqlTextScanner.codePositions(sql);
         Matcher matcher = pattern.matcher(sql);
         StringBuilder out = new StringBuilder();
         while (matcher.find()) {
@@ -352,42 +338,6 @@ public final class MySqlToSparkFunctionTranslator {
         }
         matcher.appendTail(out);
         return out.toString();
-    }
-
-    private static boolean[] codePositions(String sql) {
-        boolean[] code = new boolean[sql.length()];
-        int position = 0;
-        while (position < sql.length()) {
-            char current = sql.charAt(position);
-            if (current == '\'' || current == '"' || current == '`') {
-                char quote = current;
-                position++;
-                while (position < sql.length()) {
-                    char next = sql.charAt(position++);
-                    if (next == '\\' && position < sql.length()) {
-                        position++;
-                        continue;
-                    }
-                    if (next == quote) {
-                        if (position < sql.length() && sql.charAt(position) == quote) {
-                            position++;
-                            continue;
-                        }
-                        break;
-                    }
-                }
-            } else if (sql.startsWith("--", position)) {
-                while (position < sql.length() && sql.charAt(position) != '\n') {
-                    position++;
-                }
-            } else if (sql.startsWith("/*", position)) {
-                int commentEnd = sql.indexOf("*/", position + 2);
-                position = commentEnd < 0 ? sql.length() : commentEnd + 2;
-            } else {
-                code[position++] = true;
-            }
-        }
-        return code;
     }
 
     /** Principle 4 of the plan: the translated SQL must parse (now validated by Apache Calcite). */

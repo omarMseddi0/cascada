@@ -16,24 +16,26 @@ import org.apache.parquet.schema.*;
 
 /** Encodes the final cache result, so exports preserve cache reconstruction and bypass semantics. */
 public final class QueryResponseEncoder {
-    private static final ObjectMapper JSON = new ObjectMapper();
+    /** The one JSON mapper of the inbound API (request parsing and response encoding). */
+    static final ObjectMapper JSON = new ObjectMapper();
     private QueryResponseEncoder() {}
 
     public static void json(ResultFrame frame, OutputStream output) throws IOException {
         try (JsonGenerator generator = JSON.getFactory().createGenerator(output)) {
             generator.disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET);
+            ResultCellVisitor<IOException> cells = new ResultCellVisitor<>() {
+                public void nullValue() throws IOException { generator.writeNull(); }
+                public void longValue(long value) throws IOException { generator.writeNumber(value); }
+                public void doubleValue(double value) throws IOException { generator.writeNumber(value); }
+                public void stringValue(String value) throws IOException { generator.writeString(value); }
+                public void decimalValue(BigDecimal value) throws IOException { generator.writeNumber(value); }
+            };
             generator.writeStartArray();
             for (int row = 0; row < frame.rowCount(); row++) {
                 generator.writeStartObject();
                 for (int column = 0; column < frame.columnNames().size(); column++) {
                     generator.writeFieldName(frame.columnNames().get(column));
-                    if (frame.isNullAt(row, column)) generator.writeNull();
-                    else switch (frame.columnTypeAt(column)) {
-                        case LONG -> generator.writeNumber(frame.longAt(row, column));
-                        case DOUBLE -> generator.writeNumber(frame.doubleAt(row, column));
-                        case STRING -> generator.writeString(frame.stringAt(row, column));
-                        case DECIMAL -> generator.writeNumber((BigDecimal) frame.valueAt(row, column));
-                    }
+                    ResultCells.visit(frame, row, column, cells);
                 }
                 generator.writeEndObject();
             }
@@ -54,7 +56,7 @@ public final class QueryResponseEncoder {
                 case DOUBLE -> schema.optional(PrimitiveType.PrimitiveTypeName.DOUBLE).named(name);
                 case STRING -> schema.optional(PrimitiveType.PrimitiveTypeName.BINARY)
                         .as(LogicalTypeAnnotation.stringType()).named(name);
-                case DECIMAL -> {
+                default -> {
                     int scale = 0, integerDigits = 1;
                     for (int r = 0; r < frame.rowCount(); r++) {
                         if (!frame.isNullAt(r, c)) {
@@ -78,19 +80,14 @@ public final class QueryResponseEncoder {
             try (var writer = ExampleParquetWriter.builder(new NioParquetFile(file))
                     .withConf(config).withType(type)
                     .withCompressionCodec(CompressionCodecName.UNCOMPRESSED).build()) {
+                ParquetCellWriter cells = new ParquetCellWriter(scales);
                 for (int r = 0; r < frame.rowCount(); r++) {
-                    Group group = groups.newGroup();
+                    cells.startRecord(groups.newGroup());
                     for (int c = 0; c < count; c++) {
-                        if (frame.isNullAt(r, c)) continue;
-                        switch (frame.columnTypeAt(c)) {
-                            case LONG -> group.add(c, frame.longAt(r, c));
-                            case DOUBLE -> group.add(c, frame.doubleAt(r, c));
-                            case STRING -> group.add(c, frame.stringAt(r, c));
-                            case DECIMAL -> group.add(c, Binary.fromConstantByteArray(
-                                    ((BigDecimal) frame.valueAt(r, c)).setScale(scales[c]).unscaledValue().toByteArray()));
-                        }
+                        cells.field(c);
+                        ResultCells.visit(frame, r, c, cells);
                     }
-                    writer.write(group);
+                    writer.write(cells.record());
                 }
             }
             return file;

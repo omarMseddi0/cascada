@@ -155,10 +155,12 @@ public final class CascadaEngineFactory implements AutoCloseable {
         if (!applicationSettings.tables().isEmpty()) {
             TableCatalog catalog = new TableCatalog();
             applicationSettings.tables().forEach(table -> {
-                if (!table.timeColumns().stream().map(table.columnMappings()::get)
+                RegisteredTable registered = new RegisteredTable(table.logicalName(), table.deltaPath(),
+                        table.columnMappings(), table.timeColumns());
+                if (!registered.physicalTimeColumns().stream()
                         .allMatch(settings.cacheExecution().timeColumnName()::equalsIgnoreCase))
                     throw new IllegalArgumentException("Table physical time columns must match the configured cache time column");
-                catalog.register(new RegisteredTable(table.logicalName(), table.deltaPath(), table.columnMappings(), table.timeColumns()));
+                catalog.register(registered);
             });
             return catalog;
         }
@@ -171,15 +173,22 @@ public final class CascadaEngineFactory implements AutoCloseable {
 
     /** Calcite canonicalisation, behind the cache's port. */
     private SqlCanonicalizerPort canonicalizer() {
-        java.util.Set<String> timeColumns = new java.util.HashSet<>();
-        timeColumns.add(settings.cacheExecution().timeColumnName());
-        applicationSettings.tables().forEach(table -> table.timeColumns().forEach(logicalName ->
-                timeColumns.add(table.columnMappings().get(logicalName))));
         java.util.Set<String> batchPaths = applicationSettings.tables().isEmpty()
                 ? java.util.Set.of(settings.mainTablePath())
                 : applicationSettings.tables().stream().filter(table -> table.sourceType().equals("HOT_BATCH"))
                         .map(TableSettings::deltaPath).collect(java.util.stream.Collectors.toSet());
-        return new CalciteCanonicalObjectFactory(new TimeDimensionMap(timeColumns), batchPaths);
+        return new CalciteCanonicalObjectFactory(timeDimensions(), batchPaths,
+                settings.cacheExecution().fixedStepSeconds());
+    }
+
+    /**
+     * The physical time columns canonicalisation and gap rewriting both recognise: the configured cache
+     * time column plus every registered table's mapped time columns.
+     */
+    private TimeDimensionMap timeDimensions() {
+        java.util.Set<String> timeColumns = new java.util.HashSet<>(tableCatalog.physicalTimeColumns());
+        timeColumns.add(settings.cacheExecution().timeColumnName());
+        return new TimeDimensionMap(timeColumns);
     }
 
     /**
@@ -196,7 +205,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
 
     /** Gap-query rewriting, behind the cache's port. */
     private GapQueryRewriterPort gapQueryRewriter() {
-        return new GapQueryRewriterAdapter(
+        return new GapQueryRewriterAdapter(timeDimensions(),
                 settings.cacheExecution().timeColumnName(), settings.cacheExecution().bucketSeconds());
     }
 

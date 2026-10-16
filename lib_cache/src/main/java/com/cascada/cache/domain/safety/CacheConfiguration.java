@@ -35,10 +35,13 @@ public record CacheConfiguration(Set<String> impossibleAggregates, Set<String> h
         }
     }
 
+    /** Aggregates that cannot be combined exactly across buckets or rolled up from a finer cube. */
+    public static final Set<String> HOLISTIC_AGGREGATE_MARKERS = Set.of("DISTINCT", "MEDIAN", "PERCENTILE");
+
     /** A sensible default: the holistic-aggregate denylist, day buckets, the platform fixed step. */
     public static CacheConfiguration defaults() {
         return new CacheConfiguration(
-                Set.of("DISTINCT", "MEDIAN", "PERCENTILE"),
+                HOLISTIC_AGGREGATE_MARKERS,
                 Set.of(),
                 Set.of(),
                 CacheTimeConstants.DEFAULT_CACHE_STEP_SECONDS,

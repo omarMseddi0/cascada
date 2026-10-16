@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.warming;
 
+import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.ValidationBaselinePort;
@@ -14,7 +15,6 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CancellationException;
 import java.util.logging.Logger;
 
 /**
@@ -70,8 +70,7 @@ public final class DataChangeDetector {
             throw new IllegalArgumentException("validation baseline TTL must be positive");
     }
 
-    /** A validation decision is acknowledged only after the warmer completes its refresh. */
-
+    /** Proposes a baseline; it is saved only by {@link #acknowledge} after the warmer completes its refresh. */
     public ValidationCheck check(TimeRange currentWindow) {
         Optional<ValidationBaseline> stored = baselineStore.loadValidationBaseline();
         if (stored.isEmpty()) {
@@ -105,9 +104,8 @@ public final class DataChangeDetector {
                 .replace("{end}", Long.toString(window.endTimestampSeconds()));
         try {
             return Optional.of(signature(executor.execute(translator.translateToPhysicalSql(validationSql))));
-        } catch (CancellationException cancelled) {
-            throw cancelled;
         } catch (RuntimeException validationFailure) {
+            QueryCancellation.rethrowIfCancelled(validationFailure);
             LOGGER.warning("validation query failed for window " + window + "; keeping the current baseline ("
                     + validationFailure.getClass().getSimpleName() + ")");
             return Optional.empty();

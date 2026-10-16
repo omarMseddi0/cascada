@@ -1,5 +1,6 @@
 package com.cascada.sparkconfig.application.service;
 
+import com.cascada.sparkconfig.domain.SparkReference;
 import com.cascada.sparkconfig.application.port.in.DeriveSparkConfigurationUseCase;
 import com.cascada.sparkconfig.domain.ExecutorPlacement;
 import com.cascada.sparkconfig.domain.SparkConfiguration;
@@ -31,15 +32,11 @@ import java.util.Objects;
 public final class SparkConfigurationDeriver implements DeriveSparkConfigurationUseCase {
 
     static final long ADVISORY_PARTITION_SIZE_BYTES = 267_108_864L;
-    static final String REFERENCE_DRIVER_MEMORY = "2g";
-    static final int REFERENCE_INITIAL_EXECUTOR_COUNT = 3;
     static final int REFERENCE_SHUFFLE_PARTITIONS = 254;
-    static final String DELTA_EXTENSION = "io.delta.sql.DeltaSparkSessionExtension";
-    static final String DELTA_CATALOG = "org.apache.spark.sql.delta.catalog.DeltaCatalog";
 
     /** Splits one executor's RAM between heap, Gluten off-heap, and overhead (invariant: sum <= RAM). */
     public SparkMemorySplit deriveMemorySplit(int randomAccessMemoryGigabytes, boolean glutenOffHeapEnabled) {
-        if (randomAccessMemoryGigabytes < 2) {
+        if (randomAccessMemoryGigabytes < SparkReference.MINIMUM_EXECUTOR_RAM_GIGABYTES) {
             throw new IllegalArgumentException("RAM must be at least 2 GiB to fit the minimum supported "
                     + "executor heap and explicit Spark overhead, but was: " + randomAccessMemoryGigabytes + " GiB");
         }
@@ -74,21 +71,22 @@ public final class SparkConfigurationDeriver implements DeriveSparkConfiguration
         // --- Core executor / driver shape ---
         entries.put("spark.executor.memory", memorySplit.heapAsSparkMemoryString());
         entries.put("spark.executor.cores", Integer.toString(processorCoreCount));
-        entries.put("spark.kubernetes.executor.limit.cores", Integer.toString(processorCoreCount + 1));
+        entries.put("spark.kubernetes.executor.limit.cores",
+                Integer.toString(SparkReference.executorLimitCores(processorCoreCount)));
         int minimumExecutors = executorPlacement.minimumExecutors();
         int maximumExecutors = executorPlacement.maximumExecutors();
         // Keep the startup target within the same placement budget as dynamic allocation. The
         // reference placement remains at three executors, matching the golden profile.
-        int initialExecutors = Math.max(minimumExecutors,
-                Math.min(REFERENCE_INITIAL_EXECUTOR_COUNT, maximumExecutors));
+        int initialExecutors = SparkReference.initialExecutors(minimumExecutors, maximumExecutors);
         entries.put("spark.executor.instances", Integer.toString(initialExecutors));
-        entries.put("spark.driver.memory", REFERENCE_DRIVER_MEMORY);
+        entries.put("spark.driver.memory", SparkReference.DRIVER_MEMORY);
         if (workloadType.isGlutenOffHeapEnabled()) {
             if (memorySplit.offHeapGigabytes() == 0) {
-                throw new IllegalArgumentException("Gluten requires at least 3 GiB executor RAM");
+                throw new IllegalArgumentException("Gluten requires at least "
+                        + SparkReference.MINIMUM_GLUTEN_EXECUTOR_RAM_GIGABYTES + " GiB executor RAM");
             }
-            entries.put("spark.plugins", "org.apache.gluten.GlutenPlugin");
-            entries.put("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager");
+            entries.put("spark.plugins", SparkReference.GLUTEN_PLUGIN);
+            entries.put("spark.shuffle.manager", SparkReference.COLUMNAR_SHUFFLE_MANAGER);
         }
         if (memorySplit.offHeapGigabytes() > 0) {
             entries.put("spark.memory.offHeap.enabled", "true");
@@ -102,8 +100,8 @@ public final class SparkConfigurationDeriver implements DeriveSparkConfiguration
         }
 
         // --- Delta extension / catalog / file sizing (always on; advisory size tracks the profile) ---
-        entries.put("spark.sql.extensions", DELTA_EXTENSION);
-        entries.put("spark.sql.catalog.spark_catalog", DELTA_CATALOG);
+        entries.put("spark.sql.extensions", SparkReference.DELTA_EXTENSION);
+        entries.put("spark.sql.catalog.spark_catalog", SparkReference.DELTA_CATALOG);
         entries.put("spark.sql.files.maxPartitionBytes", Long.toString(ADVISORY_PARTITION_SIZE_BYTES));
         entries.put("spark.databricks.delta.optimize.maxFileSize", Long.toString(ADVISORY_PARTITION_SIZE_BYTES));
         entries.put("spark.sql.adaptive.advisoryPartitionSizeInBytes", Long.toString(ADVISORY_PARTITION_SIZE_BYTES));

@@ -16,6 +16,12 @@ public final class GapQueryRewriterAdapter implements GapQueryRewriterPort {
         this.gapQueryBuilder = new GapQueryBuilder(timeColumn, bucketSeconds);
     }
 
+    /** Recognises every configured time column; gaps are injected on the column the query's window uses. */
+    public GapQueryRewriterAdapter(com.cascada.sql.domain.TimeDimensionMap timeDimensions, String defaultTimeColumn,
+                                   long bucketSeconds) {
+        this.gapQueryBuilder = new GapQueryBuilder(timeDimensions, defaultTimeColumn, bucketSeconds);
+    }
+
     @Override
     public String buildGapQuery(String physicalSql, GapPlan gapPlan) {
         return gapQueryBuilder.buildGapQuery(physicalSql, gapPlan);

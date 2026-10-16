@@ -85,11 +85,35 @@ public final class SparkAverage {
         return builder.build();
     }
 
-    private static void appendAverage(ResultFrameBuilder builder, ResultFrame merged, int row, AverageColumn average) {
-        long count = merged.isNullAt(row, average.countColumn()) ? 0L : merged.longAt(row, average.countColumn());
-        if (count < 0) {
-            throw new IllegalArgumentException("AVG count ingredient cannot be negative");
+    /**
+     * The one rule every AVG reconstruction applies to its merged COUNT ingredient: a non-negative
+     * integral count, exactly representable when it arrives as a DOUBLE (at most 2^53).
+     */
+    public static long exactCount(Object count) {
+        if (count instanceof Long value) {
+            if (value < 0) throw new IllegalArgumentException("AVG count ingredient cannot be negative");
+            return value;
         }
+        double value = ((Number) count).doubleValue();
+        if (!Double.isFinite(value) || value < 0.0d || value > 9_007_199_254_740_992.0d
+                || value != Math.rint(value)) {
+            throw new IllegalArgumentException("AVG count ingredient is not an exactly representable count");
+        }
+        return (long) value;
+    }
+
+    /** {@code sum / count} as a DOUBLE AVG; NULL when either ingredient is NULL or the count is zero. */
+    public static Double average(Object sum, Object count) {
+        if (count == null) {
+            return null;
+        }
+        long exactCount = exactCount(count);
+        return sum == null || exactCount == 0 ? null : ((Number) sum).doubleValue() / exactCount;
+    }
+
+    private static void appendAverage(ResultFrameBuilder builder, ResultFrame merged, int row, AverageColumn average) {
+        long count = merged.isNullAt(row, average.countColumn()) ? 0L
+                : exactCount(merged.valueAt(row, average.countColumn()));
         if (count == 0 || merged.isNullAt(row, average.sumColumn())) {
             builder.appendNull();
             return;

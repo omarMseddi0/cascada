@@ -18,7 +18,6 @@ import java.util.concurrent.*;
 public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBase implements AutoCloseable {
     private final ExecuteLogicalQueryUseCase queries;
     private final RequestExecutor requests;
-    private final java.util.Set<QueryCancellation> activeQueries = ConcurrentHashMap.newKeySet();
     public QueryGrpcService(ExecuteLogicalQueryUseCase queries) { this(queries, ServerSettings.defaults()); }
     public QueryGrpcService(ExecuteLogicalQueryUseCase queries, ServerSettings settings) {
         this.queries = queries;
@@ -43,15 +42,11 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
         };
         stream.setOnCancelHandler(cancel);
         try {
-            submitted.set(requests.submit(() -> {
-                activeQueries.add(cancellation);
-                try (var scope = new QueryExecutionScope(cancellation)) { respond(request, stream, ready); }
-                finally { activeQueries.remove(cancellation); }
-            }));
+            submitted.set(requests.submit(cancellation, () -> respond(request, stream, ready), () -> { }));
             if (stream.isCancelled()) cancel.run();
         }
         catch (RejectedExecutionException busy) {
-            observer.onError(Status.UNAVAILABLE.withDescription("Server is stopping").asRuntimeException());
+            observer.onError(ApiFailure.from(busy).grpcException());
         }
     }
 
@@ -72,22 +67,16 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
                     .setName(name).setType(frame.columnType(name).name())));
             if (request.getFormat() == ResponseFormat.PARQUET) {
                 // Complete the footer before sending headers; failed exports return a clean RPC error.
-                try (var parquet = new ParquetResult(QueryResponseEncoder.parquet(frame));
-                     InputStream input = Files.newInputStream(parquet.path())) {
+                try (var parquet = new ParquetResult(QueryResponseEncoder.parquet(frame))) {
                     send(stream, ready, metadata.build());
-                    while (true) {
-                        byte[] ownedBuffer = new byte[64 * 1024];
-                        int length = input.read(ownedBuffer);
-                        if (length == -1) break;
-                        send(stream, ready, QueryChunk.newBuilder().setPayload(
-                                com.google.protobuf.UnsafeByteOperations.unsafeWrap(ownedBuffer, 0, length)).build());
+                    try (var output = payloadStream(stream, ready)) {
+                        parquet.copyTo(output);
                     }
                 }
             } else {
                 send(stream, ready, metadata.build());
                 if (request.getFormat() == ResponseFormat.JSON) {
-                    try (var output = new GrpcChunkOutputStream(payload -> send(stream, ready,
-                            QueryChunk.newBuilder().setPayload(payload).build()))) {
+                    try (var output = payloadStream(stream, ready)) {
                         QueryResponseEncoder.json(frame, output);
                     }
                 } else sendRows(frame, stream, ready);
@@ -101,22 +90,21 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
         }
     }
 
+    /** JSON and Parquet payloads are cut into about 64 KiB chunks, each sent when the client is ready. */
+    private static GrpcChunkOutputStream payloadStream(ServerCallStreamObserver<QueryChunk> stream, Object ready) {
+        return new GrpcChunkOutputStream(payload -> send(stream, ready, QueryChunk.newBuilder().setPayload(payload).build()));
+    }
+
     private static void sendRows(ResultFrame frame, ServerCallStreamObserver<QueryChunk> stream, Object ready) {
         var chunk = QueryChunk.newBuilder();
         int chunkBytes = 0;
+        ProtobufCellWriter cells = new ProtobufCellWriter();
         for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
             var row = Row.newBuilder();
             for (int columnIndex = 0; columnIndex < frame.columnNames().size(); columnIndex++) {
-                var cell = Cell.newBuilder();
-                if (!frame.isNullAt(rowIndex, columnIndex)) {
-                    switch (frame.columnTypeAt(columnIndex)) {
-                        case LONG -> cell.setLongValue(frame.longAt(rowIndex, columnIndex));
-                        case DOUBLE -> cell.setDoubleValue(frame.doubleAt(rowIndex, columnIndex));
-                        case STRING -> cell.setStringValue(frame.stringAt(rowIndex, columnIndex));
-                        case DECIMAL -> cell.setDecimalValue(frame.valueAt(rowIndex, columnIndex).toString());
-                    }
-                }
-                row.addCells(cell);
+                cells.startCell();
+                ResultCells.visit(frame, rowIndex, columnIndex, cells);
+                row.addCells(cells.cell());
             }
             var encoded = row.build();
             int encodedBytes = encoded.getSerializedSize() + 5;
@@ -141,7 +129,6 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
         stream.onNext(chunk);
     }
     @Override public void close() {
-        activeQueries.forEach(QueryCancellation::cancel);
         requests.close();
     }
 }

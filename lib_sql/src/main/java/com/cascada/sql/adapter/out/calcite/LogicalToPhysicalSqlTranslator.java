@@ -106,14 +106,12 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
         SqlNodeList orderList = parsed instanceof SqlOrderBy orderBy ? orderBy.orderList : select.getOrderList();
         Set<SqlIdentifier> aliasReferences = aliasReferencesToPreserve(select, orderList,
                 projectionAliases, registeredTable);
-        String sentinel = newTableSentinel(logicalSql);
+        String sentinel = SqlTrees.unusedSentinel(logicalSql, DELTA_TABLE_SENTINEL_PREFIX);
         replaceTableWithSentinel(select, from, sentinel);
         SqlNode renamedRoot = parsed.accept(renamer(registeredTable, aliasReferences));
         applyTimeBucketingIfGrouped(extractSelect(renamedRoot), registeredTable);
 
-        String physicalSql = CalciteSql.unparse(renamedRoot);
-        String escapedPath = registeredTable.deltaPath().replace("`", "``");
-        return physicalSql.replace(sentinel, "delta.`" + escapedPath + "`");
+        return CalciteSql.unparse(renamedRoot).replace(sentinel, SqlTrees.deltaSource(registeredTable.deltaPath()));
     }
 
     private SqlSelect extractSelect(SqlNode node) {
@@ -125,16 +123,6 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
     }
 
     // --- table -> delta path (via sentinel) ------------------------------------------------------
-
-    private String newTableSentinel(String logicalSql) {
-        String normalizedSql = logicalSql.toLowerCase(Locale.ROOT);
-        String candidate = DELTA_TABLE_SENTINEL_PREFIX;
-        int suffix = 0;
-        while (normalizedSql.contains(candidate.toLowerCase(Locale.ROOT))) {
-            candidate = DELTA_TABLE_SENTINEL_PREFIX + "_" + ++suffix;
-        }
-        return candidate;
-    }
 
     private void replaceTableWithSentinel(SqlSelect select, SqlNode from, String sentinelName) {
         SqlIdentifier sentinel = new SqlIdentifier(sentinelName, SqlParserPos.ZERO);
@@ -195,10 +183,10 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
         if (aliases.isEmpty()) {
             return preserved;
         }
-        collectAliasReferences(orderList, aliases, preserved);
+        SqlTrees.collectAliasReferences(orderList, aliases, preserved);
         if (select.getGroup() != null) {
             Set<String> projectedExpressions = select.getSelectList().stream()
-                    .map(item -> item.getKind() == SqlKind.AS ? ((SqlCall) item).operand(0) : item)
+                    .map(SqlTrees::unaliased)
                     .map(CalciteSql::unparse).collect(Collectors.toSet());
             for (SqlNode group : select.getGroup()) {
                 // Explicitly repeating the projected source expression is not an alias lookup.
@@ -210,42 +198,14 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
         return preserved;
     }
 
-    private void collectAliasReferences(SqlNode node, Set<String> aliases, Set<SqlIdentifier> collector) {
-        if (node == null) {
-            return;
-        }
-        if (node instanceof SqlIdentifier identifier) {
-            if (identifier.isSimple() && aliases.contains(lastName(identifier))) {
-                collector.add(identifier);
-            }
-        } else if (node instanceof org.apache.calcite.sql.SqlNodeList nodeList) {
-            for (SqlNode child : nodeList) {
-                collectAliasReferences(child, aliases, collector);
-            }
-        } else if (node instanceof SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                collectAliasReferences(operand, aliases, collector);
-            }
-        }
-    }
-
     private void rejectAmbiguousAliasBindings(SqlNode expression, Set<String> aliases, RegisteredTable table) {
-        if (expression == null) {
-            return;
-        }
-        if (expression instanceof SqlIdentifier identifier) {
+        Set<SqlIdentifier> aliasReferences = Collections.newSetFromMap(new IdentityHashMap<>());
+        SqlTrees.collectAliasReferences(expression, aliases, aliasReferences);
+        for (SqlIdentifier identifier : aliasReferences) {
             String name = lastName(identifier);
-            if (identifier.isSimple() && aliases.contains(name) && table.physicalColumnFor(name).isPresent()) {
+            if (table.physicalColumnFor(name).isPresent()) {
                 throw new UnsupportedSqlException(
                         "alias reference '" + name + "' collides with a mapped source column in GROUP BY/HAVING");
-            }
-        } else if (expression instanceof org.apache.calcite.sql.SqlNodeList nodeList) {
-            for (SqlNode child : nodeList) {
-                rejectAmbiguousAliasBindings(child, aliases, table);
-            }
-        } else if (expression instanceof SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                rejectAmbiguousAliasBindings(operand, aliases, table);
             }
         }
     }
@@ -319,12 +279,7 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
     }
 
     private SqlNode bucketExpression(String physicalTime) {
-        String column = physicalTime.matches("[A-Za-z_][A-Za-z0-9_]*")
-                ? physicalTime
-                : "`" + physicalTime.replace("`", "``") + "`";
-        return CalciteSql.parseExpression(
-                "CAST(FLOOR(" + column + " / " + bucketStepSeconds + ") * " + bucketStepSeconds
-                        + " AS BIGINT)");
+        return TimeBuckets.bigintBucket(physicalTime, bucketStepSeconds);
     }
 
     private boolean isColumnNamed(SqlNode node, String physicalName) {
@@ -335,13 +290,10 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
     // --- helpers ---------------------------------------------------------------------------------
 
     private SqlNode stripAlias(SqlNode from) {
-        if (from != null && from.getKind() == SqlKind.AS && from instanceof SqlBasicCall call) {
-            return call.operand(0);
-        }
-        return from;
+        return SqlTrees.stripAlias(from);
     }
 
     private String lastName(SqlIdentifier identifier) {
-        return identifier.names.get(identifier.names.size() - 1).toLowerCase(Locale.ROOT);
+        return SqlTrees.lastName(identifier).toLowerCase(Locale.ROOT);
     }
 }

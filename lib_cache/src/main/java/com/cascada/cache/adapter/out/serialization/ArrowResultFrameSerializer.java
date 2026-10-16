@@ -6,7 +6,6 @@ import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.exception.CacheSerializationException;
-import com.github.luben.zstd.Zstd;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -50,7 +49,7 @@ import org.apache.arrow.vector.types.pojo.Schema;
  */
 public final class ArrowResultFrameSerializer implements CacheValueSerializerPort {
 
-    public static final int DEFAULT_COMPRESSION_LEVEL = 3;
+    public static final int DEFAULT_COMPRESSION_LEVEL = ZstdFrameEnvelope.DEFAULT_COMPRESSION_LEVEL;
 
     private final int compressionLevel;
 
@@ -59,10 +58,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
     }
 
     public ArrowResultFrameSerializer(int compressionLevel) {
-        if (compressionLevel < Zstd.minCompressionLevel() || compressionLevel > Zstd.maxCompressionLevel()) {
-            throw new IllegalArgumentException("compressionLevel is outside the supported Zstandard range");
-        }
-        this.compressionLevel = compressionLevel;
+        this.compressionLevel = ZstdFrameEnvelope.requireCompressionLevel(compressionLevel);
     }
 
     @Override
@@ -113,28 +109,17 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             vector.setInitialCapacity(frame.rowCount());
             writeColumn(vector, frame, column, frame.columnTypeAt(column));
         }
+        // Set the row count AFTER populating the vectors (Arrow's contract); setting it first leaves
+        // the writer expecting buffers that the vectors have not filled yet.
         root.setRowCount(frame.rowCount());
     }
 
     private byte[] encodeToArrowIpc(ResultFrame frame) {
-        Schema schema = toArrowSchema(frame);
         try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
-             VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator);
-             ByteArrayOutputStream out = new ByteArrayOutputStream();
-             ArrowStreamWriter writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))) {
-
-            for (int column = 0; column < frame.columnNames().size(); column++) {
-                FieldVector vector = root.getVector(frame.columnNames().get(column));
-                vector.setInitialCapacity(frame.rowCount());
-                writeColumn(vector, frame, column, frame.columnTypeAt(column));
-            }
-            // Set the row count AFTER populating the vectors (Arrow's contract); setting it first leaves
-            // the writer expecting buffers that the vectors have not filled yet.
-            root.setRowCount(frame.rowCount());
-
-            writer.start();
-            writer.writeBatch();
-            writer.end();
+             VectorSchemaRoot root = VectorSchemaRoot.create(toArrowSchema(frame), allocator)) {
+            populate(root, frame);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            writeIpc(root, Channels.newChannel(out));
             return out.toByteArray();
         } catch (Exception failure) {
             throw new CacheSerializationException("Arrow frame encoding failed", failure);
@@ -185,7 +170,7 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
                 if (rowCount > 0) {
                     for (int column = 0; column < fields.size(); column++) {
                         if (columnTypes[column] == ColumnType.STRING && strings[column] == null) {
-                            strings[column] = new Utf8ValueCache(rowCount >= 4_096 ? 256 : Math.min(64, rowCount));
+                            strings[column] = new Utf8ValueCache(Utf8CachePolicy.sampleSize(rowCount));
                         }
                     }
                 }
@@ -218,8 +203,6 @@ public final class ArrowResultFrameSerializer implements CacheValueSerializerPor
             case STRING -> builder.appendString(strings.read((VarCharVector) vector, rowIndex));
         }
     }
-
-    /** Bounded per-column encoding reuse; predominantly distinct columns leave the cache early. */
 
     private Schema toArrowSchema(ResultFrame frame) {
         List<Field> fields = new ArrayList<>(frame.columnNames().size());

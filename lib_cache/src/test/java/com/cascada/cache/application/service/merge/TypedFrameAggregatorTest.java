@@ -61,7 +61,7 @@ class TypedFrameAggregatorTest {
     }
 
     @Test
-    void keepsNullNanSignedZeroAndScaleInsensitiveGroupingSemantics() {
+    void keepsSparkNullNanSignedZeroAndScaleInsensitiveGroupingSemantics() {
         ResultFrame first = ResultFrame.builder()
                 .column("d", ColumnType.DOUBLE).column("decimal_id", ColumnType.DECIMAL)
                 .column("SUM(x)", ColumnType.LONG)
@@ -79,18 +79,18 @@ class TypedFrameAggregatorTest {
         ResultFrame merged = TypedFrameAggregator.aggregate(List.of(first, second), List.of("d", "decimal_id"),
                 Map.of("SUM(x)", AggregateFunction.SUM), "ts", 300);
 
-        assertThat(merged.rowCount()).isEqualTo(4);
+        // Spark 3.0+ normalises grouping keys: -0.0 groups with 0.0 and every NaN is one group
+        // (Seq(-0.0, 0.0).toDF("d").groupBy("d").count() returns [(0.0, 2)]).
+        assertThat(merged.rowCount()).isEqualTo(3);
         assertThat(merged.rows()).extracting(row -> row.get("SUM(x)"))
-                .containsExactly(1L, 3L, 2L, 9L);
+                .containsExactly(1L, 5L, 9L);
         assertThat(merged.rows().get(0).get("d")).isNull();
         assertThat(Double.doubleToLongBits((Double) merged.rows().get(1).get("d")))
-                .isEqualTo(Double.doubleToLongBits(-0.0));
-        assertThat(Double.doubleToLongBits((Double) merged.rows().get(2).get("d")))
                 .isEqualTo(Double.doubleToLongBits(0.0));
-        assertThat((Double) merged.rows().get(3).get("d")).isNaN();
+        assertThat((Double) merged.rows().get(2).get("d")).isNaN();
         // The first row representing a numeric decimal group keeps its original scale.
-        assertThat(merged.rows().get(1).get("decimal_id")).isEqualTo(new BigDecimal("1.00"));
-        assertThat(merged.rows().get(3).get("decimal_id")).isEqualTo(new BigDecimal("1.0"));
+        assertThat(merged.rows().get(1).get("decimal_id")).isEqualTo(new BigDecimal("1.0"));
+        assertThat(merged.rows().get(2).get("decimal_id")).isEqualTo(new BigDecimal("1.0"));
     }
 
     @Test

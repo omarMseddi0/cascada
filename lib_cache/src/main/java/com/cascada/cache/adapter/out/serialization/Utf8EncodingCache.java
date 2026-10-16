@@ -12,7 +12,7 @@ final class Utf8EncodingCache {
     private boolean disabled;
     private final int sampleSize;
 
-    Utf8EncodingCache(int rows) { sampleSize = rows >= 4_096 ? 256 : Math.max(1, Math.min(64, rows)); }
+    Utf8EncodingCache(int rows) { sampleSize = Utf8CachePolicy.sampleSize(rows); }
 
     byte[] encode(String value) {
         if (disabled) return value.getBytes(StandardCharsets.UTF_8);
@@ -20,10 +20,10 @@ final class Utf8EncodingCache {
         byte[] encoded = values.get(value);
         if (encoded != null) { hits++; return encoded; }
         encoded = value.getBytes(StandardCharsets.UTF_8);
-        if (reads >= sampleSize && (long) hits * 10 < reads) {
+        if (Utf8CachePolicy.mostlyDistinct(reads, hits, sampleSize)) {
             values = null;
             disabled = true;
-        } else if (values.size() < 16_384 && encoded.length <= 1_048_576 - bytes) {
+        } else if (Utf8CachePolicy.admits(values.size(), bytes, encoded.length)) {
             values.put(value, encoded);
             bytes += encoded.length;
         }

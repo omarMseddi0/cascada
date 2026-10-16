@@ -15,9 +15,8 @@ import static org.assertj.core.api.Assertions.*;
 @EnabledIfSystemProperty(named="cascada.cache.spark.integration", matches="true")
 class CacheSqlSparkIntegrationTest {
     @Test void coldMixedAndWarmAnswersMatchSparkForThePythonCoreShapes() {
-        SparkSession session = SparkSession.builder().master("local[2]").appName("cascada-cache-parity")
-                .config("spark.ui.enabled", "false").config("spark.driver.host", "127.0.0.1")
-                .config("spark.driver.bindAddress", "127.0.0.1").config("spark.sql.shuffle.partitions", "2")
+        SparkSession session = LocalSparkFixtures.localSession().master("local[2]").appName("cascada-cache-parity")
+                .config("spark.sql.shuffle.partitions", "2")
                 .config("spark.sql.ansi.enabled", "false").getOrCreate();
         try (var spark = new SparkDeltaQueryExecutor(session)) {
             session.sparkContext().setLogLevel("ERROR");

@@ -34,7 +34,7 @@
         <hadoop.version>3.4.2</hadoop.version>
         <parquet.version>1.16.0</parquet.version>
         <lombok.version>1.18.42</lombok.version>
-        <agrona.jvm.args>--enable-native-access=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED --add-opens=java.base/java.util.zip=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED</agrona.jvm.args>
+        <agrona.jvm.args>--enable-native-access=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED --add-opens=java.base/java.util.zip=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED</agrona.jvm.args>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <junit.jupiter.version>5.10.2</junit.jupiter.version>
@@ -248,7 +248,7 @@
                     <dependencies>
                         <dependency><groupId>org.codehaus.plexus</groupId><artifactId>plexus-utils</artifactId><version>4.0.3</version></dependency>
                     </dependencies>
-                    <configuration><argLine>${agrona.jvm.args} --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED</argLine></configuration>
+                    <configuration><argLine>${agrona.jvm.args}</argLine></configuration>
                 </plugin>
                 <plugin>
                     <groupId>org.jacoco</groupId>

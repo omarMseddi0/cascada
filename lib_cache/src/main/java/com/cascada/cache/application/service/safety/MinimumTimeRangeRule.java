@@ -35,9 +35,4 @@ public final class MinimumTimeRangeRule implements SafetyRule {
         }
         return Optional.empty();
     }
-
-    @Override
-    public String ruleName() {
-        return "MinimumTimeRangeRule";
-    }
 }

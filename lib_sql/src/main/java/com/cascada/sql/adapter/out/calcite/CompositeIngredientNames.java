@@ -10,7 +10,7 @@ final class CompositeIngredientNames {
     private CompositeIngredientNames() { }
     static String alias(String expression) {
         try {
-            return "__cascada_component_" + HexFormat.of().formatHex(
+            return com.cascada.cache.domain.merge.AverageIngredients.RESERVED_PREFIX + "component_" + HexFormat.of().formatHex(
                     MessageDigest.getInstance("SHA-256").digest(expression.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }

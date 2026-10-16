@@ -9,7 +9,6 @@ import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
-import com.cascada.spark.application.configuration.SparkSessionConfigBuilder;
 import com.cascada.sql.adapter.out.calcite.*;
 import com.cascada.sql.domain.*;
 import com.fasterxml.jackson.databind.*;
@@ -60,14 +59,11 @@ class ValkeySparkProcessIntegrationTest {
         nativeEnabled=Boolean.parseBoolean(System.getenv("CASCADA_GLUTEN_ENABLED"));
         fixture=Files.createTempDirectory("cascada-valkey-integration-");
         var warehouse=Files.createDirectory(fixture.resolve("warehouse"));
-        var config=SparkSessionConfigBuilder.forLocal().master("local[2]")
+        var config=LocalSparkFixtures.localConfig().master("local[2]")
                 .appName("cascada-valkey-velox-real-process")
                 .withEnvironment(name -> name.equals("CASCADA_GLUTEN_ENABLED")
                         ? Boolean.toString(nativeEnabled) : name.equals("SPARK_MASTER")
                         ? System.getenv().getOrDefault("SPARK_MASTER","local[2]") : System.getenv(name))
-                .withProperty("spark.ui.enabled","false")
-                .withProperty("spark.driver.host","127.0.0.1")
-                .withProperty("spark.driver.bindAddress","127.0.0.1")
                 .withProperty("spark.sql.warehouse.dir",warehouse.toUri().toString())
                 .withProperty("spark.sql.shuffle.partitions","6")
                 .withProperty("spark.default.parallelism","6")

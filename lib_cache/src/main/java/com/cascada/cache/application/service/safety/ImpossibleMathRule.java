@@ -3,6 +3,7 @@ package com.cascada.cache.application.service.safety;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.safety.BypassReason;
 import com.cascada.cache.domain.safety.CacheConfiguration;
+import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -18,17 +19,12 @@ public final class ImpossibleMathRule implements SafetyRule {
 
     @Override
     public Optional<BypassReason> evaluate(CanonicalQueryObject canonicalObject, CacheConfiguration configuration) {
-        String joinedAggregates = String.join(" ", canonicalObject.hashComponents().aggregates()).toUpperCase();
+        String joinedAggregates = String.join(" ", canonicalObject.hashComponents().aggregates()).toUpperCase(Locale.ROOT);
         for (String impossibleAggregate : configuration.impossibleAggregates()) {
-            if (joinedAggregates.contains(impossibleAggregate.toUpperCase())) {
+            if (joinedAggregates.contains(impossibleAggregate.toUpperCase(Locale.ROOT))) {
                 return Optional.of(BypassReason.IMPOSSIBLE_MATH);
             }
         }
         return Optional.empty();
-    }
-
-    @Override
-    public String ruleName() {
-        return "ImpossibleMathRule";
     }
 }

@@ -41,9 +41,4 @@ public final class IncompatibleTimeStepRule implements SafetyRule {
         }
         return Optional.empty();
     }
-
-    @Override
-    public String ruleName() {
-        return "IncompatibleTimeStepRule";
-    }
 }

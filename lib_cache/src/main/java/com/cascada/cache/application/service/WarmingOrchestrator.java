@@ -1,7 +1,7 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.config.WarmingConfiguration;
-import com.cascada.cache.application.execution.QueryExecutionScope;
+import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
@@ -23,9 +23,9 @@ import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.PopularQuery;
+import com.cascada.cache.domain.time.BucketMath;
 import com.cascada.cache.domain.time.GapPlan;
 import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import com.cascada.identity.domain.QueryHash;
 import java.math.BigInteger;
 import java.time.Clock;
@@ -36,7 +36,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
 import java.util.logging.Logger;
 
 /**
@@ -57,6 +56,8 @@ import java.util.logging.Logger;
  * </ul>
  */
 public final class WarmingOrchestrator implements WarmCacheUseCase {
+
+    private static final long SECONDS_PER_DAY = com.cascada.cache.domain.time.CacheTimeConstants.SECONDS_PER_DAY;
 
     private static final Logger LOGGER = Logger.getLogger(WarmingOrchestrator.class.getName());
 
@@ -99,7 +100,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                               QueryPopularityPort popularityTracker, CoverageIndexPort coverageIndex,
                               long bucketSeconds, int topNQueries, int maximumPatterns) {
         this(cacheBackend, sparkExecutor, gapQueryRewriter, warmingQueue, popularityTracker, coverageIndex,
-                null, null, null, WarmingConfiguration.of(bucketSeconds > 0 ? bucketSeconds : 86_400L,
+                null, null, null, WarmingConfiguration.of(bucketSeconds > 0 ? bucketSeconds : SECONDS_PER_DAY,
                         Math.max(0, topNQueries), maximumPatterns), Clock.systemUTC());
     }
 
@@ -177,14 +178,14 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     @Override
     public synchronized WarmingReport warmLookbackWindow(long nowSeconds, Duration lookback) {
         long bucketSeconds = configuration.bucketSeconds();
-        long currentBucketStart = Math.floorDiv(nowSeconds, bucketSeconds) * bucketSeconds;
+        long currentBucketStart = BucketMath.floor(nowSeconds, bucketSeconds);
         long lookbackSeconds = lookback.toSeconds();
-        long todayStart = Math.floorDiv(nowSeconds, 86_400L) * 86_400L;
-        boolean wholeDays = lookbackSeconds % 86_400L == 0;
+        long todayStart = BucketMath.floor(nowSeconds, SECONDS_PER_DAY);
+        boolean wholeDays = lookbackSeconds % SECONDS_PER_DAY == 0;
         long warmStart = (wholeDays ? todayStart : nowSeconds) - lookbackSeconds;
-        long validationStart = wholeDays ? todayStart - lookbackSeconds + 86_400L
-                : Math.floorDiv(warmStart, bucketSeconds) * bucketSeconds + bucketSeconds;
-        long validationEnd = wholeDays ? todayStart - 86_400L - 1 : currentBucketStart - bucketSeconds - 1;
+        long validationStart = wholeDays ? todayStart - lookbackSeconds + SECONDS_PER_DAY
+                : BucketMath.floor(warmStart, bucketSeconds) + bucketSeconds;
+        long validationEnd = wholeDays ? todayStart - SECONDS_PER_DAY - 1 : currentBucketStart - bucketSeconds - 1;
         com.cascada.cache.application.service.warming.ValidationCheck check = dataChangeDetector != null && validationEnd >= validationStart
                 ? dataChangeDetector.check(new TimeRange(validationStart, validationEnd)) : null;
         WarmingReport report = warmCycle(warmStart, currentBucketStart - 1, check != null && check.changed());
@@ -203,7 +204,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         boolean patternsSucceeded = true;
         long nowSeconds = clock.instant().getEpochSecond();
         long warmEndTimestampSeconds = Math.min(requestedWarmEndTimestampSeconds,
-                Math.floorDiv(nowSeconds, configuration.bucketSeconds()) * configuration.bucketSeconds() - 1);
+                BucketMath.floor(nowSeconds, configuration.bucketSeconds()) - 1);
         if (forceOverwrite && cubeCatalog != null) {
             // Catalogued full-window answers were computed from the same history that is being rewritten.
             cubeCatalog.clear();
@@ -230,7 +231,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             int bucketsWarmed = 0;
             int bucketsSkipped = 0;
             for (Map.Entry<QueryHash, CanonicalQueryObject> entry : toWarm.entrySet()) {
-                QueryExecutionScope.current().ifPresent(cancellation -> cancellation.requireActive());
+                QueryCancellation.requireCurrentActive();
                 try {
                     PatternWarmingResult result = warmSinglePattern(entry.getKey(), entry.getValue(),
                             warmStartTimestampSeconds, warmEndTimestampSeconds, forceOverwrite);
@@ -239,7 +240,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                     bucketsSkipped += result.bucketsSkipped();
                 } catch (RuntimeException failure) {
                     // A bad pattern must not discard itself or prevent later patterns from warming.
-                    if (failure instanceof CancellationException cancelled) throw cancelled;
+                    QueryCancellation.rethrowIfCancelled(failure);
                     patternsSucceeded = false;
                     warmingQueue.vote(entry.getKey());
                     LOGGER.warning("warming failed for query hash " + entry.getKey() + " ("
@@ -267,9 +268,8 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     private Optional<CanonicalQueryObject> canonicalize(SqlCanonicalizerPort parser, PopularQuery popularQuery) {
         try {
             return Optional.of(parser.canonicalize(popularQuery.physicalSql()));
-        } catch (CancellationException cancelled) {
-            throw cancelled;
         } catch (RuntimeException unsupported) {
+            QueryCancellation.rethrowIfCancelled(unsupported);
             LOGGER.fine("popular query " + popularQuery.queryHash() + " can no longer be canonicalised; skipping");
             return Optional.empty();
         }
@@ -290,7 +290,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         BigInteger width = BigInteger.valueOf(bucketSeconds);
         BigInteger minimumTimestamp = BigInteger.valueOf(Long.MIN_VALUE);
         BigInteger maximumTimestamp = BigInteger.valueOf(Long.MAX_VALUE);
-        BigInteger firstBucketStart = floorBucketStart(BigInteger.valueOf(warmStartTimestampSeconds), width);
+        BigInteger firstBucketStart = BucketMath.floor(BigInteger.valueOf(warmStartTimestampSeconds), width);
         BigInteger firstBucketEnd = firstBucketStart.add(width).subtract(BigInteger.ONE);
         if (firstBucketEnd.compareTo(BigInteger.valueOf(warmEndTimestampSeconds)) > 0) {
             return new PatternWarmingResult(0, 0);
@@ -319,7 +319,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         // the read path computes it live as a gap, exactly as on any miss.
         long currentBucketStart = firstRepresentableBucketStart;
         while (true) {
-            QueryExecutionScope.current().ifPresent(cancellation -> cancellation.requireActive());
+            QueryCancellation.requireCurrentActive();
             long bucketEnd;
             try {
                 bucketEnd = Math.addExact(currentBucketStart, bucketSeconds - 1);
@@ -393,28 +393,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     }
 
     private void ensureWarmWindowWithinLimit(long startSeconds, long endSeconds) {
-        BigInteger width = BigInteger.valueOf(configuration.bucketSeconds());
-        BigInteger start = BigInteger.valueOf(startSeconds);
-        BigInteger end = BigInteger.valueOf(endSeconds);
-        BigInteger firstBucketStart = floorBucketStart(start, width);
-        BigInteger firstBucketEnd = firstBucketStart.add(width).subtract(BigInteger.ONE);
-        if (firstBucketEnd.compareTo(end) > 0) {
-            return;
-        }
-        BigInteger bucketCount = end.subtract(firstBucketEnd).divide(width).add(BigInteger.ONE);
-        if (bucketCount.compareTo(BigInteger.valueOf(TimeBucketCalculator.MAX_BUCKETS_PER_PLAN)) > 0) {
-            throw new BucketEnumerationLimitExceededException(
-                    TimeBucketCalculator.MAX_BUCKETS_PER_PLAN);
-        }
-    }
-
-    private BigInteger floorBucketStart(BigInteger timestamp, BigInteger width) {
-        BigInteger[] division = timestamp.divideAndRemainder(width);
-        BigInteger quotient = division[0];
-        if (division[1].signum() < 0) {
-            quotient = quotient.subtract(BigInteger.ONE);
-        }
-        return quotient.multiply(width);
+        TimeBucketCalculator.requireEnumerableWindow(startSeconds, endSeconds, configuration.bucketSeconds());
     }
 
     /** Diagnostic: the hashes currently known to the warmer (registered via {@link #recordQuery}). */

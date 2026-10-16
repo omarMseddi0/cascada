@@ -15,6 +15,16 @@ import org.apache.calcite.sql.SqlNode;
  */
 public final class AggregateNormalizer {
 
+    /** The SUM ingredient of {@code AVG(argument)}; also what gap and storage queries select. */
+    static String sumIngredient(String argument) {
+        return "SUM(" + argument + ")";
+    }
+
+    /** The COUNT ingredient of {@code AVG(argument)}. */
+    static String countIngredient(String argument) {
+        return "COUNT(" + argument + ")";
+    }
+
     /** AVG -> (SUM, COUNT); dedupe and sort the hash forms while retaining the parsed expression tree. */
     public NormalizedAggregates normalize(List<SqlBasicCall> aggregates) {
         List<String> normalized = new ArrayList<>();
@@ -31,8 +41,8 @@ public final class AggregateNormalizer {
             SqlNode argument = aggregate.operand(0);
             String renderedArgument = CalciteSql.unparse(argument);
             if (aggregate.getFunctionQuantifier() == null) {
-                normalized.add("SUM(" + renderedArgument + ")");
-                normalized.add("COUNT(" + renderedArgument + ")");
+                normalized.add(sumIngredient(renderedArgument));
+                normalized.add(countIngredient(renderedArgument));
             } else {
                 normalized.add(expression);
             }

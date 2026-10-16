@@ -18,5 +18,7 @@ public interface SafetyRule {
     Optional<BypassReason> evaluate(CanonicalQueryObject canonicalObject, CacheConfiguration configuration);
 
     /** A stable, human-readable name for diagnostics and the cost-preview explanation. */
-    String ruleName();
+    default String ruleName() {
+        return getClass().getSimpleName();
+    }
 }

@@ -3,14 +3,13 @@ package com.cascada.app.adapter.in.api;
 import com.cascada.app.concurrent.RequestExecutor;
 import com.cascada.app.config.ServerSettings;
 import com.cascada.cache.application.execution.QueryCancellation;
-import com.cascada.cache.application.execution.QueryExecutionScope;
+import com.cascada.app.exception.ApiFailure;
 import io.grpc.*;
 import java.util.concurrent.*;
 
 /** Bounded execution and request-scoped cancellation for the existing unary administration ports. */
 public final class CancellationInterceptor implements ServerInterceptor, AutoCloseable {
     private final RequestExecutor requests;
-    private final java.util.Set<QueryCancellation> activeQueries = ConcurrentHashMap.newKeySet();
     public CancellationInterceptor(ServerSettings settings) {
         requests = new RequestExecutor(settings);
     }
@@ -20,15 +19,13 @@ public final class CancellationInterceptor implements ServerInterceptor, AutoClo
         Context context = Context.current();
         ServerCall.Listener<Request> delegate = next.startCall(call, headers);
         Runnable operation = context.wrap(() -> {
-            activeQueries.add(cancellation);
-            try (var scope = new QueryExecutionScope(cancellation)) { delegate.onHalfClose(); }
-            catch (java.util.concurrent.CancellationException cancelled) { call.close(Status.CANCELLED, new Metadata()); }
+            try { delegate.onHalfClose(); }
             catch (Throwable failure) {
-                call.close(Status.INTERNAL.withDescription("Operation failed"), new Metadata());
+                call.close(ApiFailure.from(failure).grpcException().getStatus(), new Metadata());
                 if (failure instanceof Error fatal) throw fatal;
             }
-            finally { activeQueries.remove(cancellation); }
         });
+        Runnable cancelledBeforeStart = () -> call.close(Status.CANCELLED, new Metadata());
         var submitted = new java.util.concurrent.atomic.AtomicReference<Future<?>>();
         Context.CancellationListener listener = ignored -> {
             cancellation.cancel(); java.util.Optional.ofNullable(submitted.get()).ifPresent(task -> task.cancel(true));
@@ -37,12 +34,12 @@ public final class CancellationInterceptor implements ServerInterceptor, AutoClo
         return new ForwardingServerCallListener.SimpleForwardingServerCallListener<>(delegate) {
             @Override public void onHalfClose() {
                 try {
-                    submitted.set(requests.submit(operation));
+                    submitted.set(requests.submit(cancellation, operation, cancelledBeforeStart));
                     if (context.isCancelled()) listener.cancelled(context);
                 }
                 catch (RejectedExecutionException busy) {
                     context.removeListener(listener);
-                    call.close(Status.UNAVAILABLE.withDescription("Server is stopping"), new Metadata());
+                    call.close(ApiFailure.from(busy).grpcException().getStatus(), new Metadata());
                 }
             }
             @Override public void onComplete() { context.removeListener(listener); super.onComplete(); }
@@ -50,7 +47,6 @@ public final class CancellationInterceptor implements ServerInterceptor, AutoClo
         };
     }
     @Override public void close() {
-        activeQueries.forEach(QueryCancellation::cancel);
         requests.close();
     }
 }

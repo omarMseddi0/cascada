@@ -25,6 +25,27 @@ public final class QueryCancellation {
     public void requireActive() {
         if (isCancelled() || Thread.currentThread().isInterrupted()) throw new CancellationException("Query was cancelled");
     }
+    /** The calling thread's work is still wanted: not interrupted, and its query scope, if any, not cancelled. */
+    public static void requireCurrentActive() {
+        if (Thread.currentThread().isInterrupted()) throw new CancellationException("Query was interrupted");
+        QueryExecutionScope.current().ifPresent(QueryCancellation::requireActive);
+    }
+    /**
+     * Lets a cancellation pass through code that otherwise recovers from a failure: rethrows a
+     * {@link CancellationException} found anywhere in {@code failure}'s cause chain, turns an
+     * {@link InterruptedException} cause into one (restoring the interrupt), and also fails when the
+     * current query was cancelled meanwhile. Returns normally for an ordinary failure.
+     */
+    public static void rethrowIfCancelled(Throwable failure) {
+        requireCurrentActive();
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof CancellationException cancelled) throw cancelled;
+            if (cause instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                throw new CancellationException("Query was interrupted");
+            }
+        }
+    }
     public CancellationRegistration onCancel(Runnable listener) {
         AtomicBoolean invoked = new AtomicBoolean();
         Runnable once = () -> { if (invoked.compareAndSet(false, true)) listener.run(); };

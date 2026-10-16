@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.time;
 
+import com.cascada.cache.domain.time.BucketMath;
 import com.cascada.cache.domain.time.CacheTimeConstants;
 import com.cascada.cache.domain.time.DailyBuckets;
 import com.cascada.cache.domain.time.GapPlan;
@@ -48,8 +49,8 @@ public final class TimeBucketCalculator {
         BigInteger width = BigInteger.valueOf(secondsPerBucket);
         BigInteger start = BigInteger.valueOf(startTimestampSeconds);
         BigInteger end = BigInteger.valueOf(endTimestampSeconds);
-        BigInteger firstDayStart = floorBucketStart(start, width);
-        BigInteger lastDayStart = floorBucketStart(end, width);
+        BigInteger firstDayStart = BucketMath.floor(start, width);
+        BigInteger lastDayStart = BucketMath.floor(end, width);
 
         Optional<TimeRange> head = Optional.empty();
         Optional<TimeRange> tail = Optional.empty();
@@ -80,9 +81,7 @@ public final class TimeBucketCalculator {
         if (firstFullDay.compareTo(lastFullDay) <= 0) {
             BigInteger distance = lastFullDay.subtract(firstFullDay);
             BigInteger count = distance.divide(width).add(BigInteger.ONE);
-            if (count.compareTo(BigInteger.valueOf(MAX_BUCKETS_PER_PLAN)) > 0) {
-                throw new BucketEnumerationLimitExceededException(MAX_BUCKETS_PER_PLAN);
-            }
+            requireWithinPlanLimit(count);
             bucketCount = count.longValueExact();
         }
 
@@ -116,16 +115,27 @@ public final class TimeBucketCalculator {
 
     /** Start of the bucket containing {@code nowSeconds}; every earlier bucket is complete. */
     public long currentBucketStart(long nowSeconds) {
-        return Math.floorDiv(nowSeconds, secondsPerBucket) * secondsPerBucket;
+        return BucketMath.floor(nowSeconds, secondsPerBucket);
     }
 
-    private BigInteger floorBucketStart(BigInteger timestamp, BigInteger width) {
-        BigInteger[] division = timestamp.divideAndRemainder(width);
-        BigInteger quotient = division[0];
-        if (division[1].signum() < 0) {
-            quotient = quotient.subtract(BigInteger.ONE);
+    /**
+     * Throws when the complete buckets of {@code width} seconds between {@code startSeconds} and
+     * {@code endSeconds} exceed {@link #MAX_BUCKETS_PER_PLAN}; the warmer applies the same plan limit.
+     */
+    public static void requireEnumerableWindow(long startSeconds, long endSeconds, long width) {
+        BigInteger bucketWidth = BigInteger.valueOf(width);
+        BigInteger firstBucketEnd = BucketMath.floor(BigInteger.valueOf(startSeconds), bucketWidth)
+                .add(bucketWidth).subtract(BigInteger.ONE);
+        BigInteger end = BigInteger.valueOf(endSeconds);
+        if (firstBucketEnd.compareTo(end) <= 0) {
+            requireWithinPlanLimit(end.subtract(firstBucketEnd).divide(bucketWidth).add(BigInteger.ONE));
         }
-        return quotient.multiply(width);
+    }
+
+    private static void requireWithinPlanLimit(BigInteger bucketCount) {
+        if (bucketCount.compareTo(BigInteger.valueOf(MAX_BUCKETS_PER_PLAN)) > 0) {
+            throw new BucketEnumerationLimitExceededException(MAX_BUCKETS_PER_PLAN);
+        }
     }
 
     /**

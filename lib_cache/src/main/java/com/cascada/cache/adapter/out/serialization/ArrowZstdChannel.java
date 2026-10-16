@@ -38,10 +38,7 @@ final class ArrowZstdChannel implements WritableByteChannel {
             input = inputMemory.nioBuffer(0, CHUNK_BYTES);
             output = outputMemory.nioBuffer(0, CHUNK_BYTES);
             blob = new ByteArrayOutputStream(Math.max(512, Math.min(1_048_576, expectedBytes / 16)));
-            blob.write(expectedBytes >>> 24);
-            blob.write(expectedBytes >>> 16);
-            blob.write(expectedBytes >>> 8);
-            blob.write(expectedBytes);
+            ZstdFrameEnvelope.writeHeader(blob, expectedBytes);
         } catch (RuntimeException | Error failure) {
             if (allocatedOutput != null) allocatedOutput.close();
             if (allocatedInput != null) allocatedInput.close();

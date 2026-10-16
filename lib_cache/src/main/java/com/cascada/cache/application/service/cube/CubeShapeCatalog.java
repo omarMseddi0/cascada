@@ -37,11 +37,8 @@ public final class CubeShapeCatalog {
     private final CubeSubsumptionPlanner planner = new CubeSubsumptionPlanner();
     private final CubeConsistencyVerifier verifier = new CubeConsistencyVerifier();
     private static final long MAX_RETAINED_BYTES = 64L * 1024 * 1024;
-    private final Map<TimeRange, Long> retainedBytes = new java.util.HashMap<>();
     private final java.time.Clock clock;
     private final java.time.Duration timeToLive;
-    private final Map<TimeRange, String> revisions = new java.util.HashMap<>();
-    private final Map<TimeRange, java.time.Instant> expiresAt = new java.util.HashMap<>();
     private final int maxWindows;
     private final int maxShapesPerWindow;
     private final Map<TimeRange, CubeWindowShapes> windows;
@@ -102,37 +99,29 @@ public final class CubeShapeCatalog {
     public synchronized void register(TimeRange timeRange, QueryShape shape, ResultFrame frame,
                                       String revision, java.util.Optional<java.time.Duration> dependencyTtl) {
         if (frame.isEmpty()) return;
-        expire();
-        CubeWindowShapes existingWindow = windows.get(timeRange);
-        if (revision.equals(revisions.get(timeRange)) && existingWindow != null && existingWindow.shapes().contains(shape)) return;
+        java.time.Instant now = clock.instant();
+        expire(now);
+        CubeWindowShapes window = windows.get(timeRange);
+        if (window != null && window.revision().equals(revision) && window.shapes().contains(shape)) return;
         long bytes = estimateBytes(frame);
         if (bytes > MAX_RETAINED_BYTES) return;
-        while (!windows.isEmpty() && retainedBytes.values().stream().mapToLong(Long::longValue).sum() + bytes > MAX_RETAINED_BYTES) {
-            TimeRange eldest = windows.keySet().iterator().next();
-            windows.remove(eldest);
-            expiresAt.remove(eldest);
-            revisions.remove(eldest);
-            retainedBytes.remove(eldest);
-        }
-        if (!revision.equals(revisions.get(timeRange))) {
+        if (window != null && !window.revision().equals(revision)) {
+            // Answers computed under an older backend revision may describe data that has since changed.
             windows.remove(timeRange);
-            expiresAt.remove(timeRange);
-            retainedBytes.remove(timeRange);
+            window = null;
         }
-        revisions.put(timeRange, revision);
-        if (!windows.containsKey(timeRange)) expiresAt.put(timeRange, clock.instant().plus(timeToLive));
-        dependencyTtl.ifPresent(ttl -> {
-            java.time.Instant dependencyExpiry = clock.instant().plus(ttl);
-            expiresAt.compute(timeRange, (key, existing) -> existing == null || dependencyExpiry.isBefore(existing)
-                    ? dependencyExpiry : existing);
-        });
-        CubeWindowShapes window = windows.computeIfAbsent(timeRange, ignored -> new CubeWindowShapes());
-        expiresAt.keySet().retainAll(windows.keySet());
-        revisions.keySet().retainAll(windows.keySet());
-        retainedBytes.keySet().retainAll(windows.keySet());
-        if (window.shapes().size() < maxShapesPerWindow && window.shapes().add(shape)) {
-            window.index().register(new CachedShapeEntry(shape, frame));
-            retainedBytes.merge(timeRange, bytes, Long::sum);
+        while (!windows.isEmpty() && retainedBytes() + bytes > MAX_RETAINED_BYTES) {
+            windows.remove(windows.keySet().iterator().next());
+        }
+        if (window == null || !windows.containsKey(timeRange)) {
+            window = new CubeWindowShapes(revision, now.plus(timeToLive));
+            windows.put(timeRange, window);
+        }
+        CubeWindowShapes target = window;
+        dependencyTtl.ifPresent(ttl -> target.expireNoLaterThan(now.plus(ttl)));
+        if (target.shapes().size() < maxShapesPerWindow && target.shapes().add(shape)) {
+            target.index().register(new CachedShapeEntry(shape, frame));
+            target.retain(bytes);
         }
     }
 
@@ -148,10 +137,9 @@ public final class CubeShapeCatalog {
         CubeWindowShapes window;
         java.util.List<CachedShapeEntry> candidates;
         synchronized (this) {
-            expire();
-            if (!revision.equals(revisions.get(timeRange))) return Optional.empty();
+            expire(clock.instant());
             window = windows.get(timeRange);
-            if (window == null) return Optional.empty();
+            if (window == null || !window.revision().equals(revision)) return Optional.empty();
             ResultFrame exactAnswer = window.exactAnswers().get(query);
             if (exactAnswer != null) return Optional.of(exactAnswer);
             candidates = window.index().candidatesFor(query);
@@ -168,9 +156,8 @@ public final class CubeShapeCatalog {
                 }
                 if (!verifier.verifyRollUp(candidate, query, answer).isConsistent()) continue;
                 synchronized (this) {
-                    expire();
-                    if (windows.get(timeRange) != window || !revision.equals(revisions.get(timeRange)))
-                        return Optional.empty();
+                    expire(clock.instant());
+                    if (windows.get(timeRange) != window) return Optional.empty();
                     if (exact) window.exactAnswers().put(query, answer);
                 }
                 return Optional.of(answer);
@@ -184,9 +171,6 @@ public final class CubeShapeCatalog {
     /** Drop every catalogued window — the flush hook for invalidation / admin cache-flush (§8.17). */
     public synchronized void clear() {
         windows.clear();
-        expiresAt.clear();
-        revisions.clear();
-        retainedBytes.clear();
     }
 
     /** Conservative admission accounting, stopping as soon as the budget is exceeded. */
@@ -207,24 +191,23 @@ public final class CubeShapeCatalog {
         return bytes;
     }
 
-    private void expire() {
-        var now = clock.instant();
-        expiresAt.entrySet().removeIf(entry -> {
-            if (now.isBefore(entry.getValue())) return false;
-            windows.remove(entry.getKey());
-            revisions.remove(entry.getKey());
-            retainedBytes.remove(entry.getKey());
-            return true;
-        });
+    private void expire(java.time.Instant now) {
+        windows.values().removeIf(window -> window.expiredAt(now));
+    }
+
+    private long retainedBytes() {
+        long total = 0L;
+        for (CubeWindowShapes window : windows.values()) total += window.retainedBytes();
+        return total;
     }
 
     public synchronized int windowCount() {
-        expire();
+        expire(clock.instant());
         return windows.size();
     }
 
     public synchronized int entryCount() {
-        expire();
+        expire(clock.instant());
         int total = 0;
         for (CubeWindowShapes window : windows.values()) {
             total += window.shapes().size();

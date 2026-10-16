@@ -3,6 +3,7 @@ package com.cascada.cache.application.service.safety;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.safety.BypassReason;
 import com.cascada.cache.domain.safety.CacheConfiguration;
+import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -17,17 +18,12 @@ public final class LiquidClusteredFilterRule implements SafetyRule {
 
     @Override
     public Optional<BypassReason> evaluate(CanonicalQueryObject canonicalObject, CacheConfiguration configuration) {
-        String joinedFilters = String.join(" ", canonicalObject.hashComponents().filters()).toLowerCase();
+        String joinedFilters = String.join(" ", canonicalObject.hashComponents().filters()).toLowerCase(Locale.ROOT);
         for (String liquidClusteredColumn : configuration.liquidClusteredFilterColumns()) {
-            if (joinedFilters.contains(liquidClusteredColumn.toLowerCase())) {
+            if (joinedFilters.contains(liquidClusteredColumn.toLowerCase(Locale.ROOT))) {
                 return Optional.of(BypassReason.LIQUID_CLUSTERED_FILTER);
             }
         }
         return Optional.empty();
-    }
-
-    @Override
-    public String ruleName() {
-        return "LiquidClusteredFilterRule";
     }
 }

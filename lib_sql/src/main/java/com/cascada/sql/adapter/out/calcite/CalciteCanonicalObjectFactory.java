@@ -3,17 +3,18 @@ package com.cascada.sql.adapter.out.calcite;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.domain.hashing.HashComponents;
 import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.merge.AverageIngredients;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.CompositeFormula;
 import com.cascada.cache.domain.query.OrderByClause;
 import com.cascada.cache.domain.query.PostProcessing;
 import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.cache.domain.time.CacheTimeConstants;
 import com.cascada.sql.domain.TimeDimensionMap;
 import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -55,6 +56,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
 
     private final TimeDimensionMap configuredTimeDimensions;
     private final Set<String> hotBatchPaths;
+    private final int storageStepSeconds;
 
     public CalciteCanonicalObjectFactory() { this(TimeDimensionMap.defaults()); }
 
@@ -63,11 +65,21 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
     }
 
     public CalciteCanonicalObjectFactory(TimeDimensionMap timeDimensions, Set<String> hotBatchPaths) {
-        this.configuredTimeDimensions = java.util.Objects.requireNonNull(timeDimensions);
-        this.hotBatchPaths = hotBatchPaths == null ? null : Set.copyOf(hotBatchPaths);
+        this(timeDimensions, hotBatchPaths, CacheTimeConstants.DEFAULT_CACHE_STEP_SECONDS);
     }
 
-    private static final Set<String> AGGREGATE_FUNCTION_NAMES = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX");
+    /**
+     * @param storageStepSeconds the fixed grain buckets are stored at; a time-series identity is
+     *                           normalised to it so every display step shares one bucket chain. It must
+     *                           equal the warmer's {@code fixedStepSeconds}.
+     */
+    public CalciteCanonicalObjectFactory(TimeDimensionMap timeDimensions, Set<String> hotBatchPaths,
+                                         int storageStepSeconds) {
+        if (storageStepSeconds <= 0) throw new IllegalArgumentException("storage step must be positive");
+        this.configuredTimeDimensions = java.util.Objects.requireNonNull(timeDimensions);
+        this.hotBatchPaths = hotBatchPaths == null ? null : Set.copyOf(hotBatchPaths);
+        this.storageStepSeconds = storageStepSeconds;
+    }
 
     private final AggregateNormalizer aggregateNormalizer = new AggregateNormalizer();
     private final SqlCacheabilityGuard cacheabilityGuard = new SqlCacheabilityGuard();
@@ -107,9 +119,9 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         // Identity uses one canonical storage step; the requested display step stays in metadata.
         if (shape.isTimeSeries() && shape.userStepSeconds().isPresent()) {
             groupBy = select.getGroup().stream().map(node -> CalciteSql.unparse(
-                    TimeStepNormalizer.bucketOutput(node, timeDimensionMap, 300))).toList();
+                    TimeStepNormalizer.bucketOutput(node, timeDimensionMap, storageStepSeconds))).toList();
             projectionSignature = select.getSelectList().stream().map(node -> CalciteSql.unparse(
-                    TimeStepNormalizer.bucketOutput(node, timeDimensionMap, 300))).toList();
+                    TimeStepNormalizer.bucketOutput(node, timeDimensionMap, storageStepSeconds))).toList();
         }
 
         groupBy = new ArrayList<>(groupBy);
@@ -117,12 +129,9 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         for (int index = 0; index < groupBy.size(); index++) {
             String group = groupBy.get(index);
             for (SqlNode item : select.getSelectList()) {
-                SqlNode expression = item.getKind() == SqlKind.AS ? ((SqlCall) item).operand(0) : item;
-                if (expression instanceof SqlIdentifier id && CalciteSql.unparse(expression).equals(group)) {
-                    String output = item.getKind() == SqlKind.AS
-                            ? ((SqlIdentifier) ((SqlCall) item).operand(1)).getSimple()
-                            : id.names.get(id.names.size() - 1);
-                    groupBy.set(index, output);
+                SqlNode expression = SqlTrees.unaliased(item);
+                if (expression instanceof SqlIdentifier && CalciteSql.unparse(expression).equals(group)) {
+                    groupBy.set(index, SqlTrees.outputName(item));
                     break;
                 }
             }
@@ -155,9 +164,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
 
         return new CanonicalQueryObject(hashComponents, timeExtraction.timeRange().orElseThrow(), postProcessing,
                 metadata, sql, extractSourceSignature(select), projectionSignature, logicSignature,
-                select.getSelectList().stream().map(node -> node.getKind() == SqlKind.AS
-                        ? ((SqlIdentifier) ((SqlCall) node).operand(1)).getSimple()
-                        : node instanceof SqlIdentifier id ? id.names.get(id.names.size() - 1) : CalciteSql.unparse(node)).toList());
+                select.getSelectList().stream().map(SqlTrees::outputName).toList());
     }
 
     private boolean touchesHotBatch(SqlNode source) {
@@ -177,17 +184,11 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         List<String> grouped = extractGroupBy(select);
         Set<String> projectedGroups = new java.util.HashSet<>();
         for (SqlNode item : select.getSelectList()) {
-            SqlNode expression = item;
-            String alias = null;
-            if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall as) {
-                expression = as.operand(0);
-                alias = ((SqlIdentifier) as.operand(1)).getSimple();
-            }
-            String outputName = alias == null ? CalciteSql.unparse(expression) : alias;
-            if (outputName.toLowerCase(Locale.ROOT).startsWith("__cascada_")
-                    || outputName.toLowerCase(Locale.ROOT).contains("__cascada_avg_")) return false;
-            if (expression instanceof SqlBasicCall call && isAggregateName(call)) {
-                if (combineFunctionFor(call.getOperator().getName()) == null || call.getFunctionQuantifier() != null) return false;
+            SqlNode expression = SqlTrees.unaliased(item);
+            String alias = expression == item ? null : SqlTrees.outputName(item);
+            if (AverageIngredients.isReservedName(SqlTrees.outputName(item))) return false;
+            if (expression instanceof SqlBasicCall call && SqlTrees.isAggregateCall(call)) {
+                if (call.getFunctionQuantifier() != null) return false;
                 // AVG is rebuilt from renamed SUM/COUNT ingredients; only an explicit alias keeps the
                 // cached and direct result schemas identical.
                 if (GapQueryBuilder.isAverageCall(call) && (alias == null || call.operandCount() != 1)) return false;
@@ -208,10 +209,8 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
 
     private boolean isMergeableMeasureExpression(SqlNode expression) {
         if (!(expression instanceof SqlBasicCall call)) return SqlNumericLiteralValue.asLong(expression) != null;
-        if (isAggregateName(call)) return call.getFunctionQuantifier() == null && call.operandCount() == 1;
-        if (call.getKind() != SqlKind.PLUS && call.getKind() != SqlKind.MINUS
-                && call.getKind() != SqlKind.TIMES && call.getKind() != SqlKind.DIVIDE
-                && call.getKind() != SqlKind.MINUS_PREFIX && call.getKind() != SqlKind.PLUS_PREFIX) return false;
+        if (SqlTrees.isAggregateCall(call)) return call.getFunctionQuantifier() == null && call.operandCount() == 1;
+        if (!SqlTrees.ARITHMETIC.contains(call.getKind())) return false;
         return call.getOperandList().stream().allMatch(this::isMergeableMeasureExpression);
     }
 
@@ -249,13 +248,8 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                                                  Map<String, CompositeFormula> compositeFormulasOut) {
         List<SqlBasicCall> rawAggregateCalls = new ArrayList<>();
         for (SqlNode item : select.getSelectList()) {
-            SqlNode expression = item;
-            String aliasName = null;
-            if (item.getKind() == SqlKind.AS) {
-                SqlBasicCall asCall = (SqlBasicCall) item;
-                expression = asCall.operand(0);
-                aliasName = ((SqlIdentifier) asCall.operand(1)).getSimple();
-            }
+            SqlNode expression = SqlTrees.unaliased(item);
+            String aliasName = expression == item ? null : SqlTrees.outputName(item);
 
             List<SqlBasicCall> aggregatesInItem = new ArrayList<>();
             collectAggregateFunctions(expression, aggregatesInItem);
@@ -269,7 +263,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
             if (isComposite && aliasName != null) {
                 SqlNode formula = expression.accept(new org.apache.calcite.sql.util.SqlShuttle() {
                     @Override public SqlNode visit(SqlCall call) {
-                        if (call instanceof SqlBasicCall aggregate && isAggregateName(aggregate))
+                        if (call instanceof SqlBasicCall aggregate && SqlTrees.isAggregateCall(aggregate))
                             return new SqlIdentifier(CompositeIngredientNames.alias(CalciteSql.unparse(aggregate)), call.getParserPosition());
                         return super.visit(call);
                     }
@@ -305,18 +299,14 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
     }
 
     private boolean isSingleAggregateCall(SqlNode expression) {
-        return expression instanceof SqlBasicCall call && isAggregateName(call);
-    }
-
-    private boolean isAggregateName(SqlBasicCall call) {
-        return AGGREGATE_FUNCTION_NAMES.contains(call.getOperator().getName().toUpperCase(Locale.ROOT));
+        return SqlTrees.isAggregateCall(expression);
     }
 
     private void collectAggregateFunctions(SqlNode expression, List<SqlBasicCall> collector) {
         if (!(expression instanceof SqlCall call)) {
             return;
         }
-        if (call instanceof SqlBasicCall basicCall && isAggregateName(basicCall)) {
+        if (call instanceof SqlBasicCall basicCall && SqlTrees.isAggregateCall(basicCall)) {
             collector.add(basicCall);
             return;
         }
@@ -329,14 +319,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
 
     /** Maps a parsed aggregate keyword to its cross-bucket combine op; {@code null} when not simple. */
     private AggregateFunction combineFunctionFor(String operatorName) {
-        return switch (operatorName.toUpperCase(Locale.ROOT)) {
-            case "SUM" -> AggregateFunction.SUM;
-            case "COUNT" -> AggregateFunction.COUNT;
-            case "MIN" -> AggregateFunction.MINIMUM;
-            case "MAX" -> AggregateFunction.MAXIMUM;
-            case "AVG" -> AggregateFunction.AVERAGE;
-            default -> null;
-        };
+        return AggregateFunction.fromSqlName(operatorName).orElse(null);
     }
 
     // --- logic signature (HAVING / JOIN ON / DISTINCT) --------------------------------------------
@@ -412,9 +395,6 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         }
     }
 
-    private String simpleName(SqlIdentifier identifier) {
-        return identifier.names.get(identifier.names.size() - 1);
-    }
 
     // --- order by / limit ------------------------------------------------------------------------
 
@@ -464,7 +444,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         }
         boolean resolvedNullsFirst = nullsFirst == null ? ascending : nullsFirst;
         if (current instanceof SqlIdentifier identifier) {
-            return OrderByClause.forColumn(simpleName(identifier), ascending, resolvedNullsFirst);
+            return OrderByClause.forColumn(SqlTrees.lastName(identifier), ascending, resolvedNullsFirst);
         }
         return OrderByClause.forExpression(CalciteSql.unparse(current), ascending, resolvedNullsFirst);
     }

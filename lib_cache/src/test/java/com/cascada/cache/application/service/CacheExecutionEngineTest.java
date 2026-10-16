@@ -34,6 +34,9 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import static com.cascada.cache.application.service.EngineTestFixtures.appFrame;
+import static com.cascada.cache.application.service.EngineTestFixtures.globalAggregateOverThreeDays;
+
 /**
  * End-to-end exercise of the runnable engine with an in-memory backend and a fake Spark executor:
  * partial-hit merge, and the two direct-to-Spark fast paths.
@@ -97,20 +100,6 @@ class CacheExecutionEngineTest {
 
     private final PortableFrameSerializer serializer = new PortableFrameSerializer();
     private final QueryHashGenerator hashGenerator = new QueryHashGenerator();
-
-    private CanonicalQueryObject globalAggregateOverThreeDays() {
-        HashComponents components = HashComponents.of(List.of("appName"), List.of("SUM(bytes)"), List.of());
-        return new CanonicalQueryObject(components, new TimeRange(0, 3 * DAY - 1),
-                PostProcessing.none(), QueryMetadata.globalAggregate(), "FULL_SQL", List.of("traffic"), List.of());
-    }
-
-    private ResultFrame appFrame(String app, double bytes) {
-        return ResultFrame.builder()
-                .column("appName", ColumnType.STRING)
-                .column("bytes", ColumnType.DOUBLE)
-                .row(Map.of("appName", app, "bytes", bytes))
-                .build();
-    }
 
     private CanonicalQueryObject timeSeriesOverThreeDays() {
         HashComponents components = HashComponents.of(List.of("ts", "appName"), List.of("SUM(bytes)"), List.of());

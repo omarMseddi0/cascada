@@ -10,6 +10,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'JvmOptions.ps1')
 if (!$JavaHome) {
     $installedJavaHome = Join-Path $env:USERPROFILE '.local/share/cascada/jdk-21'
     $JavaHome = if (Test-Path (Join-Path $installedJavaHome 'bin/java.exe')) { $installedJavaHome } else { $env:JAVA_HOME }
@@ -17,11 +18,7 @@ if (!$JavaHome) {
 $javaExe = Join-Path $JavaHome 'bin/java.exe'
 $mavenHome = Split-Path -Parent (Split-Path -Parent (Get-Command mvn).Source)
 $launcher = (Get-ChildItem -LiteralPath (Join-Path $mavenHome 'boot') -Filter 'plexus-classworlds-*.jar' | Select-Object -First 1).FullName
-$jvmArgs = @("-Xmx${HeapMb}m", '-XX:ActiveProcessorCount=2', '--enable-native-access=ALL-UNNAMED',
-    '--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED', '--add-opens=java.base/java.util.zip=ALL-UNNAMED',
-    '--add-opens=java.base/java.nio=ALL-UNNAMED', '--add-opens=java.base/java.lang=ALL-UNNAMED',
-    '--add-opens=java.base/java.io=ALL-UNNAMED', '--add-opens=java.base/java.util=ALL-UNNAMED',
-    '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED', '--add-opens=java.base/sun.util.calendar=ALL-UNNAMED')
+$jvmArgs = @("-Xmx${HeapMb}m", '-XX:ActiveProcessorCount=2') + (Get-CascadaJvmOptions)
 # Run Maven in this JVM: the Windows cmd AutoRun configuration breaks Surefire's fork wrapper here.
 $mavenArgs = @('-B', '-Plocal-spark,validation', '-pl', 'app', '-am', 'test', '-DforkCount=0',
     '-Dsurefire.failIfNoSpecifiedTests=false', '-Dmaven.compiler.fork=true', '-Dmaven.compiler.maxmem=512m')

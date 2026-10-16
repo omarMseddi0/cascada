@@ -177,7 +177,7 @@ class TypedMergeRegressionTest {
         assertThatThrownBy(() -> merger.mergeAndReconstruct(List.of(firstPartial, secondPartial),
                 query(List.of(), PostProcessing.none())))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("result precision 39 exceeds Spark's maximum precision of 38");
+                .hasMessageContaining("exceeds Spark's maximum precision/scale of 38");
     }
 
     @Test void decimalSumRejectsNegativeScaleValuesThatExceedSparkPrecision() {
@@ -187,7 +187,7 @@ class TypedMergeRegressionTest {
         assertThatThrownBy(() -> merger.mergeAndReconstruct(List.of(scientific),
                 query(List.of(), PostProcessing.none())))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("result precision 40 exceeds Spark's maximum precision of 38");
+                .hasMessageContaining("exceeds Spark's maximum precision/scale of 38");
     }
 
     @Test void longSumOverflowRejectsTheCacheMergeForSparkFallback() {

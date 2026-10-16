@@ -17,7 +17,11 @@ public record TableSettings(String logicalName, String deltaPath,
             throw new IllegalArgumentException("Table name and Delta path are required");
         columnMappings = Map.copyOf(columnMappings);
         timeColumns = Set.copyOf(timeColumns);
-        if (timeColumns.isEmpty() || !columnMappings.keySet().containsAll(timeColumns))
+        // Column names are case-insensitive, exactly as the SQL translator's RegisteredTable reads them.
+        Set<String> mappedColumns = columnMappings.keySet().stream()
+                .map(name -> name.toLowerCase(java.util.Locale.ROOT)).collect(java.util.stream.Collectors.toSet());
+        if (timeColumns.isEmpty() || !timeColumns.stream()
+                .allMatch(name -> mappedColumns.contains(name.toLowerCase(java.util.Locale.ROOT))))
             throw new IllegalArgumentException("Every table time column requires a physical mapping");
     }
 }

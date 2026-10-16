@@ -61,16 +61,8 @@ public final class CalciteSql {
     /** Parse a {@code SELECT} (possibly wrapped by {@code ORDER BY}/{@code LIMIT}) into a node. */
     public static SqlNode parseQuery(String sql) {
         try {
-            return SqlParser.create(sql, PARSER_CONFIG).parseQuery();
+            return withReservedIdentifierRetry(sql, text -> SqlParser.create(text, PARSER_CONFIG).parseQuery());
         } catch (SqlParseException notParseable) {
-            String quotedReservedIdentifier = quoteReservedTimestampIdentifiers(sql);
-            if (!quotedReservedIdentifier.equals(sql)) {
-                try {
-                    return SqlParser.create(quotedReservedIdentifier, PARSER_CONFIG).parseQuery();
-                } catch (SqlParseException stillNotParseable) {
-                    // Preserve the original parser diagnostics below.
-                }
-            }
             throw new UnsupportedSqlException("SQL did not parse; bypassing cache", notParseable);
         }
     }
@@ -78,16 +70,9 @@ public final class CalciteSql {
     /** Parse a stand-alone expression (e.g. a WHERE predicate) into a node. */
     public static SqlNode parseExpression(String expression) {
         try {
-            return SqlParser.create(expression, PARSER_CONFIG).parseExpression();
+            return withReservedIdentifierRetry(expression,
+                    text -> SqlParser.create(text, PARSER_CONFIG).parseExpression());
         } catch (SqlParseException notParseable) {
-            String quotedReservedIdentifier = quoteReservedTimestampIdentifiers(expression);
-            if (!quotedReservedIdentifier.equals(expression)) {
-                try {
-                    return SqlParser.create(quotedReservedIdentifier, PARSER_CONFIG).parseExpression();
-                } catch (SqlParseException stillNotParseable) {
-                    // Preserve the original parser diagnostics below.
-                }
-            }
             throw new UnsupportedSqlException("expression did not parse: " + expression, notParseable);
         }
     }
@@ -95,64 +80,63 @@ public final class CalciteSql {
     /** True iff the SQL parses as a query — the Calcite analogue of the old {@code isParseable} check. */
     public static boolean isParseable(String sql) {
         try {
-            SqlParser.create(sql, PARSER_CONFIG).parseStmt();
+            withReservedIdentifierRetry(sql, text -> SqlParser.create(text, PARSER_CONFIG).parseStmt());
             return true;
         } catch (SqlParseException notParseable) {
-            String quotedReservedIdentifier = quoteReservedTimestampIdentifiers(sql);
-            if (quotedReservedIdentifier.equals(sql)) {
-                return false;
-            }
-            try {
-                SqlParser.create(quotedReservedIdentifier, PARSER_CONFIG).parseStmt();
-                return true;
-            } catch (SqlParseException stillNotParseable) {
-                return false;
-            }
+            return false;
         }
     }
 
-    /** Calcite's MySQL lexer treats TIMESTAMP as a reserved type keyword, including in column refs. */
+    /**
+     * Parses {@code text}; on failure, retries once with reserved words that are used as column names
+     * quoted. The original parser failure is reported when the retry does not help.
+     */
+    private static SqlNode withReservedIdentifierRetry(String text, CalciteParse parse) throws SqlParseException {
+        try {
+            return parse.parse(text);
+        } catch (SqlParseException notParseable) {
+            String quoted = quoteReservedTimestampIdentifiers(text);
+            if (!quoted.equals(text)) {
+                try {
+                    return parse.parse(quoted);
+                } catch (SqlParseException stillNotParseable) {
+                    // Preserve the original parser diagnostics.
+                }
+            }
+            throw notParseable;
+        }
+    }
+
+    /** Calcite's MySQL lexer treats TIMESTAMP (and a bare VALUE) as reserved, including in column refs. */
     private static String quoteReservedTimestampIdentifiers(String sql) {
+        boolean[] code = SqlTextScanner.codePositions(sql);
         StringBuilder result = new StringBuilder(sql.length());
         int index = 0;
         while (index < sql.length()) {
             char current = sql.charAt(index);
-            if (current == '\'' || current == '"' || current == '`') {
-                index = copyQuoted(sql, index, result, current);
+            if (!code[index] || !SqlTextScanner.isIdentifierStart(current)) {
+                result.append(current);
+                index++;
                 continue;
             }
-            if (sql.startsWith("--", index)) {
-                index = copyLineComment(sql, index, result);
-                continue;
+            int end = index + 1;
+            while (end < sql.length() && code[end] && SqlTextScanner.isIdentifierPart(sql.charAt(end))) {
+                end++;
             }
-            if (sql.startsWith("/*", index)) {
-                index = copyBlockComment(sql, index, result);
-                continue;
+            String word = sql.substring(index, end);
+            int next = SqlTextScanner.skipWhitespace(sql, code, end);
+            if (word.equalsIgnoreCase("timestamp") && shouldQuoteTimestamp(sql, index, next)
+                    || word.equalsIgnoreCase("value") && (next >= sql.length() || sql.charAt(next) != '(')) {
+                result.append('`').append(word).append('`');
+            } else {
+                result.append(word);
             }
-            if (isIdentifierStart(current)) {
-                int end = index + 1;
-                while (end < sql.length() && isIdentifierPart(sql.charAt(end))) {
-                    end++;
-                }
-                String word = sql.substring(index, end);
-                if (word.equalsIgnoreCase("timestamp") && shouldQuoteTimestamp(sql, index, end)
-                        || word.equalsIgnoreCase("value") && (skipWhitespace(sql, end) >= sql.length()
-                        || sql.charAt(skipWhitespace(sql, end)) != '(')) {
-                    result.append('`').append(word).append('`');
-                } else {
-                    result.append(word);
-                }
-                index = end;
-                continue;
-            }
-            result.append(current);
-            index++;
+            index = end;
         }
         return result.toString();
     }
 
-    private static boolean shouldQuoteTimestamp(String sql, int start, int end) {
-        int next = skipWhitespace(sql, end);
+    private static boolean shouldQuoteTimestamp(String sql, int start, int next) {
         if (next < sql.length() && (sql.charAt(next) == '\'' || sql.charAt(next) == '(')) {
             return false;
         }
@@ -164,75 +148,16 @@ public final class CalciteSql {
         return true;
     }
 
-    private static int copyQuoted(String sql, int start, StringBuilder result, char quote) {
-        int index = start;
-        result.append(sql.charAt(index++));
-        while (index < sql.length()) {
-            char current = sql.charAt(index++);
-            result.append(current);
-            if (current == '\\' && quote != '`' && index < sql.length()) {
-                result.append(sql.charAt(index++));
-            } else if (current == quote) {
-                if (index < sql.length() && sql.charAt(index) == quote) {
-                    result.append(sql.charAt(index++));
-                } else {
-                    break;
-                }
-            }
-        }
-        return index;
-    }
-
-    private static int copyLineComment(String sql, int start, StringBuilder result) {
-        int index = start;
-        while (index < sql.length()) {
-            char current = sql.charAt(index++);
-            result.append(current);
-            if (current == '\n') {
-                break;
-            }
-        }
-        return index;
-    }
-
-    private static int copyBlockComment(String sql, int start, StringBuilder result) {
-        int index = start;
-        while (index < sql.length()) {
-            char current = sql.charAt(index++);
-            result.append(current);
-            if (current == '*' && index < sql.length() && sql.charAt(index) == '/') {
-                result.append(sql.charAt(index++));
-                break;
-            }
-        }
-        return index;
-    }
-
-    private static int skipWhitespace(String sql, int index) {
-        while (index < sql.length() && Character.isWhitespace(sql.charAt(index))) {
-            index++;
-        }
-        return index;
-    }
-
     private static int previousWordStart(String sql, int end) {
         int index = end - 1;
         while (index >= 0 && Character.isWhitespace(sql.charAt(index))) {
             index--;
         }
         int wordEnd = index + 1;
-        while (index >= 0 && isIdentifierPart(sql.charAt(index))) {
+        while (index >= 0 && SqlTextScanner.isIdentifierPart(sql.charAt(index))) {
             index--;
         }
         return wordEnd == index + 1 ? -1 : index + 1;
-    }
-
-    private static boolean isIdentifierStart(char value) {
-        return Character.isLetter(value) || value == '_';
-    }
-
-    private static boolean isIdentifierPart(char value) {
-        return Character.isLetterOrDigit(value) || value == '_';
     }
 
     /** Render a node to single-line Spark SQL, quoting identifiers only when strictly necessary. */

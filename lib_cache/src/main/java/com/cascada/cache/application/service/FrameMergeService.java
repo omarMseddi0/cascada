@@ -1,27 +1,27 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.service.merge.AggregateFunctionResolver;
+import com.cascada.cache.application.service.merge.AverageReconstructionService;
+import com.cascada.cache.application.service.merge.SparkAverage;
+import com.cascada.cache.application.service.merge.TypedFrameAccumulator;
+import com.cascada.cache.application.service.merge.TypedFrameAggregator;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.cache.domain.merge.AggregateFunctionResolver;
 import com.cascada.cache.domain.merge.AverageIngredients;
-import com.cascada.cache.domain.merge.AverageReconstructionService;
-import com.cascada.cache.domain.merge.SparkAverage;
-import com.cascada.cache.domain.merge.TypedFrameAggregator;
 import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.domain.query.OrderByClause;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.IntBinaryOperator;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Coordinates typed frame aggregation, AVG/composite reconstruction, and deferred post-processing. */
 public final class FrameMergeService {
@@ -41,60 +41,8 @@ public final class FrameMergeService {
     }
 
     /** Same ordered merge and final reconstruction, without retaining each completed input frame. */
-    public IncrementalMerge incremental(CanonicalQueryObject canonicalObject) {
-        return new IncrementalMerge(canonicalObject);
-    }
-
-    public final class IncrementalMerge {
-        private final CanonicalQueryObject canonical;
-        private ResultFrame schema;
-        private ResultFrame firstEmpty;
-        private TypedFrameAggregator.Accumulator accumulator;
-        private RuntimeException failure;
-        private long inputRows;
-
-        private IncrementalMerge(CanonicalQueryObject canonical) { this.canonical = canonical; }
-
-        /** Deferred merge errors preserve authoritative fallback after the original fetch/query phases. */
-        public void add(ResultFrame frame) {
-            if (failure != null) return;
-            try {
-                java.util.Objects.requireNonNull(frame, "frame");
-                if (schema == null) {
-                    ResultFrameBuilder descriptor = new ResultFrameBuilder();
-                    for (String column : frame.columnNames()) descriptor.column(column, frame.columnType(column));
-                    schema = descriptor.build();
-                    if (frame.isEmpty()) firstEmpty = frame;
-                } else TypedFrameAggregator.validateCompatibleSchemas(List.of(schema, frame));
-                inputRows += frame.rowCount();
-                if (frame.isEmpty()) return;
-                if (accumulator == null) {
-                    List<String> dimensions = new ArrayList<>();
-                    boolean timeSeries = canonical.metadata().isTimeSeries();
-                    if (timeSeries) dimensions.add(timeColumnName);
-                    dimensions.addAll(dimensionColumns(schema, canonical, timeSeries));
-                    int step = timeSeries ? timeSeriesStep(canonical) : fixedStepSeconds;
-                    accumulator = new TypedFrameAggregator.Accumulator(schema, dimensions,
-                            resolvedFunctions(canonical), timeColumnName, step);
-                }
-                accumulator.accept(frame);
-            } catch (RuntimeException invalidMerge) { failure = invalidMerge; }
-        }
-
-        public ResultFrame finish() {
-            if (failure != null) throw failure;
-            if (schema == null) return ResultFrame.empty();
-            if (accumulator == null) return firstEmpty == null ? schema : firstEmpty;
-            boolean monitor = LOGGER.isLoggable(Level.FINE);
-            long started = monitor ? System.nanoTime() : 0L;
-            ResultFrame merged = accumulator.finish();
-            ResultFrame reconstructed = finishAverages(merged, canonical);
-            ResultFrame composites = reconstructCompositeAliases(reconstructed, canonical);
-            ResultFrame answer = applyPostProcessing(composites, canonical);
-            if (monitor) LOGGER.fine("Incremental cache merge: input_rows=" + inputRows
-                    + " output_rows=" + answer.rowCount() + " finish_ms=" + (System.nanoTime() - started) / 1_000_000.0);
-            return answer;
-        }
+    public IncrementalFrameMerge incremental(CanonicalQueryObject canonicalObject) {
+        return new IncrementalFrameMerge(this, canonicalObject);
     }
 
     public ResultFrame mergeAndReconstruct(List<ResultFrame> frames, CanonicalQueryObject canonicalObject) {
@@ -108,7 +56,7 @@ public final class FrameMergeService {
         if (nonEmpty.isEmpty()) {
             // Empty Spark results still carry their projected schema. Keep it intact so callers
             // receive the same columns and types as they would from a non-empty merge.
-            return frames.get(0);
+            return finishMergedFrame(frames.get(0), canonicalObject);
         }
 
         boolean monitor = LOGGER.isLoggable(Level.FINE);
@@ -118,9 +66,7 @@ public final class FrameMergeService {
                 : mergeGlobalAggregate(nonEmpty, canonicalObject);
 
         long aggregated = monitor ? System.nanoTime() : 0L;
-        ResultFrame reconstructed = finishAverages(merged, canonicalObject);
-        ResultFrame withComposites = reconstructCompositeAliases(reconstructed, canonicalObject);
-        ResultFrame result = applyPostProcessing(withComposites, canonicalObject);
+        ResultFrame result = finishMergedFrame(merged, canonicalObject);
         if (monitor) {
             long finished = System.nanoTime();
             long inputRows = 0;
@@ -132,103 +78,87 @@ public final class FrameMergeService {
         return result;
     }
 
+    TypedFrameAccumulator createAccumulator(ResultFrame schema, CanonicalQueryObject canonicalObject) {
+        List<String> dimensions = new ArrayList<>();
+        boolean timeSeries = canonicalObject.metadata().isTimeSeries();
+        if (timeSeries) dimensions.add(timeColumnName);
+        dimensions.addAll(dimensionColumns(schema, canonicalObject, timeSeries));
+        int step = timeSeries ? timeSeriesStep(canonicalObject) : fixedStepSeconds;
+        return new TypedFrameAccumulator(schema, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step);
+    }
+
+    ResultFrame finishMergedFrame(ResultFrame merged, CanonicalQueryObject canonicalObject) {
+        List<String> averages = averageAliases(canonicalObject);
+        // Cached AVG measures carry their own SUM/COUNT ingredients; the legacy SUM(col)/COUNT(col)
+        // folding would otherwise also consume a user's explicit SUM(col) and COUNT(col) columns.
+        ResultFrame reconstructed = averages.isEmpty()
+                ? reconstructAverages(merged, canonicalObject)
+                : SparkAverage.finish(merged, averages);
+        ResultFrame composites = reconstructCompositeAliases(reconstructed, canonicalObject);
+        return projectOutput(applyPostProcessing(composites, canonicalObject), canonicalObject);
+    }
+
     // --- composite aliases (e.g. SUM(a) + SUM(b) AS total_bytes) ---------------------------------
 
-    private static final Pattern COMPOSITE_TERM =
-            Pattern.compile("\\s*([+-])?\\s*((?:SUM|COUNT|MIN|MAX|AVG)\\s*\\([^)]*\\)|[A-Za-z_][A-Za-z0-9_]*)",
-                    Pattern.CASE_INSENSITIVE);
 
-    /**
-     * Rebuilds composite aliases after the merge, porting {@code reconstruct_composite_aliases} in
-     * {@code merging.py}. Spark/the cache stores the raw ingredient columns (e.g. {@code SUM(a)},
-     * {@code SUM(b)}); the canonical object carries the formula (e.g. {@code SUM(a) + SUM(b)}) and the
-     * alias (e.g. {@code total_bytes}). Without this, a query like {@code SUM(a)+SUM(b) AS total_bytes}
-     * would come back from cache WITHOUT the {@code total_bytes} column (the KeyError the Python fix
-     * targets). Only additive composites ({@code +}/{@code -} of aggregate-of-column terms) are
-     * reconstructed in memory; anything more exotic was never cacheable (it would have bypassed).
-     */
+    /** Evaluates typed arithmetic plans after ingredient aggregation. SQL parsing belongs to lib_sql. */
     private ResultFrame reconstructCompositeAliases(ResultFrame frame, CanonicalQueryObject canonicalObject) {
         Map<String, String> compositeAliases = canonicalObject.metadata().compositeAliases();
-        if (compositeAliases.isEmpty() || frame.isEmpty()) {
-            return frame;
-        }
-
-        // Resolve each alias's formula into terms whose column actually exists in the frame.
-        Map<String, List<CompositeTerm>> resolved = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : compositeAliases.entrySet()) {
-            String alias = entry.getKey();
-            if (frame.columnNames().contains(alias)) {
-                continue; // already present (Bug #5 guard from merging.py)
+        if (compositeAliases.isEmpty()) return frame;
+        Map<String, CompositeExpressionNode> formulas = new LinkedHashMap<>();
+        compositeAliases.forEach((alias, formula) -> {
+            if (!frame.columnNames().contains(alias)) {
+                var compiled = canonicalObject.metadata().compositeFormulas().get(alias);
+                if (compiled == null) throw new IllegalArgumentException("missing compiled composite formula " + alias);
+                formulas.put(alias, CompositeFrameExpression.bind(compiled, frame));
             }
-            List<CompositeTerm> terms = parseCompositeFormula(entry.getValue(), frame.columnNames());
-            if (terms != null) {
-                resolved.put(alias, terms);
-            }
-        }
-        if (resolved.isEmpty()) {
-            return frame;
-        }
-
-        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(frame.rowCount());
-        for (String column : frame.columnNames()) {
-            builder.column(column, frame.columnType(column));
-        }
-        resolved.keySet().forEach(alias -> builder.column(alias, ColumnType.DOUBLE));
-
-        List<List<CompositeTerm>> formulas = new ArrayList<>(resolved.values());
-        int[][] termColumns = formulas.stream().map(terms -> terms.stream()
-                .mapToInt(term -> frame.columnIndex(term.columnReference())).toArray()).toArray(int[][]::new);
+        });
+        if (formulas.isEmpty()) return frame;
+        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(frame.rowCount());
+        for (String column : frame.columnNames()) builder.column(column, frame.columnType(column));
+        formulas.forEach((alias, formula) -> builder.column(alias, formula.type()));
         for (int row = 0; row < frame.rowCount(); row++) {
             for (int column = 0; column < frame.columnNames().size(); column++) builder.appendCell(frame, row, column);
-            for (int formula = 0; formula < formulas.size(); formula++) {
-                double value = 0.0;
-                List<CompositeTerm> terms = formulas.get(formula);
-                for (int termIndex = 0; termIndex < terms.size(); termIndex++) {
-                    CompositeTerm term = terms.get(termIndex);
-                    double termValue = asDouble(frame.valueAt(row, termColumns[formula][termIndex]));
-                    value += term.add() ? termValue : -termValue;
+            for (CompositeExpressionNode formula : formulas.values()) {
+                Number value = formula.value(frame, row);
+                if (value == null) builder.appendNull();
+                else switch (formula.type()) {
+                    case LONG -> builder.appendLong(value.longValue());
+                    case DOUBLE -> builder.appendDouble(value.doubleValue());
+                    case DECIMAL -> builder.appendDecimal((java.math.BigDecimal) value);
+                    default -> throw new IllegalArgumentException("non-numeric composite result");
                 }
-                builder.appendDouble(value);
             }
         }
         return builder.build();
     }
 
-    /**
-     * Parse an additive composite formula into terms, mapping each aggregate reference to the actual
-     * frame column (case/space-insensitive, matching {@code _spark_formula_to_pandas}). Returns
-     * {@code null} if any term cannot be resolved to a present column — then the alias is left absent
-     * rather than computed from a wrong column.
-     */
-    private List<CompositeTerm> parseCompositeFormula(String formula, List<String> availableColumns) {
-        List<CompositeTerm> terms = new ArrayList<>();
-        Matcher matcher = COMPOSITE_TERM.matcher(formula);
-        int matchedTo = 0;
-        while (matcher.find()) {
-            boolean add = !"-".equals(matcher.group(1));
-            String token = matcher.group(2);
-            String resolvedColumn = resolveColumn(token, availableColumns);
-            if (resolvedColumn == null) {
-                return null;
-            }
-            terms.add(new CompositeTerm(resolvedColumn, add));
-            matchedTo = matcher.end();
-        }
-        // Reject anything we did not fully consume (e.g. *, /, parenthesised sub-expressions).
-        if (terms.isEmpty() || formula.substring(matchedTo).trim().length() > 0) {
-            return null;
-        }
-        return terms;
+    private ResultFrame projectOutput(ResultFrame frame, CanonicalQueryObject canonical) {
+        if (canonical.outputColumns().isEmpty() || canonical.outputColumns().equals(frame.columnNames())) return frame;
+        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(frame.rowCount());
+        int[] columns = canonical.outputColumns().stream().mapToInt(name -> {
+            String resolved = resolveColumn(name, frame.columnNames());
+            if (resolved == null) throw new IllegalArgumentException("missing output column " + name);
+            return frame.columnIndex(resolved);
+        }).toArray();
+        for (int index = 0; index < columns.length; index++)
+            builder.column(canonical.outputColumns().get(index), frame.columnTypeAt(columns[index]));
+        for (int row = 0; row < frame.rowCount(); row++)
+            for (int column : columns) builder.appendCell(frame, row, column);
+        return builder.build();
     }
 
     private String resolveColumn(String token, List<String> availableColumns) {
+        if (availableColumns.contains(token)) return token;
         String normalizedToken = token.replace("`", "").replace(" ", "").toLowerCase(Locale.ROOT);
+        String resolved = null;
         for (String column : availableColumns) {
             if (column.replace("`", "").replace(" ", "").toLowerCase(Locale.ROOT).equals(normalizedToken)) {
-                return column;
+                if (resolved != null) throw new IllegalArgumentException("Ambiguous result column: " + token);
+                resolved = column;
             }
         }
-        return null;
+        return resolved;
     }
 
     // --- time-series path -----------------------------------------------------------------------
@@ -242,6 +172,8 @@ public final class FrameMergeService {
     }
 
     private int timeSeriesStep(CanonicalQueryObject canonicalObject) {
+        // A raw GROUP BY ts is already at epoch-second granularity. Rounding it to the internal
+        // storage step merges distinct SQL groups and changes their timestamps and aggregates.
         return canonicalObject.metadata().preserveRawTimeSeries()
                 ? 1 : canonicalObject.userStepSeconds().orElse(fixedStepSeconds);
     }
@@ -266,17 +198,6 @@ public final class FrameMergeService {
             functions.put(normalizedName(AverageIngredients.typeColumn(alias)), AggregateFunction.MINIMUM);
         }
         return functions;
-    }
-
-    /**
-     * Cached AVG measures carry their own SUM/COUNT ingredients; the legacy SUM(col)/COUNT(col)
-     * folding would otherwise also consume a user's explicit SUM(col) and COUNT(col) columns.
-     */
-    private ResultFrame finishAverages(ResultFrame merged, CanonicalQueryObject canonicalObject) {
-        List<String> averages = averageAliases(canonicalObject);
-        return averages.isEmpty()
-                ? reconstructAverages(merged, canonicalObject)
-                : SparkAverage.finish(merged, averages);
     }
 
     private static List<String> averageAliases(CanonicalQueryObject canonicalObject) {
@@ -328,7 +249,7 @@ public final class FrameMergeService {
         finalColumns.addAll(averageAliasToColumn.keySet());
         finalColumns.removeIf(sumCountColumnsToDrop::contains);
 
-        ResultFrameBuilder finalBuilder = new ResultFrameBuilder().expectedRows(frame.rowCount());
+        ResultFrameBuilder finalBuilder = ResultFrame.builder().expectedRows(frame.rowCount());
         for (String column : finalColumns) {
             ColumnType type = averageAliasToColumn.containsKey(column) ? ColumnType.DOUBLE : frame.columnType(column);
             finalBuilder.column(column, type);
@@ -377,7 +298,11 @@ public final class FrameMergeService {
                 throw new IllegalArgumentException("expression ordering requires direct execution");
             }
             String column = clause.column().get();
-            sortColumns[index] = frame.columnNames().contains(column) ? frame.columnIndex(column) : -1;
+            String resolved = frame.columnNames().contains(column) ? column : resolveColumn(column, frame.columnNames());
+            if (resolved == null) {
+                throw new IllegalArgumentException("ORDER BY column is absent from the result: " + column);
+            }
+            sortColumns[index] = frame.columnIndex(resolved);
         }
         IntBinaryOperator comparator = (left, right) -> {
             for (int index = 0; index < orderBy.size(); index++) {
@@ -392,7 +317,8 @@ public final class FrameMergeService {
                     compared = switch (frame.columnTypeAt(column)) {
                         case LONG -> Long.compare(frame.longAt(left, column), frame.longAt(right, column));
                         case DOUBLE -> Double.compare(frame.doubleAt(left, column), frame.doubleAt(right, column));
-                        case STRING -> TypedFrameAggregator.compareSparkStrings(frame.stringAt(left, column), frame.stringAt(right, column));
+                        case STRING -> TypedFrameAggregator.compareSparkStrings(
+                                frame.stringAt(left, column), frame.stringAt(right, column));
                         case DECIMAL -> ((java.math.BigDecimal) frame.valueAt(left, column))
                                 .compareTo((java.math.BigDecimal) frame.valueAt(right, column));
                     };
@@ -434,7 +360,7 @@ public final class FrameMergeService {
             if (!orderBy.isEmpty()) sortRows(rows, comparator);
         }
 
-        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(limit);
+        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(limit);
         for (String column : frame.columnNames()) {
             builder.column(column, frame.columnType(column));
         }
@@ -469,9 +395,9 @@ public final class FrameMergeService {
                                           boolean isTimeSeries) {
         List<String> dimensions = new ArrayList<>();
         for (String groupByColumn : canonicalObject.hashComponents().groupBy()) {
-            if (frame.columnNames().contains(groupByColumn)
-                    && !(isTimeSeries && groupByColumn.equals(timeColumnName))) {
-                dimensions.add(groupByColumn);
+            String resolved = resolveColumn(groupByColumn, frame.columnNames());
+            if (resolved != null && !(isTimeSeries && resolved.equalsIgnoreCase(timeColumnName))) {
+                dimensions.add(resolved);
             }
         }
         return dimensions;

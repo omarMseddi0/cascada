@@ -14,14 +14,16 @@
     <name>Cascada Library - Spark + Delta executor</name>
     <description>
         The production SparkQueryExecutorPort adapter: builds a Spark 4.1.1 SparkSession (local or
-        Kubernetes â€” identical code, only config differs) with Delta Lake extensions, runs physical
+        Kubernetes — identical code, only config differs) with Delta Lake extensions, runs physical
         SQL over Delta tables, and maps the Spark Row result into the cache's framework-free ResultFrame.
         Ported from data_collector/src/core/spark/spark_manager.py + cluster-deployment/spark_configs.py.
 
-        Spark 4.1 supports Java 17 and 21. The cluster image supplies the matching Spark 4.1 / Scala 2.13 /
-        Delta 4.1 runtime, so those dependencies are `provided` here; this module compiles against them and
-        contributes the adapter + the pure, fully-tested config builder.
+        The Java 21 driver image (Spark 4.1.1 + Gluten +
+        Velox + Delta) supplies the Spark/Delta runtime, so those dependencies are `provided` here — this
+        module compiles against them and contributes the adapter + the pure, fully-tested config builder.
     </description>
+
+
 
     <dependencies>
         <dependency>
@@ -36,6 +38,8 @@
             <version>${spark.version}</version>
             <scope>provided</scope>
         </dependency>
+        <!-- Gluten's native planner references Spark/Hive file-format classes. -->
+        <dependency><groupId>org.apache.spark</groupId><artifactId>spark-hive_2.13</artifactId><version>${spark.version}</version><scope>provided</scope></dependency>
         <dependency>
             <groupId>io.delta</groupId>
             <artifactId>delta-spark_4.1_2.13</artifactId>

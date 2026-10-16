@@ -45,6 +45,8 @@ import java.util.logging.Logger;
  */
 public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCloseable {
 
+    private static final String WARMING_GENERATION_KEY = "QC:V4:warming_generation";
+    private static final String REVISION_KEY = "QC:V4:revision";
     private static final Logger LOGGER = Logger.getLogger(ValkeyCacheBackendAdapter.class.getName());
 
     /** Keep compressed MGET replies bounded while allowing one following request to be prefetched. */
@@ -206,19 +208,75 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
             return Optional.of(serializer.deserialize(blob));
         } catch (CacheSerializationException corrupt) {
             LOGGER.warning("evicting undecodable cache bucket " + key);
-            connection.async().del(toBytes(key));
+            evict(key);
             return Optional.empty();
         }
     }
 
     @Override
     public void store(String key, ResultFrame frame, Duration timeToLive) {
-        connection.sync().set(toBytes(key), serializer.serialize(frame), SetArgs.Builder.ex(timeToLive));
+        long ttlMillis = timeToLive.toMillis();
+        if (ttlMillis <= 0) throw new IllegalArgumentException("bucket TTL must be positive");
+        connection.sync().eval("redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2]); "
+                        + "redis.call('SET', KEYS[2], ARGV[3]); return 1", io.lettuce.core.ScriptOutputType.INTEGER,
+                new byte[][] {toBytes(key), toBytes(REVISION_KEY)}, serializer.serialize(frame),
+                toBytes(Long.toString(ttlMillis)), toBytes(java.util.UUID.randomUUID().toString()));
     }
 
     @Override
     public void evict(String key) {
-        connection.sync().del(toBytes(key));
+        connection.sync().eval("redis.call('DEL', KEYS[1]); redis.call('SET', KEYS[2], ARGV[1]); return 1",
+                io.lettuce.core.ScriptOutputType.INTEGER, new byte[][] {toBytes(key), toBytes(REVISION_KEY)},
+                toBytes(java.util.UUID.randomUUID().toString()));
+    }
+
+    @Override public Optional<String> warmingGeneration() { return token(WARMING_GENERATION_KEY); }
+
+    @Override public boolean storeForGeneration(String key, ResultFrame frame, Duration ttl, String generation) {
+        long millis = ttl.toMillis();
+        if (millis <= 0) throw new IllegalArgumentException("bucket TTL must be positive");
+        Long stored = connection.sync().eval(
+                "if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end; "
+                + "redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2]); "
+                + "redis.call('SET', KEYS[2], ARGV[3]); return 1", io.lettuce.core.ScriptOutputType.INTEGER,
+                new byte[][] {toBytes(key), toBytes(REVISION_KEY), toBytes(WARMING_GENERATION_KEY)},
+                serializer.serialize(frame), toBytes(Long.toString(millis)),
+                toBytes(java.util.UUID.randomUUID().toString()), toBytes(generation));
+        return Long.valueOf(1L).equals(stored);
+    }
+
+    @Override public Optional<String> revision() { return token(REVISION_KEY); }
+
+    private Optional<String> token(String key) {
+        RedisCommands<byte[], byte[]> sync = connection.sync();
+        byte[] revision = sync.get(toBytes(key));
+        if (revision == null) {
+            sync.setnx(toBytes(key), toBytes(java.util.UUID.randomUUID().toString()));
+            revision = sync.get(toBytes(key));
+        }
+        return Optional.ofNullable(revision).map(value -> new String(value, StandardCharsets.UTF_8));
+    }
+
+    @Override public Optional<Duration> remainingTimeToLive(List<String> keys) {
+        long started = System.nanoTime();
+        List<RedisFuture<Long>> pending = keys.stream().map(key -> connection.async().pttl(toBytes(key))).toList();
+        long minimum = Long.MAX_VALUE;
+        try {
+            for (RedisFuture<Long> future : pending) {
+                Long ttl = await(future, "PTTL");
+                if (ttl == null || ttl <= 0) return Optional.empty();
+                minimum = Math.min(minimum, ttl);
+            }
+        } catch (InterruptedException interrupted) {
+            cancelAll(pending);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted awaiting PTTL", interrupted);
+        } catch (ExecutionException | TimeoutException failure) {
+            cancelAll(pending);
+            throw new IllegalStateException("PTTL failed", failure);
+        }
+        long remaining = minimum - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        return !keys.isEmpty() && remaining > 0 ? Optional.of(Duration.ofMillis(remaining)) : Optional.empty();
     }
 
     @Override
@@ -338,6 +396,8 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         RedisCommands<byte[], byte[]> sync = connection.sync();
         ScanArgs scanArgs = ScanArgs.Builder.limit(512);
 
+        sync.set(toBytes(REVISION_KEY), toBytes(java.util.UUID.randomUUID().toString()));
+        sync.set(toBytes(WARMING_GENERATION_KEY), toBytes(java.util.UUID.randomUUID().toString()));
         long purged = 0L;
         ScanCursor cursor = ScanCursor.INITIAL;
         do {
@@ -349,6 +409,7 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
             }
             cursor = page;
         } while (!cursor.isFinished());
+        sync.set(toBytes(REVISION_KEY), toBytes(java.util.UUID.randomUUID().toString()));
         return purged;
     }
 

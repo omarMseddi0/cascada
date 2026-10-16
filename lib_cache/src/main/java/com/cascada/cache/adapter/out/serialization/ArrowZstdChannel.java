@@ -29,7 +29,7 @@ final class ArrowZstdChannel implements WritableByteChannel {
         compressor = new ZstdCompressCtx();
         ArrowBuf allocatedInput = null, allocatedOutput = null;
         try {
-            compressor.setLevel(level).setContentSize(true);
+            compressor.setLevel(level).setContentSize(true).setChecksum(true);
             compressor.setPledgedSrcSize(expectedBytes);
             allocatedInput = allocator.buffer(CHUNK_BYTES);
             allocatedOutput = allocator.buffer(CHUNK_BYTES);

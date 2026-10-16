@@ -1,8 +1,8 @@
 package com.cascada.fabric.application.service;
 
+import com.cascada.fabric.application.port.in.PrepareClusterSettingsUseCase;
 import com.cascada.fabric.application.port.out.EnvironmentPort;
 import com.cascada.fabric.domain.ClusterValues;
-
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -12,14 +12,21 @@ import java.util.Objects;
 public final class ClusterSettingsReader {
 
     private static final List<String> SETTINGS = List.of(
+            "CASCADA_TIME_COLUMN",
+            "CASCADA_MAIN_TABLE_NAME",
+            "CASCADA_MAIN_TABLE_PATH",
+            "REDIS_URL",
             "CASCADA_RELEASE_NAME",
             "CASCADA_COPY_SUFFIX",
             "CASCADA_NAMESPACE",
             "CASCADA_CONTAINER_IMAGE",
             "CASCADA_IMAGE_PULL_SECRET",
+            "CASCADA_GLUTEN_ENABLED",
+            "CASCADA_EXECUTOR_RAM_GB",
             "CASCADA_EXECUTOR_MEMORY",
             "CASCADA_EXECUTOR_CORES",
             "CASCADA_DRIVER_MEMORY",
+            "CASCADA_DRIVER_MAX_RESULT_SIZE",
             "CASCADA_MIN_EXECUTORS",
             "CASCADA_MAX_EXECUTORS",
             "CASCADA_REPLICAS",
@@ -32,9 +39,11 @@ public final class ClusterSettingsReader {
             "CASCADA_DATA_MOUNT_PATH");
 
     private final EnvironmentPort environment;
+    private final PrepareClusterSettingsUseCase settingsUseCase;
 
-    public ClusterSettingsReader(EnvironmentPort environment) {
+    public ClusterSettingsReader(EnvironmentPort environment, PrepareClusterSettingsUseCase settingsUseCase) {
         this.environment = Objects.requireNonNull(environment, "environment");
+        this.settingsUseCase = Objects.requireNonNull(settingsUseCase, "settingsUseCase");
     }
 
     public ClusterValues read() {
@@ -45,6 +54,6 @@ public final class ClusterSettingsReader {
                 settings.put(name, value);
             }
         }
-        return ClusterValues.fromSettings(settings);
+        return settingsUseCase.prepareClusterSettings(settings);
     }
 }

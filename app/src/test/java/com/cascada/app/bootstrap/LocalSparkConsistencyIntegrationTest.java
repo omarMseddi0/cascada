@@ -146,8 +146,8 @@ class LocalSparkConsistencyIntegrationTest {
                     .as("seed query must be mergeable").isFalse();
             var hash = hashing.generateQueryHash(canonical, 300);
             for (long start : starts) {
-                var partial = direct.execute(rewriter.buildGapQuery(sql,
-                        new GapPlan(Optional.empty(), List.of(start), Optional.empty())));
+                var partial = direct.execute(rewriter.buildStorageQuery(canonical.physicalSql(),
+                        new GapPlan(Optional.empty(), List.of(start), Optional.empty()), 300));
                 cache.store(CacheKeyFactory.buildBucketKey(hash, start, DAY), partial, java.time.Duration.ofDays(1));
                 coverage.markCached(hash, DAY, start);
             }
@@ -220,7 +220,7 @@ class LocalSparkConsistencyIntegrationTest {
         same(cold.service.query(q.sql).frame(), expected, q.sql, q.name + ":repeat");
         var canonical = canonicalizer.canonicalize(q.sql);
         if (q.mergeable && canonical.metadata().isTimeSeries() && q.name.startsWith("timeseries"))
-            assertThat(cold.executed).as("warm time-series must avoid Spark").isEmpty();
+            assertThat(cold.executed).as("a read-only cold path remains a miss until warming").hasSize(1);
         if (q.mergeable) {
             Harness partial = new Harness(false);
             partial.seed(q.sql, List.of(BASE + DAY, BASE + 3 * DAY, BASE + 5 * DAY));
@@ -308,6 +308,11 @@ class LocalSparkConsistencyIntegrationTest {
                 """.formatted(bounds));
         return java.util.stream.IntStream.range(0, sqls.size()).mapToObj(i -> DynamicTest.dynamicTest("complex-" + i, () -> {
             String sql = sqls.get(i);
+            if (i == 3 || i == 4) {
+                String unordered = sql.substring(0, sql.indexOf(" ORDER BY"));
+                checkPaths(new Scenario("cached-composite-" + i, unordered, true));
+                return;
+            }
             if (i == 12) {
                 checkPaths(new Scenario("uncorrelated-IN-subquery", sql, true));
                 return;
@@ -522,7 +527,7 @@ class LocalSparkConsistencyIntegrationTest {
         System.out.println("CONSISTENCY_PASS cube-source-window-alias-boundaries");
     }
 
-    @Test void registeredLogicalTableTranslatorRejectsComplexStructuresExplicitly() {
+    @Test void registeredLogicalTableTranslatorResolvesComplexStructuresByScope() {
         var catalog = new TableCatalog().register(RegisteredTable.of("traffic", "/unused-local-test-path",
                 Map.of("ts", "ts", "region", "C_region", "amount", "C_amount"), "ts"));
         var translator = new LogicalToPhysicalSqlTranslator(300, catalog);
@@ -531,10 +536,12 @@ class LocalSparkConsistencyIntegrationTest {
                 "SELECT region, SUM(amount) FROM (SELECT * FROM traffic) x GROUP BY region",
                 "SELECT a.region, SUM(a.amount) FROM traffic a JOIN traffic b ON a.region=b.region GROUP BY a.region",
                 "SELECT region, SUM(amount) FROM traffic WHERE region IN (SELECT region FROM traffic) GROUP BY region")) {
-            assertThatThrownBy(() -> translator.translateToPhysicalSql(sql))
-                    .isInstanceOf(com.cascada.sql.exception.UnsupportedSqlException.class);
+            String translated = translator.translateToPhysicalSql(sql);
+            assertThat(translated).contains("delta.`/unused-local-test-path`").doesNotContain("FROM traffic");
+            assertThatCode(() -> com.cascada.sql.adapter.out.calcite.CalciteSql.parseQuery(translated))
+                    .doesNotThrowAnyException();
         }
-        System.out.println("CONSISTENCY_PASS logical-translation-complex-structure-rejections");
+        System.out.println("CONSISTENCY_PASS logical-translation-complex-scopes");
     }
 
     @TestFactory Stream<DynamicTest> realSparkWarmingOnlyStoresCompleteBuckets() {

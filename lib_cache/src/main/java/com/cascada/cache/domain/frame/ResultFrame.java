@@ -90,6 +90,11 @@ public final class ResultFrame {
         return index;
     }
 
+    Object rowValue(int row, Object key) {
+        Integer column = columnIndexes.get(key);
+        return column == null ? null : valueAt(row, column);
+    }
+
     public int rowCount() {
         return rowCount;
     }
@@ -100,28 +105,9 @@ public final class ResultFrame {
     }
 
     /** Resolves a read-only column once for an internal typed scan. No backing array is exposed. */
-    public FrameColumnReader frameColumnReader(int column) {
+    public FrameColumnReader columnReader(int column) {
         if (column < 0 || column >= columns.length) throw new IndexOutOfBoundsException(column);
         return new FrameColumnReader(indexedTypes[column], columns[column], present[column], rowCount);
-    }
-
-    /** Retained compatibility accessor; internal scans should use {@link #frameColumnReader(int)}. */
-    public ColumnReader columnReader(int column) {
-        return new ColumnReader(frameColumnReader(column));
-    }
-
-    public static final class ColumnReader {
-        private final FrameColumnReader delegate;
-
-        private ColumnReader(FrameColumnReader delegate) { this.delegate = delegate; }
-
-        public ColumnType type() { return delegate.type(); }
-        public boolean isNullAt(int row) { return delegate.isNullAt(row); }
-        // The scan checks kind and nullness before reading. Array access still checks row bounds.
-        public long longValue(int row) { return delegate.longValue(row); }
-        public double doubleValue(int row) { return delegate.doubleValue(row); }
-        public String stringValue(int row) { return delegate.stringValue(row); }
-        public java.math.BigDecimal decimalValue(int row) { return delegate.decimalValue(row); }
     }
 
     public boolean isEmpty() {
@@ -193,18 +179,9 @@ public final class ResultFrame {
         };
     }
 
-    Object rowValue(int row, Object key) {
-        Integer column = columnIndexes.get(key);
-        return column == null ? null : valueAt(row, column);
-    }
-
     private boolean isPresent(int row, int column) {
         long[] bitmap = present[column];
         return bitmap == null || (bitmap[row >>> 6] & (1L << (row & 63))) != 0;
-    }
-
-    private static int bitmapWords(int rows) {
-        return (int) (((long) rows + 63L) >>> 6);
     }
 
     private void checkCell(int row, int column) {
@@ -230,7 +207,7 @@ public final class ResultFrame {
 
     private static ResultFrame fromRows(List<String> names, Map<String, ColumnType> types,
                                         List<Map<String, Object>> rows) {
-        ResultFrameBuilder builder = new ResultFrameBuilder();
+        ResultFrameBuilder builder = builder();
         for (String name : names) {
             builder.column(name, types.get(name));
         }
@@ -240,65 +217,9 @@ public final class ResultFrame {
         return builder.build();
     }
 
-    /** Typed column builder kept as a compatibility delegate for existing callers. */
-    public static final class Builder {
-        private final ResultFrameBuilder delegate = new ResultFrameBuilder();
+    /** Typed column builder. Use append methods in internal/vectorized paths to avoid row maps. */
 
-        public Builder expectedRows(int rows) {
-            delegate.expectedRows(rows);
-            return this;
-        }
-
-        public Builder column(String name, ColumnType type) {
-            delegate.column(name, type);
-            return this;
-        }
-
-        public Builder row(Map<String, Object> values) {
-            delegate.row(values);
-            return this;
-        }
-
-        public Builder row(Object... values) {
-            delegate.row(values);
-            return this;
-        }
-
-        public Builder appendLong(long value) {
-            delegate.appendLong(value);
-            return this;
-        }
-
-        public Builder appendDouble(double value) {
-            delegate.appendDouble(value);
-            return this;
-        }
-
-        public Builder appendString(String value) {
-            delegate.appendString(value);
-            return this;
-        }
-
-        public Builder appendDecimal(java.math.BigDecimal value) {
-            delegate.appendDecimal(value);
-            return this;
-        }
-
-        public Builder appendNull() {
-            delegate.appendNull();
-            return this;
-        }
-
-        public Builder appendCell(ResultFrame source, int row, int column) {
-            delegate.appendCell(source, row, column);
-            return this;
-        }
-
-        public ResultFrame build() {
-            return delegate.build();
-        }
-    }
-    public static Builder builder() {
-        return new Builder();
+    public static ResultFrameBuilder builder() {
+        return new ResultFrameBuilder();
     }
 }

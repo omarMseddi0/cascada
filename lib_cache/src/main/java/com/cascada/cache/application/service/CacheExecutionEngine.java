@@ -118,19 +118,28 @@ public final class CacheExecutionEngine {
         // Cube path (plan §8.12): only global aggregates with no deferred ORDER BY/LIMIT — a LIMIT
         // would register a truncated frame and a roll-up would not reapply the ordering. The lookup
         // is exact-time-window only, and every roll-up is verified before it is served.
-        boolean cubeEligible = cubeCatalog != null
+        boolean cubeShapeEligible = cubeCatalog != null
                 && !canonicalObject.metadata().isTimeSeries()
                 && !canonicalObject.postProcessing().hasLimit()
                 && !canonicalObject.postProcessing().hasOrderBy()
-                && !hasDerivedMeasures(canonicalObject);
+                && !hasDerivedMeasures(canonicalObject)
+                && canonicalObject.metadata().compositeAliases().isEmpty();
+        String revision = null;
+        if (cubeShapeEligible) {
+            try { revision = cacheBackend.revision().orElse(null); }
+            catch (RuntimeException unavailable) { propagateCancellation(unavailable); }
+        }
+        boolean cubeEligible = cubeShapeEligible && revision != null;
         QueryShape queryShape = cubeEligible
                 ? CubeShapeCatalog.shapeOf(canonicalObject)
                 : null;
         if (cubeEligible) {
-            Optional<ResultFrame> cubeAnswer = cubeCatalog.tryAnswer(canonicalObject.timeRange(), queryShape);
-            if (cubeAnswer.isPresent()) {
-                return cubeAnswer.get();
-            }
+            try {
+                Optional<ResultFrame> cubeAnswer = cubeCatalog.tryAnswer(canonicalObject.timeRange(), queryShape, revision);
+                if (cubeAnswer.isPresent() && cacheBackend.revision().filter(revision::equals).isPresent()) {
+                    return cubeAnswer.get();
+                }
+            } catch (RuntimeException unavailable) { propagateCancellation(unavailable); }
         }
 
         long startTimestamp = canonicalObject.timeRange().startTimestampSeconds();
@@ -143,7 +152,7 @@ public final class CacheExecutionEngine {
         } catch (BucketEnumerationLimitExceededException excessiveWindow) {
             // A large query is still valid SQL; bypass the cache plan before any bucket list or keys
             // are allocated and let the authoritative executor handle the requested window.
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
         }
         List<Long> bodyDays = buckets.body();
 
@@ -155,7 +164,7 @@ public final class CacheExecutionEngine {
         // Fast path 1: nothing cacheable -> run the physical SQL directly.
         if (requiredKeys.isEmpty()) {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    executeDirect(canonicalObject));
+                    executeDirect(canonicalObject), revision, List.of());
         }
 
         List<Boolean> presenceMask;
@@ -163,7 +172,7 @@ public final class CacheExecutionEngine {
             presenceMask = resolvePresence(queryHash, bodyDays, requiredKeys);
         } catch (RuntimeException cacheFailure) {
             propagateCancellation(cacheFailure);
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
         }
         List<String> cachedKeys = new ArrayList<>();
         List<Long> cachedDays = new ArrayList<>();
@@ -180,7 +189,7 @@ public final class CacheExecutionEngine {
         // Fast path 2: zero cache hits -> bypass all cache machinery. The read path never writes; the
         // warmer is the only writer, so a miss is answered and voted for warming, never stored here.
         if (cachedKeys.isEmpty()) {
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
         }
 
         GapPlan gapPlan = new GapPlan(buckets.head(), missingDays, buckets.tail());
@@ -213,7 +222,7 @@ public final class CacheExecutionEngine {
             // Prevent a queued gap task from starting after the authoritative fallback begins.
             // A running query is left untouched because the executor port has no cancellation contract.
             sparkFuture.cancel(false);
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
         }
 
         // EXISTS->MGET race guard: a bucket present at the EXISTS check can be evicted/expired
@@ -244,21 +253,26 @@ public final class CacheExecutionEngine {
 
         try {
             return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    merge.finish());
+                    merge.finish(), revision, cachedKeys);
         } catch (RuntimeException cacheOrMergeFailure) {
             propagateCancellation(cacheOrMergeFailure);
             // A decoded but corrupt/incompatible cache frame must not make the query unavailable.
             // The full physical query is authoritative and avoids trusting any cache-derived data.
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape);
+            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
         }
     }
 
     /** A complete full-window answer becomes a cube candidate for finer queries over the same window. */
     private ResultFrame catalogFullWindowAnswer(boolean cubeEligible, CanonicalQueryObject canonicalObject,
-                                                QueryShape queryShape, ResultFrame answer) {
+                                                QueryShape queryShape, ResultFrame answer, String revision, List<String> dependencies) {
         if (cubeEligible && isCompletedWindow(canonicalObject)) {
             try {
-                cubeCatalog.register(canonicalObject.timeRange(), queryShape, answer);
+                Optional<java.time.Duration> ttl = dependencies.isEmpty() ? Optional.empty()
+                        : cacheBackend.remainingTimeToLive(dependencies);
+                if (!dependencies.isEmpty() && ttl.isEmpty()) return answer;
+                if (cacheBackend.revision().filter(revision::equals).isPresent()) {
+                    cubeCatalog.register(canonicalObject.timeRange(), queryShape, answer, revision, ttl);
+                }
             } catch (RuntimeException ignored) {
                 propagateCancellation(ignored);
                 // The cube is an optional accelerator; a catalog failure cannot invalidate a query result.
@@ -296,9 +310,9 @@ public final class CacheExecutionEngine {
     }
 
     private ResultFrame executeAuthoritatively(boolean cubeEligible, CanonicalQueryObject canonicalObject,
-                                               QueryShape queryShape) {
+                                               QueryShape queryShape, String revision) {
         return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                executeDirect(canonicalObject));
+                executeDirect(canonicalObject), revision, List.of());
     }
 
     /** A window touching the live bucket would freeze in-progress data, so only finished windows are catalogued. */
@@ -312,24 +326,9 @@ public final class CacheExecutionEngine {
         return canonicalObject.metadata().measureAggregates().containsValue(AggregateFunction.AVERAGE);
     }
 
-    /**
-     * Runs the query without cached ingredients. AVG is still fetched as SUM and COUNT and divided by
-     * the merge, so the answer is computed the same way whether or not any bucket was cached.
-     */
+    /** Zero-hit requests execute the original SQL; only the warmer stores decomposed ingredients. */
     private ResultFrame executeDirect(CanonicalQueryObject canonicalObject) {
-        if (!hasDerivedMeasures(canonicalObject)) {
-            return executeSql(canonicalObject.physicalSql());
-        }
-        ResultFrame ingredients = executeSql(gapQueryRewriter.buildGapQuery(canonicalObject.physicalSql(),
-                new GapPlan(Optional.of(canonicalObject.timeRange()), List.of(), Optional.empty())));
-        IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
-        merge.add(ingredients);
-        try {
-            return merge.finish();
-        } catch (RuntimeException mergeFailure) {
-            propagateCancellation(mergeFailure);
-            return executeSql(canonicalObject.physicalSql());
-        }
+        return executeSql(canonicalObject.physicalSql());
     }
 
     private ResultFrame executeSql(String sql) {

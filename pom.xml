@@ -33,6 +33,7 @@
         <delta.version>4.1.0</delta.version>
         <hadoop.version>3.4.2</hadoop.version>
         <parquet.version>1.16.0</parquet.version>
+        <lombok.version>1.18.42</lombok.version>
         <agrona.jvm.args>--enable-native-access=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED --add-opens=java.base/java.util.zip=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED</agrona.jvm.args>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
@@ -46,7 +47,7 @@
         <arrow.version>18.3.0</arrow.version>
         <zstd.version>1.5.6-3</zstd.version>
         <lettuce.version>6.3.2.RELEASE</lettuce.version>
-        <fabric8.version>6.13.4</fabric8.version>
+        <fabric8.version>7.9.0</fabric8.version>
 
         <surefire.plugin.version>3.2.5</surefire.plugin.version>
         <compiler.plugin.version>3.13.0</compiler.plugin.version>
@@ -66,6 +67,14 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- Calcite requires the JRE Supplier bridge; gRPC otherwise selects Android Guava. -->
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>33.4.8-jre</version>
+            </dependency>
+            <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>2.0.17</version></dependency>
+            <dependency><groupId>io.netty</groupId><artifactId>netty-bom</artifactId><version>4.2.7.Final</version><type>pom</type><scope>import</scope></dependency>
             <!-- Test stack (pinned once for every module) -->
             <dependency>
                 <groupId>org.junit</groupId>
@@ -203,6 +212,15 @@
 
     <profiles>
         <profile>
+            <id>validation</id>
+            <!-- Isolate CLI verification from IDE auto-builders that write target/classes. -->
+            <build><directory>${project.basedir}/target/validation/target</directory></build>
+        </profile>
+        <profile>
+            <id>distribution</id>
+            <build><directory>${project.basedir}/target/distribution</directory></build>
+        </profile>
+        <profile>
             <id>benchmarks</id>
             <!-- Keep reproducible test/benchmark bytecode separate from IDE auto-build output. -->
             <!-- Keep the standard target/test-classes suffix for ArchUnit test exclusion. -->
@@ -217,11 +235,19 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
                     <version>${compiler.plugin.version}</version>
+                    <configuration><fork>true</fork><meminitial>128m</meminitial><maxmem>512m</maxmem></configuration>
+                    <dependencies>
+                        <!-- Forked javac must bypass Windows cmd AutoRun, like protoc. -->
+                        <dependency><groupId>org.codehaus.plexus</groupId><artifactId>plexus-utils</artifactId><version>4.0.3</version></dependency>
+                    </dependencies>
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${surefire.plugin.version}</version>
+                    <dependencies>
+                        <dependency><groupId>org.codehaus.plexus</groupId><artifactId>plexus-utils</artifactId><version>4.0.3</version></dependency>
+                    </dependencies>
                     <configuration><argLine>${agrona.jvm.args} --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED</argLine></configuration>
                 </plugin>
                 <plugin>

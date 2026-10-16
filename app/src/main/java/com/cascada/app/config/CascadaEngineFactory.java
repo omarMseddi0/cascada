@@ -90,8 +90,9 @@ public final class CascadaEngineFactory implements AutoCloseable {
                 new WarmingQueue(warming.maximumPatterns()), popularityTracker, coverageIndex, canonicalizer(),
                 dataChangeDetector(), cubeCatalog,
                 new WarmingConfiguration(settings.cacheExecution().bucketSeconds(), settings.warmingTopNQueries(),
-                        warming.maximumPatterns(), warming.lookback(), applicationSettings.cacheSafety().maximumCachedRows()),
-                Clock.systemUTC());
+                        warming.maximumPatterns(), warming.lookback(), applicationSettings.cacheSafety().maximumCachedRows(),
+                        settings.cacheExecution().fixedStepSeconds()),
+                Clock.systemUTC(), validatedConfiguration);
         CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
                 gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks);
         this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
@@ -145,7 +146,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
         WarmingSettings warming = applicationSettings.warming();
         return warming.hasValidationSql()
                 ? new DataChangeDetector(cacheBackend, translator(), queryExecutor, warming.validationSql(),
-                        warming.lookback())
+                        warming.lookback(), settings.cacheExecution().timeColumnName())
                 : null;
     }
 
@@ -174,7 +175,11 @@ public final class CascadaEngineFactory implements AutoCloseable {
         timeColumns.add(settings.cacheExecution().timeColumnName());
         applicationSettings.tables().forEach(table -> table.timeColumns().forEach(logicalName ->
                 timeColumns.add(table.columnMappings().get(logicalName))));
-        return new CalciteCanonicalObjectFactory(new TimeDimensionMap(timeColumns));
+        java.util.Set<String> batchPaths = applicationSettings.tables().isEmpty()
+                ? java.util.Set.of(settings.mainTablePath())
+                : applicationSettings.tables().stream().filter(table -> table.sourceType().equals("HOT_BATCH"))
+                        .map(TableSettings::deltaPath).collect(java.util.stream.Collectors.toSet());
+        return new CalciteCanonicalObjectFactory(new TimeDimensionMap(timeColumns), batchPaths);
     }
 
     /**

@@ -1,0 +1,138 @@
+package com.cascada.sparkconfig.application.service;
+
+import com.cascada.sparkconfig.application.port.in.DeriveSparkConfigurationUseCase;
+import com.cascada.sparkconfig.domain.ExecutorPlacement;
+import com.cascada.sparkconfig.domain.SparkConfiguration;
+import com.cascada.sparkconfig.domain.SparkMemorySplit;
+import com.cascada.sparkconfig.domain.WorkloadType;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
+
+/**
+ * The zero-config derivation (plan §6.6, Appendix G; ARCHITECTURE §8). A pure function that turns
+ * the three knobs — RAM, CPU, placement — plus an optional workload hint into every Spark/Delta flag,
+ * and reproduces the golden {@code data_collector/src/spark.json} for the reference knobs.
+ *
+ * <p>Being a pure function is the design's leverage: if Gluten changes its memory expectations we edit
+ * one method, not ten thousand customer configs, and the golden test re-runs on every image bump.
+ *
+ * <p>Derivation rules of note:
+ * <ul>
+ *   <li>{@code spark.kubernetes.executor.limit.cores = executor.cores + 1} (golden: 19 vs 18);</li>
+ *   <li>AQE and Arrow are always on (free wins; never exposed as toggles);</li>
+ *   <li>the Delta extension/catalog and the advisory partition size track the table profile (golden:
+ *       267108864);</li>
+ *   <li>min/max executors come from the placement budget;</li>
+ *   <li>off-heap is sized only when the workload uses Gluten/Velox, so a misconfiguration cannot OOM
+ *       — and the customer never sees {@code offHeap}.</li>
+ * </ul>
+ */
+public final class SparkConfigurationDeriver implements DeriveSparkConfigurationUseCase {
+
+    static final long ADVISORY_PARTITION_SIZE_BYTES = 267_108_864L;
+    static final String REFERENCE_DRIVER_MEMORY = "2g";
+    static final int REFERENCE_INITIAL_EXECUTOR_COUNT = 3;
+    static final int REFERENCE_SHUFFLE_PARTITIONS = 254;
+    static final String DELTA_EXTENSION = "io.delta.sql.DeltaSparkSessionExtension";
+    static final String DELTA_CATALOG = "org.apache.spark.sql.delta.catalog.DeltaCatalog";
+
+    /** Splits one executor's RAM between heap, Gluten off-heap, and overhead (invariant: sum <= RAM). */
+    public SparkMemorySplit deriveMemorySplit(int randomAccessMemoryGigabytes, boolean glutenOffHeapEnabled) {
+        if (randomAccessMemoryGigabytes < 2) {
+            throw new IllegalArgumentException("RAM must be at least 2 GiB to fit the minimum supported "
+                    + "executor heap and explicit Spark overhead, but was: " + randomAccessMemoryGigabytes + " GiB");
+        }
+        int overhead = Math.max(1, randomAccessMemoryGigabytes / 10);
+        if (!glutenOffHeapEnabled) {
+            return new SparkMemorySplit(randomAccessMemoryGigabytes - overhead, 0, overhead);
+        }
+        // Reserve at least 1 GiB overhead, give the majority of the remainder to Velox off-heap.
+        int remaining = randomAccessMemoryGigabytes - overhead;
+        int offHeap = (int) (((long) remaining * 6) / 10);
+        int heap = remaining - offHeap;
+        return new SparkMemorySplit(heap, offHeap, overhead);
+    }
+
+    /** The main entry point: the three knobs (+ workload hint) to a complete configuration. */
+    public SparkConfiguration deriveSparkConfigurationFromThreeKnobs(int randomAccessMemoryGigabytes,
+                                                                     int processorCoreCount,
+                                                                     ExecutorPlacement executorPlacement,
+                                                                     WorkloadType workloadType) {
+        if (processorCoreCount <= 0 || processorCoreCount == Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("core count must be between 1 and " + (Integer.MAX_VALUE - 1)
+                    + ", but was: " + processorCoreCount);
+        }
+        Objects.requireNonNull(executorPlacement, "executorPlacement");
+        Objects.requireNonNull(workloadType, "workloadType");
+
+        SparkMemorySplit memorySplit =
+                deriveMemorySplit(randomAccessMemoryGigabytes, workloadType.isGlutenOffHeapEnabled());
+
+        Map<String, String> entries = new LinkedHashMap<>();
+
+        // --- Core executor / driver shape ---
+        entries.put("spark.executor.memory", memorySplit.heapAsSparkMemoryString());
+        entries.put("spark.executor.cores", Integer.toString(processorCoreCount));
+        entries.put("spark.kubernetes.executor.limit.cores", Integer.toString(processorCoreCount + 1));
+        int minimumExecutors = executorPlacement.minimumExecutors();
+        int maximumExecutors = executorPlacement.maximumExecutors();
+        // Keep the startup target within the same placement budget as dynamic allocation. The
+        // reference placement remains at three executors, matching the golden profile.
+        int initialExecutors = Math.max(minimumExecutors,
+                Math.min(REFERENCE_INITIAL_EXECUTOR_COUNT, maximumExecutors));
+        entries.put("spark.executor.instances", Integer.toString(initialExecutors));
+        entries.put("spark.driver.memory", REFERENCE_DRIVER_MEMORY);
+        if (workloadType.isGlutenOffHeapEnabled()) {
+            if (memorySplit.offHeapGigabytes() == 0) {
+                throw new IllegalArgumentException("Gluten requires at least 3 GiB executor RAM");
+            }
+            entries.put("spark.plugins", "org.apache.gluten.GlutenPlugin");
+            entries.put("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager");
+        }
+        if (memorySplit.offHeapGigabytes() > 0) {
+            entries.put("spark.memory.offHeap.enabled", "true");
+            entries.put("spark.memory.offHeap.size", memorySplit.offHeapGigabytes() + "g");
+        }
+        if (memorySplit.overheadGigabytes() > 0) {
+            // The reserved overhead must reach Kubernetes explicitly: without this key Spark adds its
+            // own default (10% of heap) ON TOP of heap + off-heap, and the pod exceeds the RAM knob —
+            // the scheduler then rejects or OOMKills the executor.
+            entries.put("spark.executor.memoryOverhead", memorySplit.overheadGigabytes() + "g");
+        }
+
+        // --- Delta extension / catalog / file sizing (always on; advisory size tracks the profile) ---
+        entries.put("spark.sql.extensions", DELTA_EXTENSION);
+        entries.put("spark.sql.catalog.spark_catalog", DELTA_CATALOG);
+        entries.put("spark.sql.files.maxPartitionBytes", Long.toString(ADVISORY_PARTITION_SIZE_BYTES));
+        entries.put("spark.databricks.delta.optimize.maxFileSize", Long.toString(ADVISORY_PARTITION_SIZE_BYTES));
+        entries.put("spark.sql.adaptive.advisoryPartitionSizeInBytes", Long.toString(ADVISORY_PARTITION_SIZE_BYTES));
+
+        // --- AQE always on (free wins, never a customer toggle) ---
+        entries.put("spark.sql.adaptive.enabled", "true");
+        entries.put("spark.sql.adaptive.skewJoin.enabled", "true");
+        entries.put("spark.sql.adaptive.coalescePartitions.enabled", "true");
+        entries.put("spark.sql.adaptive.localShuffleReader.enabled", "true");
+
+        // --- Arrow always on ---
+        entries.put("spark.sql.execution.arrow.pyspark.enabled", "true");
+
+        // --- Parallelism (AQE re-coalesces at runtime, so the static baseline barely matters) ---
+        entries.put("spark.default.parallelism", Integer.toString(REFERENCE_SHUFFLE_PARTITIONS));
+        entries.put("spark.sql.shuffle.partitions", Integer.toString(REFERENCE_SHUFFLE_PARTITIONS));
+
+        // --- Dynamic allocation from the placement budget ---
+        entries.put("spark.dynamicAllocation.enabled", "true");
+        // On Kubernetes there is no external shuffle service, so dynamic allocation is only legal
+        // with shuffle tracking — without this key Spark refuses to start the application at all.
+        entries.put("spark.dynamicAllocation.shuffleTracking.enabled", "true");
+        entries.put("spark.dynamicAllocation.minExecutors", Integer.toString(minimumExecutors));
+        entries.put("spark.dynamicAllocation.maxExecutors", Integer.toString(maximumExecutors));
+
+        // --- Placement compiled to a Kubernetes node-selector hint ---
+        entries.put("spark.kubernetes.node.selector." + executorPlacement.nodeSelectorLabel(),
+                executorPlacement.nodeSelectorValue());
+
+        return new SparkConfiguration(entries);
+    }
+}

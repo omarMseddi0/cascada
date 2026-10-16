@@ -32,6 +32,9 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
     private final CacheValueSerializerPort serializer;
     private final Clock clock;
     private final AtomicLong existsCalls = new AtomicLong();
+    private long writes;
+    private volatile String revision = java.util.UUID.randomUUID().toString();
+    private String warmingGeneration = java.util.UUID.randomUUID().toString();
 
     public InMemoryBlobCacheBackendAdapter(CacheValueSerializerPort serializer) {
         this(serializer, Clock.systemUTC());
@@ -59,13 +62,40 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
     }
 
     @Override
-    public void store(String key, ResultFrame frame, Duration timeToLive) {
+    public synchronized void store(String key, ResultFrame frame, Duration timeToLive) {
+        if ((writes++ & 63) == 0) {
+            var now = clock.instant();
+            blobsByKey.entrySet().removeIf(entry -> !now.isBefore(entry.getValue().expiresAt()));
+        }
         blobsByKey.put(key, new StoredBlob(serializer.serialize(frame), clock.instant().plus(timeToLive)));
+        revision = java.util.UUID.randomUUID().toString();
     }
 
     @Override
-    public void evict(String key) {
+    public synchronized void evict(String key) {
         blobsByKey.remove(key);
+        revision = java.util.UUID.randomUUID().toString();
+    }
+
+    @Override public synchronized Optional<String> revision() { return Optional.of(revision); }
+
+    @Override public synchronized Optional<String> warmingGeneration() { return Optional.of(warmingGeneration); }
+    @Override public synchronized boolean storeForGeneration(String key, ResultFrame frame, Duration ttl, String generation) {
+        if (!warmingGeneration.equals(generation)) return false;
+        store(key, frame, ttl);
+        return true;
+    }
+
+    @Override public synchronized Optional<Duration> remainingTimeToLive(List<String> keys) {
+        Duration minimum = null;
+        for (String key : keys) {
+            StoredBlob blob = blobsByKey.get(key);
+            if (blob == null) return Optional.empty();
+            Duration ttl = Duration.between(clock.instant(), blob.expiresAt());
+            if (ttl.isNegative() || ttl.isZero()) return Optional.empty();
+            if (minimum == null || ttl.compareTo(minimum) < 0) minimum = ttl;
+        }
+        return Optional.ofNullable(minimum);
     }
 
     @Override
@@ -96,9 +126,11 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
     }
 
     @Override
-    public long flush(CacheScope scope) {
+    public synchronized long flush(CacheScope scope) {
+        warmingGeneration = java.util.UUID.randomUUID().toString();
         List<String> matchingKeys = blobsByKey.keySet().stream().filter(scope::matches).toList();
         matchingKeys.forEach(blobsByKey::remove);
+        revision = java.util.UUID.randomUUID().toString();
         return matchingKeys.size();
     }
 
@@ -113,8 +145,11 @@ public final class InMemoryBlobCacheBackendAdapter implements CacheBackendPort {
     }
 
     private Optional<StoredBlob> liveBlob(String key) {
-        return Optional.ofNullable(blobsByKey.get(key))
-                .filter(stored -> clock.instant().isBefore(stored.expiresAt()));
+        StoredBlob stored = blobsByKey.get(key);
+        if (stored == null) return Optional.empty();
+        if (clock.instant().isBefore(stored.expiresAt())) return Optional.of(stored);
+        blobsByKey.remove(key, stored);
+        return Optional.empty();
     }
 
     private Optional<ResultFrame> decodeOrEvict(String key) {

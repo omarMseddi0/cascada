@@ -44,3 +44,7 @@ __pycache__/
 
 # Ignore every bench/benchmark folder at any depth.
 **/bench*/
+
+# Local benchmark files anywhere, including runners/scripts, fixtures and result files.
+# Match bench/benchmark names regardless of letter case, even outside benchmark directories.
+**/*[Bb][Ee][Nn][Cc][Hh]*

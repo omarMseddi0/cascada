@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.admin;
+package com.cascada.cache.domain.model.admin;
 
 /** A stable storage-size snapshot for all cached query buckets. */
 public record CacheSizeReport(long totalBytes, long bucketCount) {

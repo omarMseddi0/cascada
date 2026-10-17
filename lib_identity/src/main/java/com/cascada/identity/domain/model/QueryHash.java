@@ -1,4 +1,4 @@
-package com.cascada.identity.domain;
+package com.cascada.identity.domain.model;
 
 import java.util.regex.Pattern;
 

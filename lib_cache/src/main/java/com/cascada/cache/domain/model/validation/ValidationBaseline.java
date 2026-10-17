@@ -1,6 +1,6 @@
-package com.cascada.cache.domain.validation;
+package com.cascada.cache.domain.model.validation;
 
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.time.TimeRange;
 import java.util.Objects;
 
 /** The validation query's signature over a frozen window of complete historical buckets. */

@@ -1,6 +1,6 @@
-package com.cascada.cache.domain.query;
+package com.cascada.cache.domain.model.query;
 
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.Objects;
 
 /** A popular query family plus the physical SQL that rebuilds its canonical object after a restart. */

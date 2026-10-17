@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.time;
+package com.cascada.cache.domain.model.time;
 
 import java.util.List;
 import java.util.Optional;

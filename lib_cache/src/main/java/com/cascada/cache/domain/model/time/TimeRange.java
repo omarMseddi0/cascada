@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.time;
+package com.cascada.cache.domain.model.time;
 
 /**
  * A half-bounded-inclusive window of epoch seconds {@code [startTimestampSeconds, endTimestampSeconds]}.

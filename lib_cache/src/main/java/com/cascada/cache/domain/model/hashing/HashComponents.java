@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.hashing;
+package com.cascada.cache.domain.model.hashing;
 
 import java.util.List;
 

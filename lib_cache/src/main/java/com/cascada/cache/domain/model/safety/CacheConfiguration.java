@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.safety;
+package com.cascada.cache.domain.model.safety;
 
 import com.cascada.cache.domain.time.CacheTimeConstants;
 import java.util.Optional;

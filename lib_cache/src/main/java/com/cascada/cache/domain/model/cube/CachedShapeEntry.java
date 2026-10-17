@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.cube;
+package com.cascada.cache.domain.model.cube;
 
 import com.cascada.cache.domain.frame.ResultFrame;
 

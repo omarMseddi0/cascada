@@ -1,7 +1,8 @@
 package com.cascada.cache.application.service.cube;
 
-import com.cascada.cache.domain.cube.CachedShapeEntry;
-import com.cascada.cache.domain.cube.QueryShape;
+import com.cascada.cache.application.model.cube.CubeVerificationResult;
+import com.cascada.cache.domain.model.cube.CachedShapeEntry;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;

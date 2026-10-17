@@ -2,9 +2,9 @@ package com.cascada.cache.application.service.time;
 
 import com.cascada.cache.domain.time.BucketMath;
 import com.cascada.cache.domain.time.CacheTimeConstants;
-import com.cascada.cache.domain.time.DailyBuckets;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.time.DailyBuckets;
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.cache.domain.model.time.TimeRange;
 import com.cascada.cache.exception.BucketEnumerationLimitExceededException;
 import java.math.BigInteger;
 import java.util.ArrayList;

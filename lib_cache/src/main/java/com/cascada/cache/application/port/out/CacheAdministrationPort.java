@@ -1,7 +1,7 @@
 package com.cascada.cache.application.port.out;
 
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 
 /** Storage operations used by cache administration and operations tooling. */
 public interface CacheAdministrationPort {

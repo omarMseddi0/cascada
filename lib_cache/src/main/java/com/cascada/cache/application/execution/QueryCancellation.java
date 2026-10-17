@@ -1,5 +1,6 @@
 package com.cascada.cache.application.execution;
 
+import com.cascada.cache.application.model.CancellationRegistration;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;

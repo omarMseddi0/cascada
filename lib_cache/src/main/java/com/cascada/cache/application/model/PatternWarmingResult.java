@@ -1,4 +1,4 @@
-package com.cascada.cache.application.result;
+package com.cascada.cache.application.model;
 
 public record PatternWarmingResult(int bucketsWarmed, int bucketsSkipped) {
     public PatternWarmingResult {

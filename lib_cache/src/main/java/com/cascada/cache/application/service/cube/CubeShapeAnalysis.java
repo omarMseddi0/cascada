@@ -1,15 +1,16 @@
 package com.cascada.cache.application.service.cube;
 
+import com.cascada.cache.application.model.cube.CubeAverageColumn;
 import com.cascada.cache.application.service.merge.AggregateFunctionResolver;
 import com.cascada.cache.application.service.merge.AggregateOperation;
 import com.cascada.cache.application.service.merge.SparkValues;
-import com.cascada.cache.domain.cube.CachedShapeEntry;
-import com.cascada.cache.domain.cube.QueryShape;
+import com.cascada.cache.domain.model.cube.CachedShapeEntry;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.cache.domain.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.exception.CubeRollUpUnavailableException;
 import java.math.BigDecimal;
 import java.util.ArrayList;

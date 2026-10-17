@@ -2,24 +2,24 @@ package com.cascada.cache.application.service;
 
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.application.result.QueryResult;
-import com.cascada.cache.application.result.WarmingReport;
+import com.cascada.cache.application.model.QueryResult;
+import com.cascada.cache.application.model.WarmingReport;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRule;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.safety.BypassReason;
-import com.cascada.cache.domain.safety.CacheConfiguration;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -112,7 +112,7 @@ class ExecuteCachedQueryServiceTest {
                 new InMemoryBlobCacheBackendAdapter(serializer), spark,
                 (physicalSql, gapPlan) -> "GAP_SQL", CacheExecutionConfiguration.defaults());
         WarmCacheUseCase unavailableWarmer = new WarmCacheUseCase() {
-            @Override public void recordQuery(com.cascada.identity.domain.QueryHash hash,
+            @Override public void recordQuery(com.cascada.identity.domain.model.QueryHash hash,
                                               CanonicalQueryObject canonicalObject) {
                 throw new IllegalStateException("warming tracker unavailable");
             }

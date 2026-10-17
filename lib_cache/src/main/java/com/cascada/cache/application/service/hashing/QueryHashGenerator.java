@@ -1,9 +1,9 @@
 package com.cascada.cache.application.service.hashing;
 
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.time.CacheTimeConstants;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.identity.domain.model.QueryHash;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;

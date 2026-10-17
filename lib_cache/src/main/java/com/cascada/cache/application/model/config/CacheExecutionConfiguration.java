@@ -1,4 +1,4 @@
-package com.cascada.cache.application.config;
+package com.cascada.cache.application.model.config;
 
 import com.cascada.cache.domain.time.CacheTimeConstants;
 

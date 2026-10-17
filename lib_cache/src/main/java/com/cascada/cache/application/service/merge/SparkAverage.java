@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.merge;
 
+import com.cascada.cache.application.model.merge.AverageColumn;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;

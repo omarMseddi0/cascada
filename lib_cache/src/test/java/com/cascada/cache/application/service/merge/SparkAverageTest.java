@@ -1,4 +1,4 @@
-package com.cascada.cache.domain.merge;
+package com.cascada.cache.application.service.merge;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;

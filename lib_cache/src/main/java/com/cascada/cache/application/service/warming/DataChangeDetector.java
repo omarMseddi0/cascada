@@ -1,12 +1,13 @@
 package com.cascada.cache.application.service.warming;
 
+import com.cascada.cache.application.model.warming.ValidationCheck;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.ValidationBaselinePort;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.validation.ValidationBaseline;
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.domain.model.validation.ValidationBaseline;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;

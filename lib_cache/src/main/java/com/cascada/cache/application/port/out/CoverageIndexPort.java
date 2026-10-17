@@ -1,8 +1,7 @@
 package com.cascada.cache.application.port.out;
 
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
-import com.cascada.identity.domain.QueryHash;
-
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.Optional;
 
 /**

@@ -1,5 +1,7 @@
 package com.cascada.sparkconfig.domain;
 
+import com.cascada.sparkconfig.domain.model.SparkMemorySplit;
+import com.cascada.sparkconfig.domain.model.SparkConfiguration;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.constraints.IntRange;

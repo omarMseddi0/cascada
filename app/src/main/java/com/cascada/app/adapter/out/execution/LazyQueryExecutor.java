@@ -2,7 +2,6 @@ package com.cascada.app.adapter.out.execution;
 
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.frame.ResultFrame;
-
 import java.util.Objects;
 import java.util.function.Supplier;
 import java.util.concurrent.locks.ReentrantReadWriteLock;

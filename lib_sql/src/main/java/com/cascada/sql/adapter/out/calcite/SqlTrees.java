@@ -1,7 +1,7 @@
 package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.sql.domain.TimeDimensionMap;
+import com.cascada.sql.domain.model.TimeDimensionMap;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;

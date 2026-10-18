@@ -1,9 +1,8 @@
 package com.cascada.sql.adapter.calcite;
 
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.cache.domain.model.time.TimeRange;
 import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Optional;
 

@@ -1,5 +1,6 @@
 package com.cascada.spark.adapter.out.spark;
 
+import com.cascada.spark.adapter.out.spark.model.SparkColumnPlan;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;

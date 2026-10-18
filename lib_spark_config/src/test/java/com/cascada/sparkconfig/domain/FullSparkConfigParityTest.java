@@ -1,8 +1,8 @@
 package com.cascada.sparkconfig.domain;
 
+import com.cascada.sparkconfig.domain.model.SparkConfiguration;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
 import java.io.IOException;
 import java.util.Map;
 

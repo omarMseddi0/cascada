@@ -3,7 +3,7 @@ package com.cascada.cache.application.service;
 import java.time.Duration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.BucketCachePort;
@@ -13,18 +13,18 @@ import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.time.TimeBucketCalculator;
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -135,10 +135,10 @@ class CacheExecutionEngineTest {
                 delegate.store(key, frame, timeToLive);
             }
             @Override public void evict(String key) { delegate.evict(key); }
-            @Override public Optional<com.cascada.cache.domain.validation.ValidationBaseline> loadValidationBaseline() {
+            @Override public Optional<com.cascada.cache.domain.model.validation.ValidationBaseline> loadValidationBaseline() {
                 return delegate.loadValidationBaseline();
             }
-            @Override public void saveValidationBaseline(com.cascada.cache.domain.validation.ValidationBaseline baseline,
+            @Override public void saveValidationBaseline(com.cascada.cache.domain.model.validation.ValidationBaseline baseline,
                                                          Duration timeToLive) {
                 delegate.saveValidationBaseline(baseline, timeToLive);
             }
@@ -378,8 +378,8 @@ class CacheExecutionEngineTest {
             }
             @Override public void store(String key, ResultFrame frame, Duration timeToLive) { }
             @Override public void evict(String key) { }
-            @Override public Optional<com.cascada.cache.domain.validation.ValidationBaseline> loadValidationBaseline() { return Optional.empty(); }
-            @Override public void saveValidationBaseline(com.cascada.cache.domain.validation.ValidationBaseline baseline, Duration timeToLive) { }
+            @Override public Optional<com.cascada.cache.domain.model.validation.ValidationBaseline> loadValidationBaseline() { return Optional.empty(); }
+            @Override public void saveValidationBaseline(com.cascada.cache.domain.model.validation.ValidationBaseline baseline, Duration timeToLive) { }
             @Override public CacheSizeReport sizeReport() { return CacheSizeReport.empty(); }
             @Override public long flush(com.cascada.cache.domain.admin.CacheScope scope) { return 0; }
         };
@@ -408,8 +408,8 @@ class CacheExecutionEngineTest {
             }
             @Override public void store(String key, ResultFrame frame, Duration timeToLive) { }
             @Override public void evict(String key) { }
-            @Override public Optional<com.cascada.cache.domain.validation.ValidationBaseline> loadValidationBaseline() { return Optional.empty(); }
-            @Override public void saveValidationBaseline(com.cascada.cache.domain.validation.ValidationBaseline baseline, Duration timeToLive) { }
+            @Override public Optional<com.cascada.cache.domain.model.validation.ValidationBaseline> loadValidationBaseline() { return Optional.empty(); }
+            @Override public void saveValidationBaseline(com.cascada.cache.domain.model.validation.ValidationBaseline baseline, Duration timeToLive) { }
             @Override public CacheSizeReport sizeReport() { return CacheSizeReport.empty(); }
             @Override public long flush(com.cascada.cache.domain.admin.CacheScope scope) { return 0; }
         };
@@ -441,8 +441,8 @@ class CacheExecutionEngineTest {
             @Override public List<Optional<ResultFrame>> multiGet(List<String> keys) { throw new AssertionError(); }
             @Override public void store(String key, ResultFrame frame, Duration timeToLive) { throw new AssertionError(); }
             @Override public void evict(String key) { }
-            @Override public Optional<com.cascada.cache.domain.validation.ValidationBaseline> loadValidationBaseline() { return Optional.empty(); }
-            @Override public void saveValidationBaseline(com.cascada.cache.domain.validation.ValidationBaseline baseline, Duration timeToLive) { }
+            @Override public Optional<com.cascada.cache.domain.model.validation.ValidationBaseline> loadValidationBaseline() { return Optional.empty(); }
+            @Override public void saveValidationBaseline(com.cascada.cache.domain.model.validation.ValidationBaseline baseline, Duration timeToLive) { }
             @Override public CacheSizeReport sizeReport() { return CacheSizeReport.empty(); }
             @Override public long flush(com.cascada.cache.domain.admin.CacheScope scope) { return 0; }
         };

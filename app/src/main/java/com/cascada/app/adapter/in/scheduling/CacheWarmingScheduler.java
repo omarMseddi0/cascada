@@ -1,6 +1,6 @@
 package com.cascada.app.adapter.in.scheduling;
 
-import com.cascada.app.config.WarmingSettings;
+import com.cascada.app.model.config.WarmingSettings;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;

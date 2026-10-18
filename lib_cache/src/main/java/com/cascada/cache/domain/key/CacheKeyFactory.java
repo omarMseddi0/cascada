@@ -1,6 +1,6 @@
 package com.cascada.cache.domain.key;
 
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.identity.domain.model.QueryHash;
 
 /**
  * Builds cache keys using the established bucket wire format:

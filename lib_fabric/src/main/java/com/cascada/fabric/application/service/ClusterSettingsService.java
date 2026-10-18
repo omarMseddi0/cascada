@@ -4,7 +4,7 @@ import com.cascada.sparkconfig.domain.SparkReference;
 import com.cascada.fabric.application.port.in.PrepareClusterSettingsUseCase;
 import com.cascada.fabric.application.port.out.ExecutorMemorySizingPort;
 import com.cascada.fabric.domain.ClusterValues;
-import com.cascada.sparkconfig.domain.SparkMemorySplit;
+import com.cascada.sparkconfig.domain.model.SparkMemorySplit;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;

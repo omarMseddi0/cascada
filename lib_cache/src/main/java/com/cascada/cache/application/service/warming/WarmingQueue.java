@@ -1,7 +1,6 @@
 package com.cascada.cache.application.service.warming;
 
-import com.cascada.identity.domain.QueryHash;
-
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;

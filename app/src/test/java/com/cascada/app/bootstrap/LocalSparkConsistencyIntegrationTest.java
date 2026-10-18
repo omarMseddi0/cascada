@@ -1,30 +1,35 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.cache.application.service.WarmingOrchestrator;
+import com.cascada.cache.application.service.FrameMergeService;
+import com.cascada.cache.application.service.ExecuteLogicalQueryService;
+import com.cascada.cache.application.service.ExecuteCachedQueryService;
+import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.adapter.out.sketch.HyperLogLogDistinctCounter;
 import com.cascada.cache.adapter.out.sketch.KllQuantileEstimator;
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.*;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.cube.CubeSubsumptionPlanner;
 import com.cascada.cache.application.service.cube.CubeConsistencyVerifier;
-import com.cascada.cache.domain.cube.CachedShapeEntry;
-import com.cascada.cache.domain.cube.QueryShape;
+import com.cascada.cache.domain.model.cube.CachedShapeEntry;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.safety.CacheConfiguration;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.cache.domain.model.time.TimeRange;
 import com.cascada.sql.adapter.out.calcite.CalciteCanonicalObjectFactory;
 import com.cascada.sql.adapter.out.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.adapter.out.calcite.LogicalToPhysicalSqlTranslator;
-import com.cascada.sql.domain.RegisteredTable;
+import com.cascada.sql.domain.model.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import java.math.BigDecimal;
@@ -484,7 +489,7 @@ class LocalSparkConsistencyIntegrationTest {
                     + " GROUP BY FLOOR(ts/300)*300, region ORDER BY ts, region";
             var stored = canonicalizer.canonicalize(storedSql);
             var m = stored.metadata();
-            var metadata = new com.cascada.cache.domain.query.QueryMetadata(true, m.stalenessToleranceMillis(),
+            var metadata = new com.cascada.cache.domain.model.query.QueryMetadata(true, m.stalenessToleranceMillis(),
                     m.originalAggregates(), m.compositeAliases(), Optional.of(step), false, m.aggregateSpecs(), m.measureAggregates());
             var request = new CanonicalQueryObject(stored.hashComponents(), stored.timeRange(), stored.postProcessing(),
                     metadata, storedSql, stored.sourceSignature(), stored.projectionSignature(), stored.logicSignature());

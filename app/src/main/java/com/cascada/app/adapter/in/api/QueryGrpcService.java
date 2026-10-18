@@ -1,5 +1,6 @@
 package com.cascada.app.adapter.in.api;
 
+import com.cascada.app.adapter.in.api.model.ParquetResult;
 import com.cascada.app.adapter.in.grpc.protocol.*;
 import com.cascada.app.concurrent.RequestExecutor;
 import com.cascada.app.config.ServerSettings;

@@ -2,8 +2,8 @@ package com.cascada.cache.adapter.out.tracking;
 
 import com.cascada.cache.application.port.out.QueryPopularityPort;
 import com.cascada.cache.domain.key.CacheKeyConstants;
-import com.cascada.cache.domain.query.PopularQuery;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.query.PopularQuery;
+import com.cascada.identity.domain.model.QueryHash;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.async.RedisAsyncCommands;

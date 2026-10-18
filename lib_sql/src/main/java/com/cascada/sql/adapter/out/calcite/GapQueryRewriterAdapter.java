@@ -1,7 +1,7 @@
 package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
-import com.cascada.cache.domain.time.GapPlan;
+import com.cascada.cache.domain.model.time.GapPlan;
 
 /**
  * Adapts the Apache Calcite-based {@link GapQueryBuilder} to the cache's {@link GapQueryRewriterPort}, so
@@ -17,7 +17,7 @@ public final class GapQueryRewriterAdapter implements GapQueryRewriterPort {
     }
 
     /** Recognises every configured time column; gaps are injected on the column the query's window uses. */
-    public GapQueryRewriterAdapter(com.cascada.sql.domain.TimeDimensionMap timeDimensions, String defaultTimeColumn,
+    public GapQueryRewriterAdapter(com.cascada.sql.domain.model.TimeDimensionMap timeDimensions, String defaultTimeColumn,
                                    long bucketSeconds) {
         this.gapQueryBuilder = new GapQueryBuilder(timeDimensions, defaultTimeColumn, bucketSeconds);
     }

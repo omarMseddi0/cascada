@@ -4,22 +4,22 @@ import java.time.Duration;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -75,12 +75,12 @@ class CoverageIndexedEngineTest {
         }
 
         @Override
-        public Optional<com.cascada.cache.domain.validation.ValidationBaseline> loadValidationBaseline() {
+        public Optional<com.cascada.cache.domain.model.validation.ValidationBaseline> loadValidationBaseline() {
             return delegate.loadValidationBaseline();
         }
 
         @Override
-        public void saveValidationBaseline(com.cascada.cache.domain.validation.ValidationBaseline baseline,
+        public void saveValidationBaseline(com.cascada.cache.domain.model.validation.ValidationBaseline baseline,
                                            Duration timeToLive) {
             delegate.saveValidationBaseline(baseline, timeToLive);
         }

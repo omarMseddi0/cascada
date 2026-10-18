@@ -1,9 +1,7 @@
 package com.cascada.app.adapter.out.execution;
 
 import com.cascada.app.bootstrap.CascadaLauncher;
-
 import org.junit.jupiter.api.Test;
-
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;

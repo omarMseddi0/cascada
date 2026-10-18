@@ -1,8 +1,9 @@
 package com.cascada.cache.adapter.out.tracking;
 
+import com.cascada.cache.adapter.out.tracking.model.RankedQuery;
 import com.cascada.cache.application.port.out.QueryPopularityPort;
-import com.cascada.cache.domain.query.PopularQuery;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.query.PopularQuery;
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;

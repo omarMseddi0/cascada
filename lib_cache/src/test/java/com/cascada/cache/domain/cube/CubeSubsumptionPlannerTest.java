@@ -1,11 +1,11 @@
 package com.cascada.cache.domain.cube;
 
+import com.cascada.cache.domain.model.cube.QueryShape;
+import com.cascada.cache.domain.model.cube.CachedShapeEntry;
 import com.cascada.cache.exception.CubeRollUpUnavailableException;
-
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import org.junit.jupiter.api.Test;
-
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;

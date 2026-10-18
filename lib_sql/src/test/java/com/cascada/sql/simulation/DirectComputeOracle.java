@@ -4,7 +4,6 @@ import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;

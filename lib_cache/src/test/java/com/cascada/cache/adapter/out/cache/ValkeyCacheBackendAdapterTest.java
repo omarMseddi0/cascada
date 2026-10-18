@@ -1,7 +1,7 @@
 package com.cascada.cache.adapter.out.cache;
 
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.exception.CacheSerializationException;

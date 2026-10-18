@@ -1,7 +1,6 @@
 package com.cascada.cache.application.port.out;
 
 import com.cascada.cache.exception.CacheSerializationException;
-
 import com.cascada.cache.domain.frame.ResultFrame;
 
 /**

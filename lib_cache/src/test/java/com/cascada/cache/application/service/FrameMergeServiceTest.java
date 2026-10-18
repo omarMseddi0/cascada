@@ -1,17 +1,20 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
+import com.cascada.cache.domain.model.query.FormulaBinary;
+import com.cascada.cache.domain.model.query.FormulaColumn;
+import com.cascada.cache.domain.query.ArithmeticOperator;
+import com.cascada.cache.domain.model.time.TimeRange;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -81,7 +84,9 @@ class FrameMergeServiceTest {
         // The query asked for SUM(bytesFromClient) + SUM(bytesFromServer) AS total_bytes; the cache
         // stores the two SUM ingredients. Without reconstruction the result lacks total_bytes.
         QueryMetadata metadata = QueryMetadata.globalAggregate()
-                .withCompositeAliases(Map.of("total_bytes", "SUM(bytesFromClient) + SUM(bytesFromServer)"));
+                .withCompositeAliases(Map.of("total_bytes", "SUM(bytesFromClient) + SUM(bytesFromServer)"))
+                .withCompositeFormulas(Map.of("total_bytes", new FormulaBinary(ArithmeticOperator.ADD,
+                        new FormulaColumn("SUM(bytesFromClient)"), new FormulaColumn("SUM(bytesFromServer)"))));
         CanonicalQueryObject canonical = globalAgg(List.of("appName"),
                 List.of("SUM(bytesFromClient)", "SUM(bytesFromServer)"), metadata);
 
@@ -100,10 +105,12 @@ class FrameMergeServiceTest {
     }
 
     @Test
-    void leavesACompositeAliasAbsentWhenAnIngredientColumnIsMissing() {
+    void rejectsAMissingCompositeIngredientSoTheEngineCanUseTheAuthoritativeFallback() {
         // Defensive: if the formula references a column not in the frame, do NOT fabricate the alias.
         QueryMetadata metadata = QueryMetadata.globalAggregate()
-                .withCompositeAliases(Map.of("total_bytes", "SUM(bytesFromClient) + SUM(missing)"));
+                .withCompositeAliases(Map.of("total_bytes", "SUM(bytesFromClient) + SUM(missing)"))
+                .withCompositeFormulas(Map.of("total_bytes", new FormulaBinary(ArithmeticOperator.ADD,
+                        new FormulaColumn("SUM(bytesFromClient)"), new FormulaColumn("SUM(missing)"))));
         CanonicalQueryObject canonical = globalAgg(List.of("appName"),
                 List.of("SUM(bytesFromClient)"), metadata);
         ResultFrame frame = ResultFrame.builder()
@@ -112,8 +119,8 @@ class FrameMergeServiceTest {
                 .row(Map.of("appName", "netflix", "SUM(bytesFromClient)", 100.0))
                 .build();
 
-        ResultFrame result = merge.mergeAndReconstruct(List.of(frame), canonical);
-        assertThat(result.columnNames()).doesNotContain("total_bytes");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> merge.mergeAndReconstruct(List.of(frame), canonical))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("missing composite ingredient");
     }
 
     @Test

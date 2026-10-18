@@ -1,7 +1,6 @@
-package com.cascada.cache.domain.query;
+package com.cascada.cache.domain.model.query;
 
 import com.cascada.cache.domain.merge.AggregateFunction;
-
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -12,12 +11,8 @@ import java.util.Optional;
  * composite-alias formulas, the user's requested display step, and how stale an answer the
  * caller will tolerate.
  *
- * <p>Ported from {@code QueryMetadata} in {@code domain.py}, but with the microservice-specific
- * {@code uses_hot_batch} / "hot view" concept <b>deliberately removed</b> (plan §8.11). The customer
- * never picks "hot view" or "hot batch" — caching just works. The generalisation is
- * {@code stalenessToleranceMillis}: a low tolerance means near-real-time (only the live sub-bucket is
- * recomputed), a high tolerance means a batch dashboard is happy with older buckets. No safety rule
- * bypasses on it; it only informs warming and the bucket pyramid.
+ * <p>Only queries touching a configured raw/HOT_BATCH source are eligible for bucket caching.
+ * A pre-aggregated HOT_VIEW-only query remains authoritative Spark work, matching the Python core.
  *
  * @param stalenessToleranceMillis how old a cached answer may be before a refresh is preferred; {@code 0}
  *                                 means "as fresh as the completed buckets allow" (the default)
@@ -33,7 +28,24 @@ import java.util.Optional;
 public record QueryMetadata(boolean isTimeSeries, long stalenessToleranceMillis, List<String> originalAggregates,
                             Map<String, String> compositeAliases, Optional<Integer> userStepSeconds,
                             boolean preserveRawTimeSeries, List<String> aggregateSpecs,
-                            Map<String, AggregateFunction> measureAggregates) {
+                            Map<String, AggregateFunction> measureAggregates, boolean usesHotBatch,
+                            Map<String, CompositeFormula> compositeFormulas) {
+
+    public QueryMetadata(boolean isTimeSeries, long stalenessToleranceMillis, List<String> originalAggregates,
+                         Map<String, String> compositeAliases, Optional<Integer> userStepSeconds,
+                         boolean preserveRawTimeSeries, List<String> aggregateSpecs,
+                         Map<String, AggregateFunction> measureAggregates, boolean usesHotBatch) {
+        this(isTimeSeries, stalenessToleranceMillis, originalAggregates, compositeAliases, userStepSeconds,
+                preserveRawTimeSeries, aggregateSpecs, measureAggregates, usesHotBatch, Map.of());
+    }
+
+    public QueryMetadata(boolean isTimeSeries, long stalenessToleranceMillis, List<String> originalAggregates,
+                         Map<String, String> compositeAliases, Optional<Integer> userStepSeconds,
+                         boolean preserveRawTimeSeries, List<String> aggregateSpecs,
+                         Map<String, AggregateFunction> measureAggregates) {
+        this(isTimeSeries, stalenessToleranceMillis, originalAggregates, compositeAliases, userStepSeconds,
+                preserveRawTimeSeries, aggregateSpecs, measureAggregates, true);
+    }
 
     public QueryMetadata {
         if (stalenessToleranceMillis < 0) {
@@ -41,6 +53,7 @@ public record QueryMetadata(boolean isTimeSeries, long stalenessToleranceMillis,
         }
         originalAggregates = List.copyOf(originalAggregates);
         compositeAliases = Map.copyOf(compositeAliases);
+        compositeFormulas = Map.copyOf(compositeFormulas);
         aggregateSpecs = List.copyOf(aggregateSpecs);
         measureAggregates = Map.copyOf(measureAggregates);
     }
@@ -67,26 +80,36 @@ public record QueryMetadata(boolean isTimeSeries, long stalenessToleranceMillis,
 
     public QueryMetadata withOriginalAggregates(List<String> aggregates) {
         return new QueryMetadata(isTimeSeries, stalenessToleranceMillis, aggregates, compositeAliases, userStepSeconds,
-                preserveRawTimeSeries, aggregateSpecs, measureAggregates);
+                preserveRawTimeSeries, aggregateSpecs, measureAggregates, usesHotBatch, compositeFormulas);
     }
 
     public QueryMetadata withCompositeAliases(Map<String, String> aliases) {
         return new QueryMetadata(isTimeSeries, stalenessToleranceMillis, originalAggregates, aliases, userStepSeconds,
-                preserveRawTimeSeries, aggregateSpecs, measureAggregates);
+                preserveRawTimeSeries, aggregateSpecs, measureAggregates, usesHotBatch, aliases.equals(compositeAliases) ? compositeFormulas : Map.of());
     }
 
     public QueryMetadata withAggregateSpecs(List<String> specs) {
         return new QueryMetadata(isTimeSeries, stalenessToleranceMillis, originalAggregates, compositeAliases,
-                userStepSeconds, preserveRawTimeSeries, specs, measureAggregates);
+                userStepSeconds, preserveRawTimeSeries, specs, measureAggregates, usesHotBatch, compositeFormulas);
     }
 
     public QueryMetadata withMeasureAggregates(Map<String, AggregateFunction> aggregates) {
         return new QueryMetadata(isTimeSeries, stalenessToleranceMillis, originalAggregates, compositeAliases,
-                userStepSeconds, preserveRawTimeSeries, aggregateSpecs, aggregates);
+                userStepSeconds, preserveRawTimeSeries, aggregateSpecs, aggregates, usesHotBatch, compositeFormulas);
+    }
+
+    public QueryMetadata withUsesHotBatch(boolean value) {
+        return new QueryMetadata(isTimeSeries, stalenessToleranceMillis, originalAggregates, compositeAliases,
+                userStepSeconds, preserveRawTimeSeries, aggregateSpecs, measureAggregates, value, compositeFormulas);
     }
 
     public QueryMetadata withStalenessToleranceMillis(long tolerance) {
         return new QueryMetadata(isTimeSeries, tolerance, originalAggregates, compositeAliases, userStepSeconds,
-                preserveRawTimeSeries, aggregateSpecs, measureAggregates);
+                preserveRawTimeSeries, aggregateSpecs, measureAggregates, usesHotBatch, compositeFormulas);
     }
+    public QueryMetadata withCompositeFormulas(Map<String, CompositeFormula> formulas) {
+        return new QueryMetadata(isTimeSeries, stalenessToleranceMillis, originalAggregates, compositeAliases,
+                userStepSeconds, preserveRawTimeSeries, aggregateSpecs, measureAggregates, usesHotBatch, formulas);
+    }
+
 }

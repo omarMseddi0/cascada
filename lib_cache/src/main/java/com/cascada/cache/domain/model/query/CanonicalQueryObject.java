@@ -1,8 +1,7 @@
-package com.cascada.cache.domain.query;
+package com.cascada.cache.domain.model.query;
 
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.time.TimeRange;
-
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.model.time.TimeRange;
 import java.util.List;
 import java.util.Optional;
 
@@ -26,15 +25,23 @@ import java.util.Optional;
 public record CanonicalQueryObject(HashComponents hashComponents, TimeRange timeRange,
                                    PostProcessing postProcessing, QueryMetadata metadata,
                                    String physicalSql, List<String> sourceSignature,
-                                   List<String> projectionSignature, List<String> logicSignature) {
+                                   List<String> projectionSignature, List<String> logicSignature, List<String> outputColumns) {
 
     public CanonicalQueryObject {
+        outputColumns = List.copyOf(outputColumns);
         sourceSignature = List.copyOf(sourceSignature);
         projectionSignature = List.copyOf(projectionSignature);
         logicSignature = List.copyOf(logicSignature);
         if (physicalSql == null) {
             physicalSql = "";
         }
+    }
+
+    public CanonicalQueryObject(HashComponents hashComponents, TimeRange timeRange,
+                                PostProcessing postProcessing, QueryMetadata metadata, String physicalSql,
+                                List<String> sourceSignature, List<String> projectionSignature, List<String> logicSignature) {
+        this(hashComponents, timeRange, postProcessing, metadata, physicalSql, sourceSignature,
+                projectionSignature, logicSignature, List.of());
     }
 
     /**

@@ -1,18 +1,15 @@
 package com.cascada.cache.application.service.hashing;
 
-import com.cascada.cache.domain.hashing.HashComponents;
-
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.time.CacheTimeConstants;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.identity.domain.QueryHash;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -75,7 +72,7 @@ class QueryHashGeneratorTest {
                 PostProcessing.none(), QueryMetadata.globalAggregate());
 
         assertThat(generator.buildCanonicalString(series, CacheTimeConstants.DEFAULT_CACHE_STEP_SECONDS))
-                .contains("\"canonical_semantics_version\":2")
+                .contains("\"canonical_semantics_version\":4")
                 .contains("\"step\":300");
         assertThat(generator.buildCanonicalString(global, 0)).contains("\"step\":0");
         assertThat(generator.generateQueryHash(series)).isNotEqualTo(generator.generateQueryHash(global));

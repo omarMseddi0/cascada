@@ -1,7 +1,7 @@
 package com.cascada.fabric.adapter.out.manifest;
 
 import com.cascada.fabric.application.port.out.ClusterManifestRenderingPort;
-import com.cascada.fabric.domain.ClusterValues;
+import com.cascada.fabric.domain.model.ClusterValues;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;

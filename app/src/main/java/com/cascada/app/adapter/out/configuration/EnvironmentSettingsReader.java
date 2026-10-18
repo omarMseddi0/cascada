@@ -1,8 +1,8 @@
 package com.cascada.app.adapter.out.configuration;
 
-import com.cascada.app.config.CacheBackend;
-import com.cascada.app.config.EngineSettings;
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.app.model.config.CacheBackend;
+import com.cascada.app.model.config.EngineSettings;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import java.util.Objects;
 import java.util.function.Function;
 

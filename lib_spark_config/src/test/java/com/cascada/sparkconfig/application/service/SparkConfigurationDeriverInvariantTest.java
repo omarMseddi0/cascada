@@ -1,5 +1,9 @@
-package com.cascada.sparkconfig.domain;
+package com.cascada.sparkconfig.application.service;
 
+import com.cascada.sparkconfig.domain.ExecutorPlacement;
+import com.cascada.sparkconfig.domain.model.SparkConfiguration;
+import com.cascada.sparkconfig.domain.model.SparkMemorySplit;
+import com.cascada.sparkconfig.domain.WorkloadType;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.constraints.IntRange;

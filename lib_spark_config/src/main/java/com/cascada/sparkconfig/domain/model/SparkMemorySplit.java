@@ -1,4 +1,4 @@
-package com.cascada.sparkconfig.domain;
+package com.cascada.sparkconfig.domain.model;
 
 /**
  * How one executor's RAM budget is divided between JVM heap, Gluten/Velox off-heap, and overhead.

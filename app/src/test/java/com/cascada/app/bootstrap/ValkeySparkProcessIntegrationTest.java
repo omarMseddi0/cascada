@@ -1,16 +1,23 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.app.adapter.in.api.*;
+import com.cascada.app.model.config.CacheBackend;
 import com.cascada.app.adapter.in.grpc.protocol.*;
+import com.cascada.app.adapter.in.api.*;
 import com.cascada.app.config.*;
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.app.model.config.WarmingSettings;
+import com.cascada.app.model.config.TableSettings;
+import com.cascada.app.model.config.ServerSettings;
+import com.cascada.app.model.config.EngineSettings;
+import com.cascada.app.model.config.ApplicationSettings;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.time.GapPlan;
+import com.cascada.cache.domain.model.time.GapPlan;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import com.cascada.sql.adapter.out.calcite.*;
 import com.cascada.sql.domain.*;
+import com.cascada.sql.domain.model.RegisteredTable;
 import com.fasterxml.jackson.databind.*;
 import io.grpc.*;
 import io.lettuce.core.RedisClient;

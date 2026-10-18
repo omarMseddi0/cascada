@@ -1,4 +1,4 @@
-package com.cascada.app.config;
+package com.cascada.app.model.config;
 
 import java.util.Locale;
 

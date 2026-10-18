@@ -1,7 +1,6 @@
 package com.cascada.fabric.application.port.in;
 
-import com.cascada.fabric.domain.ClusterValues;
-
+import com.cascada.fabric.domain.model.ClusterValues;
 import java.util.List;
 
 /**

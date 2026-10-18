@@ -1,5 +1,6 @@
 package com.cascada.spark.adapter.out.spark;
 
+import com.cascada.spark.adapter.out.spark.model.SessionLease;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.QueryExecutorPort;

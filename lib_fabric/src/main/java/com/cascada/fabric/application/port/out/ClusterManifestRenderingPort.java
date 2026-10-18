@@ -1,7 +1,6 @@
 package com.cascada.fabric.application.port.out;
 
-import com.cascada.fabric.domain.ClusterValues;
-
+import com.cascada.fabric.domain.model.ClusterValues;
 import java.util.List;
 
 /** Renders deployment values into apply-ready manifest documents. */

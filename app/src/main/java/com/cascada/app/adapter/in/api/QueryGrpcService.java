@@ -1,9 +1,10 @@
 package com.cascada.app.adapter.in.api;
 
 import com.cascada.app.adapter.in.grpc.protocol.*;
+import com.cascada.app.adapter.in.api.model.ParquetResult;
 import com.cascada.app.concurrent.RequestExecutor;
-import com.cascada.app.config.ServerSettings;
-import com.cascada.app.exception.ApiFailure;
+import com.cascada.app.model.config.ServerSettings;
+import com.cascada.app.model.api.ApiFailure;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;

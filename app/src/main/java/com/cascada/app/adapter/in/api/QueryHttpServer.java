@@ -1,8 +1,9 @@
 package com.cascada.app.adapter.in.api;
 
+import com.cascada.app.adapter.in.api.model.ParquetResult;
 import com.cascada.app.concurrent.RequestExecutor;
-import com.cascada.app.config.ServerSettings;
-import com.cascada.app.exception.ApiFailure;
+import com.cascada.app.model.config.ServerSettings;
+import com.cascada.app.model.api.ApiFailure;
 import com.cascada.app.exception.InvalidRequestException;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
@@ -13,7 +14,7 @@ import com.cascada.cache.application.port.in.MeasureCacheSizeUseCase;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.fabric.application.port.in.ManageClusterLifecycleUseCase;
 import com.cascada.fabric.application.port.in.PrepareClusterSettingsUseCase;
-import com.cascada.fabric.domain.ClusterValues;
+import com.cascada.fabric.domain.model.ClusterValues;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.*;

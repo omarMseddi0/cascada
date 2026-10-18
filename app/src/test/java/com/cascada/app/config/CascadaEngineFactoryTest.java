@@ -1,20 +1,17 @@
-package com.cascada.app.bootstrap;
+package com.cascada.app.config;
 
-import com.cascada.cache.application.result.QueryResult;
-
-import com.cascada.app.config.EngineSettings;
-
-import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
+import com.cascada.app.model.config.EngineSettings;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.model.QueryResult;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-
 import java.util.HashMap;
 import java.util.Map;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -68,7 +65,7 @@ class CascadaEngineFactoryTest {
         executor = new CapturingExecutor();
         // Literal settings, no environment read: the factory is deterministic by construction.
         EngineSettings settings = new EngineSettings(
-                com.cascada.cache.application.config.CacheExecutionConfiguration.defaults(),
+                com.cascada.cache.application.model.config.CacheExecutionConfiguration.defaults(),
                 "redis://unused:6379",
                 "traffic",
                 "/tmp/traffic",
@@ -125,7 +122,7 @@ class CascadaEngineFactoryTest {
     @Test
     void configuredTimeColumnIsRecognisedByCanonicalization() {
         EngineSettings settings = new EngineSettings(
-                new com.cascada.cache.application.config.CacheExecutionConfiguration(86_400, 300, "event_time"),
+                new com.cascada.cache.application.model.config.CacheExecutionConfiguration(86_400, 300, "event_time"),
                 "redis://unused:6379", "traffic", "/tmp/traffic", true, 10);
         try (CascadaEngineFactory configured = new CascadaEngineFactory(settings, executor)) {
             QueryResult result = configured.executeLogicalQueryUseCase().query(

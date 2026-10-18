@@ -1,7 +1,12 @@
 package com.cascada.app.bootstrap;
 
 import com.cascada.app.config.*;
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.app.model.config.WarmingSettings;
+import com.cascada.app.model.config.TableSettings;
+import com.cascada.app.model.config.ServerSettings;
+import com.cascada.app.model.config.EngineSettings;
+import com.cascada.app.model.config.ApplicationSettings;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import java.time.Duration;

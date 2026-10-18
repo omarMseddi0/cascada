@@ -1,7 +1,7 @@
 package com.cascada.fabric.adapter.out.manifest;
 
 import com.cascada.fabric.application.service.ClusterSettingsService;
-import com.cascada.fabric.domain.ClusterValues;
+import com.cascada.fabric.domain.model.ClusterValues;
 import com.cascada.sparkconfig.application.service.SparkConfigurationDeriver;
 import java.util.List;
 import java.util.Map;

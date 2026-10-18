@@ -1,7 +1,7 @@
 package com.cascada.app.adapter.in.api;
 
 import com.cascada.app.adapter.in.grpc.protocol.*;
-import com.cascada.app.exception.ApiFailure;
+import com.cascada.app.model.api.ApiFailure;
 import com.cascada.app.exception.InvalidRequestException;
 import com.cascada.fabric.application.port.in.ManageClusterLifecycleUseCase;
 import com.cascada.fabric.application.port.in.PrepareClusterSettingsUseCase;

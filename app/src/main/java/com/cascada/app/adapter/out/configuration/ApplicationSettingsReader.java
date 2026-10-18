@@ -1,10 +1,10 @@
 package com.cascada.app.adapter.out.configuration;
 
-import com.cascada.app.config.ApplicationSettings;
-import com.cascada.app.config.CacheSafetySettings;
-import com.cascada.app.config.ServerSettings;
-import com.cascada.app.config.TableSettings;
-import com.cascada.app.config.WarmingSettings;
+import com.cascada.app.model.config.ApplicationSettings;
+import com.cascada.app.model.config.CacheSafetySettings;
+import com.cascada.app.model.config.ServerSettings;
+import com.cascada.app.model.config.TableSettings;
+import com.cascada.app.model.config.WarmingSettings;
 import com.cascada.app.exception.ConfigurationException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

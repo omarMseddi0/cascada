@@ -1,6 +1,7 @@
-package com.cascada.app.config;
+package com.cascada.app.model.config;
 
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.app.model.config.CacheBackend;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import java.util.Objects;
 
 /** Immutable deployment settings, with independent Spark placement and cache storage choices. */

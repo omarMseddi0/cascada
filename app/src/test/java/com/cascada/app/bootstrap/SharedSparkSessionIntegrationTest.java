@@ -1,7 +1,7 @@
 package com.cascada.app.bootstrap;
 
 import com.cascada.app.concurrent.RequestExecutor;
-import com.cascada.app.config.ServerSettings;
+import com.cascada.app.model.config.ServerSettings;
 import com.cascada.cache.application.execution.*;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
@@ -29,7 +29,7 @@ class SharedSparkSessionIntegrationTest {
             }
         });
         try (var executor = new SparkDeltaQueryExecutor(session);
-             var requests = new RequestExecutor(new com.cascada.app.config.ServerSettings(0, 0, Duration.ofSeconds(10)))) {
+             var requests = new RequestExecutor(new com.cascada.app.model.config.ServerSettings(0, 0, Duration.ofSeconds(10)))) {
             session.sparkContext().setLogLevel("ERROR");
             CountDownLatch entered = new CountDownLatch(52), release = new CountDownLatch(1);
             java.util.List<Future<?>> pending = new java.util.ArrayList<>();

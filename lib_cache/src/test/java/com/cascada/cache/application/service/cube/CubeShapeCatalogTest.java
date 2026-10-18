@@ -1,16 +1,16 @@
-package com.cascada.cache.domain.cube;
+package com.cascada.cache.application.service.cube;
 
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.model.time.TimeRange;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import com.cascada.cache.domain.merge.AggregateFunction;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -320,5 +320,16 @@ class CubeShapeCatalogTest {
     @Test
     void rejectsANonPositiveWindowBound() {
         assertThatThrownBy(() -> new CubeShapeCatalog(0)).isInstanceOf(IllegalArgumentException.class);
+    }
+    @Test
+    void verifiedExactHitsReuseTheImmutableFrameWithoutCopyingRows() {
+        QueryShape shape = new QueryShape(Set.of(), Set.of(), Set.of("SUM(bytes)"), Set.of("traffic"),
+                Map.of("n", AggregateFunction.SUM), List.of("SUM(bytes) AS n"));
+        ResultFrame original = ResultFrame.builder().column("n", ColumnType.DOUBLE).row(7.0).build();
+        catalog.register(WINDOW, shape, original);
+        assertThat(catalog.tryAnswer(WINDOW, shape)).containsSame(original);
+        for (int request = 0; request < 52; request++) assertThat(catalog.tryAnswer(WINDOW, shape).orElseThrow()).isSameAs(original);
+        catalog.clear();
+        assertThat(catalog.tryAnswer(WINDOW, shape)).isEmpty();
     }
 }

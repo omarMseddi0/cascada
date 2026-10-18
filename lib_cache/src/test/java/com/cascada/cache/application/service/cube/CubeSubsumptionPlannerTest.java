@@ -1,16 +1,16 @@
-package com.cascada.cache.domain.cube;
+package com.cascada.cache.application.service.cube;
 
-import com.cascada.cache.exception.CubeRollUpUnavailableException;
-
+import com.cascada.cache.domain.model.cube.CachedShapeEntry;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.cache.exception.CubeRollUpUnavailableException;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -381,7 +381,7 @@ class CubeSubsumptionPlannerTest {
     }
 
     @Test
-    void keepsTheRequestedProjectionOrderAndRefusesReorderedShapeReuse() {
+    void keepsTheRequestedProjectionOrderWhenReusingAReorderedShape() {
         List<String> requestedOrder = List.of("SUM(x) AS total", "city");
         ResultFrame frame = ResultFrame.builder()
                 .column("total", ColumnType.LONG)
@@ -401,7 +401,10 @@ class CubeSubsumptionPlannerTest {
 
         QueryShape reordered = new QueryShape(Set.of("city"), Set.of(), Set.of("SUM(x) AS total"),
                 Set.of("traffic"), Map.of(), List.of("city", "SUM(x) AS total"));
-        assertThat(planner.subsumes(fine, reordered)).isFalse();
+        assertThat(planner.subsumes(fine, reordered)).isTrue();
+        ResultFrame reorderedAnswer = planner.rollUpAndFilterDown(candidate, reordered);
+        assertThat(reorderedAnswer.columnNames()).containsExactly("city", "total");
+        assertThat(reorderedAnswer.longAt(0, 1)).isEqualTo(15);
     }
 
     @Test
@@ -468,5 +471,19 @@ class CubeSubsumptionPlannerTest {
             result.put((String) row.get("appName"), ((Number) row.get("SUM(bytes)")).doubleValue());
         }
         return result;
+    }
+
+    @Test void averagesRealSparkDoubleSumsAndLongCountsAcrossGroups() {
+        var frame = ResultFrame.builder().column("region", ColumnType.STRING)
+                .column("SUM(x)", ColumnType.DOUBLE).column("COUNT(x)", ColumnType.LONG)
+                .row("a", 20.0, 2L).row("b", 400.0, 4L).row("empty", null, 0L).build();
+        var candidate = new CachedShapeEntry(new QueryShape(Set.of("region"), Set.of(),
+                Set.of("SUM(x)", "COUNT(x)")), frame);
+        var query = new QueryShape(Set.of(), Set.of(), Set.of("AVG(x)"));
+        assertThat(planner.subsumes(candidate.shape(), query)).isTrue();
+        var answer = planner.rollUpAndFilterDown(candidate, query);
+        assertThat(answer.columnNames()).containsExactly("AVG(x)");
+        assertThat(answer.doubleAt(0, 0)).isEqualTo(70.0);
+        assertThat(new CubeConsistencyVerifier().verifyRollUp(candidate, query, answer).isConsistent()).isTrue();
     }
 }

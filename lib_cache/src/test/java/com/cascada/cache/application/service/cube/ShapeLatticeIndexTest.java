@@ -1,13 +1,15 @@
-package com.cascada.cache.domain.cube;
+package com.cascada.cache.application.service.cube;
 
+import com.cascada.cache.domain.model.cube.CachedShapeEntry;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -21,7 +23,7 @@ class ShapeLatticeIndexTest {
     private final CubeSubsumptionPlanner planner = new CubeSubsumptionPlanner();
 
     private CachedShapeEntry entry(Set<String> groupBy, Set<String> filters, Set<String> aggregates) {
-        ResultFrame.Builder frame = ResultFrame.builder();
+        ResultFrameBuilder frame = ResultFrame.builder();
         groupBy.forEach(column -> frame.column(column, ColumnType.STRING));
         aggregates.forEach(aggregate -> frame.column(aggregate, ColumnType.DOUBLE));
         Map<String, Object> row = new java.util.LinkedHashMap<>();

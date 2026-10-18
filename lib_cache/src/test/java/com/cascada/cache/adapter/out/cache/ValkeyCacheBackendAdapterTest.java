@@ -1,7 +1,7 @@
 package com.cascada.cache.adapter.out.cache;
 
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.exception.CacheSerializationException;
@@ -220,11 +220,12 @@ class ValkeyCacheBackendAdapterTest {
     void storeWritesTheValueWithItsTimeToLive() {
         AtomicReference<String> sentArguments = new AtomicReference<>();
         RedisCommands<byte[], byte[]> sync = proxy(RedisCommands.class, (proxy, method, args) -> {
-            assertEquals("set", method.getName());
-            CommandArgs<byte[], byte[]> commandArguments = new CommandArgs<>(ByteArrayCodec.INSTANCE);
-            ((SetArgs) args[2]).build(commandArguments);
-            sentArguments.set(commandArguments.toCommandString());
-            return "OK";
+            assertEquals("eval", method.getName());
+            assertTrue(((String) args[0]).contains("'PX'"));
+            byte[][] keys = (byte[][]) args[2];
+            assertEquals("QC:V4:revision", text(keys[1]));
+            sentArguments.set(text(((byte[][]) args[3])[1]));
+            return 1L;
         });
         CacheValueSerializerPort serializer = new CacheValueSerializerPort() {
             @Override public byte[] serialize(ResultFrame frame) { return bytes("frame"); }
@@ -235,7 +236,7 @@ class ValkeyCacheBackendAdapterTest {
         adapter.store("QC:V4:B86400:abc:0", ResultFrame.builder().column("n", ColumnType.LONG).row(1L).build(),
                 Duration.ofDays(7));
 
-        assertEquals("EX 604800", sentArguments.get());
+        assertEquals("604800000", sentArguments.get());
     }
 
     @Test
@@ -259,7 +260,13 @@ class ValkeyCacheBackendAdapterTest {
                 return ResultFrame.builder().column("value", ColumnType.LONG).row(1L).build();
             }
         };
-        ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(connection(async, unused -> null), corruptForBad);
+        RedisCommands<byte[], byte[]> sync = proxy(RedisCommands.class, (proxy, method, args) -> {
+            assertEquals("eval", method.getName());
+            deletedKeys.add(text(((byte[][]) args[2])[0]));
+            assertEquals("QC:V4:revision", text(((byte[][]) args[2])[1]));
+            return 1L;
+        });
+        ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(connection(async, unused -> sync), corruptForBad);
 
         List<java.util.Optional<ResultFrame>> frames = adapter.multiGet(List.of("kgood", "kbad"));
 

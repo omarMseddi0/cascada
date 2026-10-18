@@ -1,10 +1,10 @@
-package com.cascada.cache.domain.cube;
+package com.cascada.cache.application.service.cube;
 
-import com.cascada.cache.exception.CubeRollUpUnavailableException;
-
+import com.cascada.cache.application.model.cube.CubeFilterLiteral;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-
+import com.cascada.cache.exception.CubeRollUpUnavailableException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -19,7 +19,9 @@ import java.util.regex.Pattern;
 final class CubeFilterEvaluator {
 
     private static final Pattern EQUALITY_FILTER =
-            Pattern.compile("\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(.*?)\\s*");
+            Pattern.compile("\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*("
+                    + "'(?:[^']|'')*'|(?i:NULL|NAN|[+-]?INFINITY)|"
+                    + "[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)\\s*");
     private static final Pattern IN_FILTER =
             Pattern.compile("(?i)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s+IN\\s*\\((.*)\\)\\s*");
 
@@ -190,7 +192,12 @@ final class CubeFilterEvaluator {
     private Optional<String> filterColumn(String filter) {
         Matcher in = IN_FILTER.matcher(filter);
         if (in.matches()) {
-            return Optional.of(in.group(1));
+            try {
+                parseInList(in.group(2));
+                return Optional.of(in.group(1));
+            } catch (CubeRollUpUnavailableException unsupported) {
+                return Optional.empty();
+            }
         }
         Matcher equality = EQUALITY_FILTER.matcher(filter);
         return equality.matches() ? Optional.of(equality.group(1)) : Optional.empty();

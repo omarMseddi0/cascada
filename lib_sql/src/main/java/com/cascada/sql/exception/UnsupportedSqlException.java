@@ -1,4 +1,6 @@
-package com.cascada.sql.domain;
+package com.cascada.sql.exception;
+
+import com.cascada.cache.exception.UncacheableQueryException;
 
 /**
  * Thrown when a SQL statement cannot be canonicalised for caching — it does not parse, is not a

@@ -1,7 +1,11 @@
 package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.sql.domain.TimeDimensionMap;
+import com.cascada.sql.adapter.out.calcite.model.TimeBucket;
+import com.cascada.sql.adapter.out.calcite.model.CanonicalTimeSeriesShape;
+import com.cascada.sql.adapter.out.calcite.model.CanonicalTimeRangeExtraction;
+import com.cascada.sql.adapter.out.calcite.model.CanonicalTimeBound;
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.sql.domain.model.TimeDimensionMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;

@@ -1,6 +1,6 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.sql.domain.UnsupportedSqlException;
+import com.cascada.sql.exception.UnsupportedSqlException;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlSelect;
 import org.junit.jupiter.api.Test;

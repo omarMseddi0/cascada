@@ -1,11 +1,11 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite.model;
 
 import java.util.List;
 
 /** Hash ingredients and parsed AVG expressions retained for result reconstruction. */
-record NormalizedAggregates(List<String> normalizedForHash, List<String> originalAggregates) {
+public record NormalizedAggregates(List<String> normalizedForHash, List<String> originalAggregates) {
 
-    NormalizedAggregates {
+    public NormalizedAggregates {
         normalizedForHash = List.copyOf(normalizedForHash);
         originalAggregates = List.copyOf(originalAggregates);
     }

@@ -1,9 +1,10 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.cache.domain.query.CanonicalQueryObject;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.identity.domain.model.QueryHash;
+import com.cascada.sql.exception.UnsupportedSqlException;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -52,7 +53,7 @@ class CanonicalLogicSignatureTest {
 
         for (String sql : java.util.List.of(joinOnUser, joinOnDevice)) {
             assertThatThrownBy(() -> factory.extractCanonicalObjectFromSql(sql))
-                    .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class)
+                    .isInstanceOf(com.cascada.sql.exception.UnsupportedSqlException.class)
                     .hasMessageContaining("multiple sources");
         }
     }

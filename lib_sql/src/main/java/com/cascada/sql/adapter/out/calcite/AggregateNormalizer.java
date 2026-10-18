@@ -1,5 +1,6 @@
 package com.cascada.sql.adapter.out.calcite;
 
+import com.cascada.sql.adapter.out.calcite.model.NormalizedAggregates;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeSet;

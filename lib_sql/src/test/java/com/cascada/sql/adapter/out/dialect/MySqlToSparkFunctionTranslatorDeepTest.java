@@ -1,5 +1,6 @@
-package com.cascada.sql.adapter.dialect;
+package com.cascada.sql.adapter.out.dialect;
 
+import com.cascada.sql.exception.UnsupportedSqlException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -50,11 +51,11 @@ class MySqlToSparkFunctionTranslatorDeepTest {
     @Test
     void rejectsJsonExtractionFormsWhoseReturnContractCannotBePreserved() {
         assertThatThrownBy(() -> translator.translate("SELECT JSON_EXTRACT(doc, '$.a') FROM t"))
-                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class)
+                .isInstanceOf(com.cascada.sql.exception.UnsupportedSqlException.class)
                 .hasMessageContaining("JSON_UNQUOTE");
         assertThatThrownBy(() -> translator.translate(
                 "SELECT JSON_UNQUOTE(JSON_EXTRACT(doc, '$.a', '$.b')) FROM t"))
-                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class)
+                .isInstanceOf(com.cascada.sql.exception.UnsupportedSqlException.class)
                 .hasMessageContaining("onePath");
     }
 
@@ -74,7 +75,7 @@ class MySqlToSparkFunctionTranslatorDeepTest {
     @ValueSource(strings = {"%D", "%V", "%q", "%"})
     void rejectsUnsupportedDateFormatTokensInsteadOfPassingThemThrough(String token) {
         assertThatThrownBy(() -> translator.translate("SELECT DATE_FORMAT(ts, '" + token + "') FROM t"))
-                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class);
+                .isInstanceOf(com.cascada.sql.exception.UnsupportedSqlException.class);
     }
 
     @Test

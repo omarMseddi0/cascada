@@ -1,7 +1,7 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.sql.domain.UnsupportedSqlException;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.sql.exception.UnsupportedSqlException;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;

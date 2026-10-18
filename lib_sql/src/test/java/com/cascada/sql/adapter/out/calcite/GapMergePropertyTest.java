@@ -1,14 +1,13 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.cache.domain.model.time.TimeRange;
+import java.util.List;
+import java.util.Optional;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.constraints.IntRange;
 import net.jqwik.api.constraints.Size;
-
-import java.util.List;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

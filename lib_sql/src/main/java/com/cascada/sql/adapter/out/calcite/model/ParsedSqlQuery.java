@@ -1,21 +1,21 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite.model;
 
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOrderBy;
 import org.apache.calcite.sql.SqlSelect;
 
-record ParsedSqlQuery(SqlSelect select, SqlOrderBy orderBy) {
+public record ParsedSqlQuery(SqlSelect select, SqlOrderBy orderBy) {
 
-    SqlNode root() {
+    public SqlNode root() {
         return orderBy == null ? select : orderBy;
     }
 
-    SqlNode fetch() {
+    public SqlNode fetch() {
         return orderBy == null ? select.getFetch() : orderBy.fetch;
     }
 
-    SqlNodeList orderList() {
+    public SqlNodeList orderList() {
         return orderBy == null ? select.getOrderList() : orderBy.orderList;
     }
 }

@@ -1,5 +1,6 @@
 package com.cascada.sql.domain;
 
+import com.cascada.sql.domain.model.RegisteredTable;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;

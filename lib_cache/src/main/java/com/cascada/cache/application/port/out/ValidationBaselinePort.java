@@ -1,6 +1,6 @@
 package com.cascada.cache.application.port.out;
 
-import com.cascada.cache.domain.validation.ValidationBaseline;
+import com.cascada.cache.domain.model.validation.ValidationBaseline;
 import java.time.Duration;
 import java.util.Optional;
 

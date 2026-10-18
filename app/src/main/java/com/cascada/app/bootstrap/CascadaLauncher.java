@@ -1,11 +1,10 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.app.config.EngineSettings;
+import com.cascada.app.model.config.EngineSettings;
 import com.cascada.app.adapter.out.configuration.EnvironmentSettingsReader;
 import com.cascada.app.adapter.out.configuration.SparkConfigurationFileReader;
 import com.cascada.app.adapter.out.execution.LazyQueryExecutor;
 import com.cascada.app.adapter.in.cli.CascadaCli;
-
 import com.cascada.spark.adapter.out.environment.SystemEnvironmentAdapter;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import com.cascada.spark.domain.SparkSessionConfig;

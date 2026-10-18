@@ -1,9 +1,9 @@
 package com.cascada.sql.adapter.calcite;
 
-import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.merge.AggregateFunction;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.identity.domain.model.QueryHash;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;

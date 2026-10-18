@@ -1,7 +1,7 @@
 package com.cascada.cache.adapter.out.tracking;
 
-import com.cascada.cache.domain.query.PopularQuery;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.query.PopularQuery;
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 

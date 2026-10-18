@@ -1,10 +1,10 @@
 package com.cascada.cache.domain.cube;
 
+import com.cascada.cache.domain.model.cube.QueryShape;
+import com.cascada.cache.domain.model.cube.CubeFilterLiteral;
 import com.cascada.cache.exception.CubeRollUpUnavailableException;
-
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashSet;

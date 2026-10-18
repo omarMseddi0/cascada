@@ -1,12 +1,14 @@
 package com.cascada.cache.adapter.out.cache;
 
+import com.cascada.cache.adapter.out.cache.model.StoredBlob;
+import com.cascada.cache.adapter.out.cache.model.StoredBaseline;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyConstants;
-import com.cascada.cache.domain.validation.ValidationBaseline;
+import com.cascada.cache.domain.model.validation.ValidationBaseline;
 import com.cascada.cache.exception.CacheSerializationException;
 import java.time.Clock;
 import java.time.Duration;

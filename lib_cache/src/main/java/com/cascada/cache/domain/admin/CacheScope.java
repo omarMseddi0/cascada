@@ -1,7 +1,6 @@
 package com.cascada.cache.domain.admin;
 
 import com.cascada.cache.domain.key.CacheKeyConstants;
-
 import java.util.Objects;
 
 /**

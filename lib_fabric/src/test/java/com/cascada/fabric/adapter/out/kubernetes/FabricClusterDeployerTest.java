@@ -7,7 +7,6 @@ import com.cascada.fabric.domain.ClusterValues;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Map;
 

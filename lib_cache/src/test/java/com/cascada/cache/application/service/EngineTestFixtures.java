@@ -2,11 +2,11 @@ package com.cascada.cache.application.service;
 
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
+import com.cascada.cache.domain.model.time.TimeRange;
 import java.util.List;
 import java.util.Map;
 

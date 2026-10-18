@@ -2,7 +2,6 @@ package com.cascada.cache.adapter.out.sketch;
 
 import org.apache.datasketches.kll.KllDoublesSketch;
 import org.apache.datasketches.quantilescommon.QuantileSearchCriteria;
-
 import java.util.List;
 
 /**

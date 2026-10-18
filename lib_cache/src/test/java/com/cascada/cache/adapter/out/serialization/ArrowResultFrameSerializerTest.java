@@ -1,13 +1,11 @@
 package com.cascada.cache.adapter.out.serialization;
 
 import com.cascada.cache.exception.CacheSerializationException;
-
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import org.junit.jupiter.api.Test;
-
 import java.util.HashMap;
 import java.util.Map;
 

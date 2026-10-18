@@ -1,5 +1,6 @@
 package com.cascada.sparkconfig.domain;
 
+import com.cascada.sparkconfig.domain.model.SparkConfiguration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;

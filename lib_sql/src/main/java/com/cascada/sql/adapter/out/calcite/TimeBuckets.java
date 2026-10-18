@@ -1,6 +1,7 @@
 package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.sql.domain.TimeDimensionMap;
+import com.cascada.sql.adapter.out.calcite.model.TimeBucket;
+import com.cascada.sql.domain.model.TimeDimensionMap;
 import java.util.Optional;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlBasicTypeNameSpec;

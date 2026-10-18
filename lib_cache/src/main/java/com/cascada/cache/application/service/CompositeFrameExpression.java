@@ -3,11 +3,11 @@ package com.cascada.cache.application.service;
 import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.query.ArithmeticOperator;
-import com.cascada.cache.domain.query.CompositeFormula;
-import com.cascada.cache.domain.query.FormulaBinary;
-import com.cascada.cache.domain.query.FormulaColumn;
-import com.cascada.cache.domain.query.FormulaLiteral;
+import com.cascada.cache.domain.model.query.ArithmeticOperator;
+import com.cascada.cache.domain.model.query.CompositeFormula;
+import com.cascada.cache.domain.model.query.FormulaBinary;
+import com.cascada.cache.domain.model.query.FormulaColumn;
+import com.cascada.cache.domain.model.query.FormulaLiteral;
 
 /** Binds a SQL-adapter-compiled arithmetic plan once to a frame schema. Does not parse SQL. */
 final class CompositeFrameExpression {

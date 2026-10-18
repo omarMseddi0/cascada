@@ -1,7 +1,7 @@
 package com.cascada.cache.application.port.in;
 
-import com.cascada.cache.application.result.QueryResult;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.application.model.QueryResult;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 
 /**
  * <b>Primary (driving) port</b> — "answer this query, using the cache when it is safe to".

@@ -1,17 +1,14 @@
 package com.cascada.app.adapter.in.cli;
 
-import com.cascada.cache.application.result.WarmingReport;
-
-import com.cascada.cache.application.result.QueryResult;
-
+import com.cascada.cache.application.model.WarmingReport;
+import com.cascada.cache.application.model.QueryResult;
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
 import com.cascada.cache.application.port.in.MeasureCacheSizeUseCase;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ResultFrame;
-
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;

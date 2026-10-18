@@ -1,12 +1,11 @@
 package com.cascada.sql.adapter.calcite;
 
-import com.cascada.sql.domain.RegisteredTable;
+import com.cascada.sql.domain.model.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.sql.domain.TimeDimensionMap;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.sql.domain.model.TimeDimensionMap;
 import com.cascada.sql.domain.UnsupportedSqlException;
 import org.junit.jupiter.api.Test;
-
 import java.util.Map;
 import java.util.Set;
 

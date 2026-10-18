@@ -1,16 +1,16 @@
 package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
-import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.AverageIngredients;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.CompositeFormula;
-import com.cascada.cache.domain.query.OrderByClause;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.CompositeFormula;
+import com.cascada.cache.domain.model.query.OrderByClause;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.time.CacheTimeConstants;
-import com.cascada.sql.domain.TimeDimensionMap;
+import com.cascada.sql.domain.model.TimeDimensionMap;
 import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;

@@ -1,19 +1,15 @@
 package com.cascada.cache.application.service.safety;
 
 import com.cascada.cache.domain.safety.BypassReason;
-
 import com.cascada.cache.domain.safety.CacheDecision;
-
-import com.cascada.cache.domain.safety.CacheConfiguration;
-
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.hashing.HashComponents;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
+import com.cascada.cache.domain.model.time.TimeRange;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;

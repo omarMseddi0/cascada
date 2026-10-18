@@ -2,7 +2,6 @@ package com.cascada.spark.application.configuration;
 
 import com.cascada.spark.domain.SparkSessionConfig;
 import org.junit.jupiter.api.Test;
-
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;

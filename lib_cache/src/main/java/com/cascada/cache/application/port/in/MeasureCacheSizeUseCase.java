@@ -1,6 +1,6 @@
 package com.cascada.cache.application.port.in;
 
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 
 /**
  * <b>Primary (driving) port</b> — the administrator console's "how much is in cache?" button.

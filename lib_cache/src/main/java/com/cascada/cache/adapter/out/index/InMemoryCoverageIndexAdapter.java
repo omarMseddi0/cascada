@@ -2,8 +2,7 @@ package com.cascada.cache.adapter.out.index;
 
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
-import com.cascada.identity.domain.QueryHash;
-
+import com.cascada.identity.domain.model.QueryHash;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;

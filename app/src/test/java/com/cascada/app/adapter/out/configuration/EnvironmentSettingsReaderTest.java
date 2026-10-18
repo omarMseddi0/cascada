@@ -1,10 +1,8 @@
 package com.cascada.app.adapter.out.configuration;
 
-import com.cascada.app.config.EngineSettings;
+import com.cascada.app.model.config.EngineSettings;
 import com.cascada.app.config.CacheBackend;
-
 import org.junit.jupiter.api.Test;
-
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;

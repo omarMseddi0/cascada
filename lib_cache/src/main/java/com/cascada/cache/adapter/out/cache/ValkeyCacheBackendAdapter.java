@@ -1,13 +1,14 @@
 package com.cascada.cache.adapter.out.cache;
 
+import com.cascada.cache.adapter.out.cache.model.PendingMget;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyConstants;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.cache.domain.validation.ValidationBaseline;
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.domain.model.validation.ValidationBaseline;
 import com.cascada.cache.exception.CacheSerializationException;
 import io.lettuce.core.KeyScanCursor;
 import io.lettuce.core.KeyValue;

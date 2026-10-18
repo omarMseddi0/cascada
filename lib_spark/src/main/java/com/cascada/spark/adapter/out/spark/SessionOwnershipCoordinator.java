@@ -1,5 +1,6 @@
 package com.cascada.spark.adapter.out.spark;
 
+import com.cascada.spark.adapter.out.spark.model.SessionLease;
 import java.util.function.Supplier;
 
 /** Serializes session acquisition by this adapter and records whether it created the context. */

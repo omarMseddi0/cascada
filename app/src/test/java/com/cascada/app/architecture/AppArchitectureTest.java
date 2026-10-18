@@ -18,7 +18,7 @@ class AppArchitectureTest {
         noClasses().that().resideInAPackage("com.cascada.app.adapter.in..")
                 .should().dependOnClassesThat().resideOutsideOfPackages(
                         "java..", "com.cascada.app.adapter.in..",
-                        "com.cascada.cache.application.port.in..", "com.cascada.cache.application.result..", "com.cascada.cache.domain..")
+                        "com.cascada.cache.application.port.in..", "com.cascada.cache.application.model..", "com.cascada.cache.domain..")
                 .check(CLASSES);
     }
 
@@ -32,9 +32,9 @@ class AppArchitectureTest {
 
     @Test
     void settingsDoNotDependOnInfrastructure() {
-        noClasses().that().resideInAPackage("com.cascada.app.config..")
+        noClasses().that().resideInAPackage("com.cascada.app.model.config..")
                 .should().dependOnClassesThat().resideOutsideOfPackages(
-                        "java..", "com.cascada.app.config..", "com.cascada.cache.application.config..")
+                        "java..", "com.cascada.app.model.config..", "com.cascada.app.config..", "com.cascada.cache.application.model.config..")
                 .check(CLASSES);
     }
 }

@@ -1,11 +1,10 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.sql.domain.TimeDimensionMap;
-import com.cascada.sql.domain.UnsupportedSqlException;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.sql.domain.model.TimeDimensionMap;
+import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.Set;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -71,7 +70,7 @@ class CalciteCanonicalObjectFactoryDeepTest {
                 "SELECT appName, SUM(a) + SUM(b) AS total FROM traffic "
                         + "WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
         assertThat(canonical.metadata().compositeAliases()).containsKey("total");
-        assertThat(canonical.metadata().compositeAliases().get("total")).contains("SUM(a)").contains("SUM(b)");
+        assertThat(canonical.metadata().compositeAliases().get("total")).contains(CompositeIngredientNames.alias("SUM(a)")).contains(CompositeIngredientNames.alias("SUM(b)"));
         assertThat(canonical.hashComponents().aggregates()).contains("SUM(a)", "SUM(b)");
     }
 

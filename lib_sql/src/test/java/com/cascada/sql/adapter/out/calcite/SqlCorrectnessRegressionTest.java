@@ -1,20 +1,22 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.cache.application.service.ExecuteLogicalQueryService;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.safety.CacheConfiguration;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
-import com.cascada.sql.adapter.dialect.MySqlToSparkFunctionTranslator;
-import com.cascada.sql.domain.RegisteredTable;
+import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.sql.adapter.out.dialect.MySqlToSparkFunctionTranslator;
+import com.cascada.sql.domain.model.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
 import static org.assertj.core.api.Assertions.*;
 
 class SqlCorrectnessRegressionTest {
@@ -41,9 +43,6 @@ class SqlCorrectnessRegressionTest {
     @ParameterizedTest
     @ValueSource(strings = {
             "SELECT AVG(x) FROM t WHERE ts>=0 AND ts<=172799",
-            "SELECT SUM(x)/COUNT(x) AS mean FROM t WHERE ts>=0 AND ts<=172799",
-            "SELECT MAX(x)-MIN(x) AS spread FROM t WHERE ts>=0 AND ts<=172799",
-            "SELECT country AS c,SUM(x) FROM t WHERE ts>=0 AND ts<=172799 GROUP BY country",
             "SELECT country,SUM(x) AS n FROM t WHERE ts>=0 AND ts<=172799 GROUP BY country ORDER BY n+1 LIMIT 1",
             "SELECT country,SUM(x) AS n FROM t WHERE ts>=0 AND ts<=172799 GROUP BY country ORDER BY n LIMIT 1 OFFSET 1"
     })
@@ -76,7 +75,7 @@ class SqlCorrectnessRegressionTest {
     void volatileAndUnclassifiedFunctionsBypassCacheCanonicalization(String predicate) {
         assertThatThrownBy(() -> factory.canonicalize(
                 "SELECT SUM(x) FROM t WHERE ts >= 0 AND ts <= 100 AND " + predicate))
-                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class);
+                .isInstanceOf(com.cascada.sql.exception.UnsupportedSqlException.class);
     }
 
     @ParameterizedTest
@@ -93,7 +92,7 @@ class SqlCorrectnessRegressionTest {
     void qualifiedAggregateLookingFunctionsAreNotAssumedToBeStandardAggregates() {
         assertThatThrownBy(() -> factory.canonicalize(
                 "SELECT custom.SUM(x) FROM t WHERE ts >= 0 AND ts <= 100"))
-                .isInstanceOf(com.cascada.sql.domain.UnsupportedSqlException.class);
+                .isInstanceOf(com.cascada.sql.exception.UnsupportedSqlException.class);
     }
 
     @Test

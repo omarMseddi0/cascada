@@ -1,13 +1,12 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.cache.domain.model.time.TimeRange;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -148,15 +147,12 @@ class GapQueryBuilderDeepTest {
     // --- union / subquery injection --------------------------------------------------------------
 
     @Test
-    void injectsTheGapIntoTheInnerWhereOfASubqueryWrapper() {
-        String gapSql = builder.buildGapQuery(
+    void rejectsSubqueryRewritingWhenTheOuterScopeCannotSeeRawTime() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> builder.buildGapQuery(
                 "SELECT sub.bucket, SUM(sub.b) FROM "
                         + "(SELECT ts AS bucket, bytes AS b FROM traffic WHERE ts >= 0 AND ts <= 999999) AS sub "
                         + "GROUP BY sub.bucket",
-                body(0L));
-        assertThat(gapSql).contains("ts >= 0");
-        assertThat(gapSql).contains("ts <= " + (DAY - 1));
-        assertThat(gapSql).doesNotContain("999999");
+                body(0L))).isInstanceOf(com.cascada.sql.exception.UnsupportedSqlException.class);
     }
 
     @Test

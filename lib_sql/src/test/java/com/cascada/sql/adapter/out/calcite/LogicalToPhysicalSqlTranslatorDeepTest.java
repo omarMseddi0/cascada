@@ -1,14 +1,13 @@
-package com.cascada.sql.adapter.calcite;
+package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.sql.domain.RegisteredTable;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.sql.domain.model.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.sql.domain.TimeDimensionMap;
-import com.cascada.sql.domain.UnsupportedSqlException;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.sql.domain.model.TimeDimensionMap;
+import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.Map;
 import java.util.Set;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -110,12 +109,13 @@ class LogicalToPhysicalSqlTranslatorDeepTest {
     }
 
     @Test
-    void rejectsNestedSelectScopesBeforeRewritingOuterColumnNames() {
-        assertThatThrownBy(() -> translator.translate(
-                "SELECT country FROM traffic WHERE id IN "
-                        + "(SELECT id FROM users WHERE country = 'FR')", catalog()))
-                .isInstanceOf(UnsupportedSqlException.class)
-                .hasMessageContaining("nested SELECT scopes");
+    void resolvesNestedSelectsInTheirOwnRegisteredSourceScope() {
+        TableCatalog tables = catalog().register(RegisteredTable.of("users", "/lakehouse/users",
+                Map.of("id", "U1", "country", "U2", "ts", "UT"), "ts"));
+        String physical = translator.translate("SELECT country FROM traffic WHERE id IN "
+                + "(SELECT id FROM users WHERE country = 'FR')", tables);
+        assertThat(physical).contains("delta.`/lakehouse/traffic`", "delta.`/lakehouse/users`", "U2 = 'FR'");
+        assertThat(physical).doesNotContain("C5 = 'FR'");
     }
 
     @Test

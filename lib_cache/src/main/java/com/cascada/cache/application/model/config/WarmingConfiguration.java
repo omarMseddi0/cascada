@@ -1,4 +1,4 @@
-package com.cascada.cache.application.config;
+package com.cascada.cache.application.model.config;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -8,16 +8,21 @@ import java.util.Objects;
  * largest frame worth storing (a near-unique GROUP BY would otherwise fill the cache tier).
  */
 public record WarmingConfiguration(long bucketSeconds, int topNQueries, int maximumPatterns,
-                                   Duration bucketTimeToLive, int maximumCachedRows) {
+                                   Duration bucketTimeToLive, int maximumCachedRows, int fixedStepSeconds) {
 
     public static final Duration DEFAULT_BUCKET_TIME_TO_LIVE = Duration.ofDays(7);
 
     public WarmingConfiguration {
         Objects.requireNonNull(bucketTimeToLive, "bucketTimeToLive");
-        if (bucketSeconds <= 0 || topNQueries < 0 || maximumPatterns < 1 || maximumCachedRows < 0
+        if (fixedStepSeconds <= 0 || bucketSeconds <= 0 || topNQueries < 0 || maximumPatterns < 1 || maximumCachedRows < 0
                 || bucketTimeToLive.isNegative() || bucketTimeToLive.isZero()) {
             throw new IllegalArgumentException("invalid warming configuration");
         }
+    }
+
+    public WarmingConfiguration(long bucketSeconds, int topNQueries, int maximumPatterns,
+                                Duration bucketTimeToLive, int maximumCachedRows) {
+        this(bucketSeconds, topNQueries, maximumPatterns, bucketTimeToLive, maximumCachedRows, 300);
     }
 
     public static WarmingConfiguration of(long bucketSeconds, int topNQueries, int maximumPatterns) {

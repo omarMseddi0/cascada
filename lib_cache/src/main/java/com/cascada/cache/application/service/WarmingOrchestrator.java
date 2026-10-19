@@ -1,6 +1,7 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.config.WarmingConfiguration;
+import com.cascada.cache.application.model.ResolvedWarmingQuery;
+import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.BucketCachePort;
@@ -9,24 +10,24 @@ import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.QueryPopularityPort;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
-import com.cascada.cache.application.result.PatternWarmingResult;
-import com.cascada.cache.application.result.WarmingReport;
+import com.cascada.cache.application.model.PatternWarmingResult;
+import com.cascada.cache.application.model.WarmingReport;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
-import com.cascada.cache.domain.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.application.service.time.TimeBucketCalculator;
 import com.cascada.cache.application.service.warming.DataChangeDetector;
 import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.PopularQuery;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PopularQuery;
 import com.cascada.cache.domain.time.BucketMath;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.identity.domain.model.QueryHash;
 import java.math.BigInteger;
 import java.time.Clock;
 import java.time.Duration;
@@ -186,7 +187,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         long validationStart = wholeDays ? todayStart - lookbackSeconds + SECONDS_PER_DAY
                 : BucketMath.floor(warmStart, bucketSeconds) + bucketSeconds;
         long validationEnd = wholeDays ? todayStart - SECONDS_PER_DAY - 1 : currentBucketStart - bucketSeconds - 1;
-        com.cascada.cache.application.service.warming.ValidationCheck check = dataChangeDetector != null && validationEnd >= validationStart
+        com.cascada.cache.application.model.warming.ValidationCheck check = dataChangeDetector != null && validationEnd >= validationStart
                 ? dataChangeDetector.check(new TimeRange(validationStart, validationEnd)) : null;
         WarmingReport report = warmCycle(warmStart, currentBucketStart - 1, check != null && check.changed());
         if (check != null && lastCycleSucceeded) dataChangeDetector.acknowledge(check);
@@ -270,7 +271,9 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             return Optional.of(parser.canonicalize(popularQuery.physicalSql()));
         } catch (RuntimeException unsupported) {
             QueryCancellation.rethrowIfCancelled(unsupported);
-            LOGGER.fine("popular query " + popularQuery.queryHash() + " can no longer be canonicalised; skipping");
+            if (LOGGER.isLoggable(java.util.logging.Level.FINE)) {
+                LOGGER.fine("popular query " + popularQuery.queryHash() + " can no longer be canonicalised; skipping");
+            }
             return Optional.empty();
         }
     }
@@ -374,7 +377,11 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         if (decimalComposite || frame.rowCount() > configuration.maximumCachedRows()) {
             cacheBackend.evict(key);
             if (coverageIndex != null) coverageIndex.markEvicted(queryHash, configuration.bucketSeconds(), bucketStart);
-            LOGGER.fine("bucket " + key + " has " + frame.rowCount() + " rows, above the cache row cap; not stored");
+            if (LOGGER.isLoggable(java.util.logging.Level.FINE)) {
+                LOGGER.fine("bucket " + key + " not stored: " + (decimalComposite
+                        ? "decimal composite aggregates are not cacheable"
+                        : frame.rowCount() + " rows, above the cache row cap"));
+            }
             return false;
         }
         if (generation.isPresent()) {

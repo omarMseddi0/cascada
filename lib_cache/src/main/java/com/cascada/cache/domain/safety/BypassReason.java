@@ -11,6 +11,7 @@ package com.cascada.cache.domain.safety;
 public enum BypassReason {
 
     NO_AGGREGATION,
+    HOT_VIEW_ONLY,
     NON_MERGEABLE_SQL_FEATURE,
     IMPOSSIBLE_MATH,
     HIGH_CARDINALITY_GROUP_BY,

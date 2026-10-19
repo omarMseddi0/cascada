@@ -3,21 +3,23 @@ package com.cascada.cache.application.service;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
-import com.cascada.cache.application.config.WarmingConfiguration;
-import com.cascada.cache.application.result.WarmingReport;
+import com.cascada.cache.application.model.config.WarmingConfiguration;
+import com.cascada.cache.application.model.WarmingReport;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.application.service.warming.DataChangeDetector;
 import com.cascada.cache.application.service.warming.WarmingQueue;
-import com.cascada.cache.domain.cube.QueryShape;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.hashing.HashComponents;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.query.PostProcessing;
-import com.cascada.cache.domain.query.QueryMetadata;
-import com.cascada.cache.domain.time.TimeRange;
-import com.cascada.identity.domain.QueryHash;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
+import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.identity.domain.model.QueryHash;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -138,6 +140,60 @@ class WarmingFreshnessTest {
         WarmingReport report = restartedWarmer.warmCycle(0, 2 * DAY - 1, false);
 
         assertThat(report.patternsWarmed()).isEqualTo(1);
-        assertThat(isCached(0)).isTrue();
+        QueryHash currentHash = new QueryHashGenerator().generateQueryHash(traffic(), 300);
+        assertThat(backend.existsForKeys(List.of(CacheKeyFactory.buildBucketKey(currentHash, 0, DAY)))).containsExactly(true);
+        assertThat(isCached(0)).isFalse();
     }
+
+    @Test
+    void restartedPatternsUseConfiguredStepAndCurrentSourceEligibility() {
+        popularity.recordObservation(TRAFFIC, TRAFFIC_SQL);
+        var configuration = new WarmingConfiguration(DAY, 10, 100, Duration.ofDays(1), 100, 600);
+        var restarted = new WarmingOrchestrator(backend, sql -> trafficRows(1), (sql, plan) -> sql,
+                new WarmingQueue(), popularity, null, sql -> traffic(), null, null,
+                configuration, movableClock, CacheConfiguration.defaults());
+        restarted.warmCycle(0, DAY - 1, false);
+        QueryHash currentHash = new QueryHashGenerator().generateQueryHash(traffic(), 600);
+        assertThat(backend.existsForKeys(List.of(CacheKeyFactory.buildBucketKey(currentHash, 0, DAY)))).containsExactly(true);
+        assertThat(isCached(0)).isFalse();
+
+        var viewOnly = new WarmingOrchestrator(backend, sql -> { throw new AssertionError("HOT_VIEW must not warm"); },
+                (sql, plan) -> sql, new WarmingQueue(), popularity, null,
+                sql -> new CanonicalQueryObject(traffic().hashComponents(), traffic().timeRange(), traffic().postProcessing(),
+                        traffic().metadata().withUsesHotBatch(false), TRAFFIC_SQL, traffic().sourceSignature(),
+                        traffic().projectionSignature()), null, null,
+                configuration, movableClock, CacheConfiguration.defaults());
+        assertThat(viewOnly.warmCycle(DAY, 2 * DAY - 1, false).bucketsWarmed()).isZero();
+    }
+    @Test
+    void queryObservationDoesNotWaitForBackgroundSparkWork() throws Exception {
+        var enteredSpark = new java.util.concurrent.CountDownLatch(1);
+        var releaseSpark = new java.util.concurrent.CountDownLatch(1);
+        var queue = new WarmingQueue();
+        var warmer = new WarmingOrchestrator(backend, sql -> {
+            enteredSpark.countDown();
+            try {
+                if (!releaseSpark.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    throw new AssertionError("test did not release Spark");
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(interrupted);
+            }
+            return trafficRows(1);
+        }, (sql, plan) -> sql, queue, popularity, DAY, 0);
+        warmer.recordQuery(TRAFFIC, traffic());
+        try (var tasks = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var cycle = tasks.submit(() -> warmer.warmCycle(0, DAY - 1, false));
+            try {
+                assertThat(enteredSpark.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                tasks.submit(() -> warmer.recordQuery(TRAFFIC, traffic()))
+                        .get(2, java.util.concurrent.TimeUnit.SECONDS);
+                assertThat(queue.size()).isEqualTo(1);
+            } finally {
+                releaseSpark.countDown();
+            }
+            assertThat(cycle.get(5, java.util.concurrent.TimeUnit.SECONDS).bucketsWarmed()).isEqualTo(1);
+        }
+    }
+
 }

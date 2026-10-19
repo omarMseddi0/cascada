@@ -1,8 +1,8 @@
 package com.cascada.cache.application.service.safety;
 
-import com.cascada.cache.domain.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.safety.BypassReason;
-import com.cascada.cache.domain.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.domain.safety.CacheDecision;
 import java.util.List;
 import java.util.Optional;
@@ -12,10 +12,7 @@ import java.util.Optional;
  * in {@code safety_rules.py}. The first rule that fires returns its bypass reason; if none fire, the
  * query is safe to cache ({@link CacheDecision#AGGREGATION_V1}).
  *
- * <p>The {@code Open/Closed} principle (ARCHITECTURE §C.2): you extend the safe set by registering a
- * new {@link SafetyRule}, never by editing the engine. {@link #defaultRegistry()} is the generalised
- * Cascada set. The reference engine's microservice-specific "hot view only" rule is intentionally
- * absent (plan §8.11): the customer never selects a caching mode, so nothing bypasses on it.
+ * Source eligibility is part of the safety contract: HOT_VIEW-only work bypasses bucket caching.
  */
 public final class SafetyRuleRegistry {
 
@@ -30,6 +27,7 @@ public final class SafetyRuleRegistry {
                 new RequiresAggregationRule(),
                 new NonMergeableSqlFeatureRule(),
                 new ImpossibleMathRule(),
+                new HotViewOnlyRule(),
                 new HighCardinalityGroupByRule(),
                 new LiquidClusteredFilterRule(),
                 new IncompatibleTimeStepRule(),
@@ -62,6 +60,14 @@ public final class SafetyRuleRegistry {
         return rules.stream()
                 .flatMap(rule -> rule.evaluate(canonicalObject, configuration).stream())
                 .toList();
+    }
+
+    /** Shared read-path and restart-warming policy; short ranges can warm complete future-use buckets. */
+    public boolean permitsWarming(List<BypassReason> reasons, CacheConfiguration configuration) {
+        return reasons.isEmpty() || reasons.contains(BypassReason.MINIMUM_TIME_RANGE)
+                && reasons.stream().allMatch(reason -> reason == BypassReason.MINIMUM_TIME_RANGE
+                        || reason == BypassReason.PARTIAL_DAY_BUCKET)
+                && configuration.minimumCacheableTimeRangeSeconds().filter(seconds -> seconds > 0).isPresent();
     }
 
     public List<SafetyRule> rules() {

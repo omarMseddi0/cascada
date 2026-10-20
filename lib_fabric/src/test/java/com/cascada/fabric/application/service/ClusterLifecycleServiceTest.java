@@ -2,11 +2,12 @@ package com.cascada.fabric.application.service;
 
 import com.cascada.fabric.application.port.out.ClusterManifestRenderingPort;
 import com.cascada.fabric.application.port.out.ClusterOrchestratorPort;
-import com.cascada.fabric.domain.ClusterValues;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.fabric.domain.model.ClusterValues;
+import com.cascada.sparkconfig.application.service.SparkConfigurationDeriver;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -20,7 +21,7 @@ class ClusterLifecycleServiceTest {
         RecordingRenderer renderer = new RecordingRenderer(events);
         RecordingOrchestrator orchestrator = new RecordingOrchestrator(events);
         ClusterLifecycleService service = new ClusterLifecycleService(renderer, orchestrator);
-        ClusterValues values = ClusterValues.defaults();
+        ClusterValues values = new ClusterSettingsService(new SparkConfigurationDeriver()::deriveMemorySplit).prepareClusterSettings(Map.of());
 
         assertThat(service.deploy(values)).containsExactly("Deployment/cascada-driver-copy1");
         service.stop(values);

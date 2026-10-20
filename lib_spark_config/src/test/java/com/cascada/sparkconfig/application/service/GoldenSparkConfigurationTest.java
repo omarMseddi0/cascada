@@ -1,10 +1,12 @@
-package com.cascada.sparkconfig.domain;
+package com.cascada.sparkconfig.application.service;
 
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
-
+import com.cascada.sparkconfig.domain.ExecutorPlacement;
+import com.cascada.sparkconfig.domain.model.SparkConfiguration;
+import com.cascada.sparkconfig.domain.WorkloadType;
 import java.io.IOException;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -67,5 +69,11 @@ class GoldenSparkConfigurationTest {
         // The golden config has no offHeap key; the MIXED reference must not emit one either.
         assertThat(derivedReferenceConfiguration.containsKey("spark.memory.offHeap.size")).isFalse();
         assertThat(goldenFlattenedConfiguration).doesNotContainKey("spark.memory.offHeap.size");
+    }
+    @org.junit.jupiter.api.Test
+    void fixedInfrastructureMapCannotBeMutatedByCallers() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                StaticSparkInfrastructureSettings.referenceInfrastructure().put("spark.executor.memory", "1g"))
+                .isInstanceOf(UnsupportedOperationException.class);
     }
 }

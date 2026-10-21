@@ -1,14 +1,13 @@
 package com.cascada.app.adapter.out.execution;
 
 import com.cascada.app.bootstrap.CascadaLauncher;
-
-import org.junit.jupiter.api.Test;
-
-import java.util.concurrent.atomic.AtomicInteger;
+import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.domain.frame.ResultFrame;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import com.cascada.cache.domain.frame.ResultFrame;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -113,8 +112,7 @@ class LazyQueryExecutorTest {
     }
 
     @Test
-    void usageDoesNotInitializeConfiguredRuntime() throws Exception {
-        CascadaLauncher.main(new String[0]);
-        CascadaLauncher.main(new String[]{"query"});
+    void commandArgumentsAreRejectedBeforeStartingTheRuntime() throws Exception {
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> CascadaLauncher.main(new String[]{"query"}));
     }
 }

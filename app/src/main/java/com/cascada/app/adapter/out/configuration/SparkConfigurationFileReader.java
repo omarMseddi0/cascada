@@ -27,14 +27,14 @@ public final class SparkConfigurationFileReader {
             throw new ConfigurationException("Cannot read Spark configuration: " + path, failure);
         }
     }
-    private static void flatten(Map<String, Object> group, Map<String, String> properties) {
-        group.forEach((key, value) -> {
+    private static void flatten(Map<?, ?> group, Map<String, String> properties) {
+        for (var entry : group.entrySet()) {
+            String key = entry.getKey().toString();
+            Object value = entry.getValue();
             if (key.startsWith("spark.") && value instanceof String text) properties.put(key, text);
             else if (!key.startsWith("spark.") && value instanceof Map<?, ?> nested) {
-                Map<String, Object> section = new LinkedHashMap<>();
-                nested.forEach((name, setting) -> section.put(name.toString(), setting));
-                flatten(section, properties);
+                flatten(nested, properties);
             } else throw new IllegalArgumentException("Spark configuration must contain spark.* string values");
-        });
+        }
     }
 }

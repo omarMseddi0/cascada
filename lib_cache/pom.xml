@@ -31,7 +31,7 @@
             <artifactId>cascada-lib-identity</artifactId>
         </dependency>
 
-        <!-- adapter-only: cache value serialization (Arrow IPC + zstd) and sketches -->
+        <!-- adapter-only: cache value serialization (Arrow IPC + zstd) -->
         <dependency>
             <groupId>com.github.luben</groupId>
             <artifactId>zstd-jni</artifactId>
@@ -44,14 +44,6 @@
             <groupId>org.apache.arrow</groupId>
             <artifactId>arrow-memory-unsafe</artifactId>
             <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.datasketches</groupId>
-            <artifactId>datasketches-java</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.datasketches</groupId>
-            <artifactId>datasketches-memory</artifactId>
         </dependency>
         <dependency>
             <groupId>io.lettuce</groupId>
@@ -108,7 +100,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!-- Agrona, Arrow and DataSketches require access to these JDK modules. -->
+                    <!-- Agrona and Arrow require access to these JDK modules. -->
                     <argLine>${agrona.jvm.args}</argLine>
                 </configuration>
             </plugin>

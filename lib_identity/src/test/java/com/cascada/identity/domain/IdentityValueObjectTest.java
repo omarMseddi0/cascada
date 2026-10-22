@@ -1,100 +1,13 @@
 package com.cascada.identity.domain;
 
-import net.jqwik.api.ForAll;
-import net.jqwik.api.Property;
-import net.jqwik.api.constraints.IntRange;
-import net.jqwik.api.constraints.LongRange;
+import com.cascada.identity.domain.model.QueryHash;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class IdentityValueObjectTest {
-
-    @Nested
-    class SchemaVersionTest {
-
-        @Test
-        void initialIsZeroAndNextIncrements() {
-            assertThat(SchemaVersion.initial().value()).isZero();
-            assertThat(SchemaVersion.initial().next().value()).isEqualTo(1L);
-        }
-
-        @Test
-        void rejectsNegativeVersion() {
-            assertThatThrownBy(() -> SchemaVersion.of(-1)).isInstanceOf(IllegalArgumentException.class);
-        }
-
-        @Property
-        void nextAlwaysIncreasesByExactlyOne(@ForAll @LongRange(min = 0, max = 1_000_000) long version) {
-            assertThat(SchemaVersion.of(version).next().value()).isEqualTo(version + 1);
-        }
-    }
-
-    @Nested
-    class LineageHashTest {
-
-        @Test
-        void emptyIsADistinctSentinel() {
-            assertThat(LineageHash.empty().value()).isEqualTo("no-lineage");
-        }
-
-        @Test
-        void rejectsBlankValue() {
-            assertThatThrownBy(() -> LineageHash.of("  ")).isInstanceOf(IllegalArgumentException.class);
-            assertThatThrownBy(() -> LineageHash.of(null)).isInstanceOf(IllegalArgumentException.class);
-        }
-
-        @Test
-        void canonicalSourceVersionStringIsOrderIndependent() {
-            String ordered = LineageHash.canonicalSourceVersionString(List.of("table_a:5", "table_b:2"));
-            String reversed = LineageHash.canonicalSourceVersionString(List.of("table_b:2", "table_a:5"));
-            assertThat(ordered).isEqualTo(reversed).isEqualTo("9:table_a:59:table_b:2");
-        }
-
-        @Test
-        void canonicalSourceVersionStringHandlesSingleAndEmpty() {
-            assertThat(LineageHash.canonicalSourceVersionString(List.of("only:1"))).isEqualTo("6:only:1");
-            assertThat(LineageHash.canonicalSourceVersionString(List.of())).isEmpty();
-        }
-
-        @Test
-        void sourceVersionsCannotCollideWithJoinedOrEmptyElements() {
-            assertThat(LineageHash.canonicalSourceVersionString(List.of("a:1|b:2")))
-                    .isNotEqualTo(LineageHash.canonicalSourceVersionString(List.of("a:1", "b:2")));
-            assertThat(LineageHash.canonicalSourceVersionString(List.of("")))
-                    .isNotEqualTo(LineageHash.canonicalSourceVersionString(List.of()));
-        }
-
-        @Test
-        void duplicateSourceVersionsDoNotChangeTheCanonicalSet() {
-            assertThat(LineageHash.canonicalSourceVersionString(List.of("table_a:5", "table_a:5")))
-                    .isEqualTo(LineageHash.canonicalSourceVersionString(List.of("table_a:5")));
-        }
-    }
-
-    @Nested
-    class PolicyVersionTest {
-
-        @Test
-        void currentIsVersionFour() {
-            assertThat(PolicyVersion.current().value()).isEqualTo(4);
-        }
-
-        @Test
-        void rejectsVersionsBelowOne() {
-            assertThatThrownBy(() -> PolicyVersion.of(0)).isInstanceOf(IllegalArgumentException.class);
-            assertThatThrownBy(() -> PolicyVersion.of(-3)).isInstanceOf(IllegalArgumentException.class);
-        }
-
-        @Property
-        void acceptsAnyPositiveVersion(@ForAll @IntRange(min = 1, max = 10_000) int version) {
-            assertThat(PolicyVersion.of(version).value()).isEqualTo(version);
-        }
-    }
 
     @Nested
     class QueryHashTest {

@@ -3,28 +3,26 @@ package com.cascada.app.bootstrap;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.out.sketch.HyperLogLogDistinctCounter;
-import com.cascada.cache.adapter.out.sketch.KllQuantileEstimator;
-import com.cascada.cache.application.config.CacheExecutionConfiguration;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.*;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.cube.CubeSubsumptionPlanner;
 import com.cascada.cache.application.service.cube.CubeConsistencyVerifier;
-import com.cascada.cache.domain.cube.CachedShapeEntry;
-import com.cascada.cache.domain.cube.QueryShape;
+import com.cascada.cache.domain.model.cube.CachedShapeEntry;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.safety.CacheConfiguration;
-import com.cascada.cache.domain.query.CanonicalQueryObject;
-import com.cascada.cache.domain.time.GapPlan;
-import com.cascada.cache.domain.time.TimeRange;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.time.GapPlan;
+import com.cascada.cache.domain.model.time.TimeRange;
 import com.cascada.sql.adapter.out.calcite.CalciteCanonicalObjectFactory;
 import com.cascada.sql.adapter.out.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.adapter.out.calcite.LogicalToPhysicalSqlTranslator;
-import com.cascada.sql.domain.RegisteredTable;
+import com.cascada.sql.domain.model.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import java.math.BigDecimal;
@@ -367,72 +365,6 @@ class LocalSparkConsistencyIntegrationTest {
         System.out.println("CONSISTENCY_PASS cube-exact-filter-projection-boundaries");
     }
 
-    @Test void hllAndKllMergeSparkProducedDayPartitionsAgainstSparkTruth() {
-        List<HyperLogLogDistinctCounter> hlls = new ArrayList<>();
-        List<HyperLogLogDistinctCounter> stringHlls = new ArrayList<>();
-        List<KllQuantileEstimator> klls = new ArrayList<>();
-        for (int day = 0; day < 7; day++) {
-            hlls.add(new HyperLogLogDistinctCounter()); stringHlls.add(new HyperLogLogDistinctCounter());
-            klls.add(new KllQuantileEstimator());
-        }
-        var rows = spark.sql("SELECT ts, user_id, latency, CAST(user_id AS STRING) AS user_string FROM events").toLocalIterator();
-        long values = 0;
-        while (rows.hasNext()) {
-            var row = rows.next();
-            int day = (int) ((row.getLong(0) - BASE) / DAY);
-            hlls.get(day).add(row.getLong(1));
-            stringHlls.get(day).add(row.getString(3));
-            if (!row.isNullAt(2)) { klls.get(day).add(row.getDouble(2)); values++; }
-        }
-        double truth = direct.execute("SELECT COUNT(DISTINCT user_id) AS n FROM events").longAt(0, 0);
-        double estimate = HyperLogLogDistinctCounter.unionOf(hlls).estimateDistinctCount();
-        assertThat(Math.abs(estimate - truth) / truth).isLessThan(0.05);
-        // A one-input union may retain HIP, while a repeated union switches to the composite
-        // estimator. Test the true cardinality/error contract, not identical getEstimate() bits.
-        double dayTruth = direct.execute("SELECT COUNT(DISTINCT user_id) AS n FROM events WHERE ts < " + (BASE + DAY)).longAt(0, 0);
-        double singleEstimate = HyperLogLogDistinctCounter.unionOf(List.of(hlls.get(0))).estimateDistinctCount();
-        double duplicateEstimate = HyperLogLogDistinctCounter.unionOf(List.of(hlls.get(0), hlls.get(0))).estimateDistinctCount();
-        assertThat(Math.abs(singleEstimate - dayTruth) / dayTruth).isLessThan(0.05);
-        assertThat(Math.abs(duplicateEstimate - dayTruth) / dayTruth).isLessThan(0.05);
-        var reversed = new ArrayList<>(hlls);
-        Collections.reverse(reversed);
-        assertThat(HyperLogLogDistinctCounter.unionOf(reversed).estimateDistinctCount()).isEqualTo(estimate);
-        double stringTruth = direct.execute("SELECT COUNT(DISTINCT CAST(user_id AS STRING)) AS n FROM events").longAt(0, 0);
-        stringHlls.forEach(counter -> counter.add((String) null));
-        double stringEstimate = HyperLogLogDistinctCounter.unionOf(stringHlls).estimateDistinctCount();
-        assertThat(Math.abs(stringEstimate - stringTruth) / stringTruth).isLessThan(0.05);
-        assertThat(HyperLogLogDistinctCounter.unionOf(List.of()).estimateDistinctCount()).isZero();
-        KllQuantileEstimator merged = KllQuantileEstimator.mergeOf(klls);
-        double maximumRankError = 0;
-        for (double rank : List.of(0.0, 0.5, 0.95, 0.99, 1.0)) {
-            double value = merged.quantile(rank);
-            var count = direct.execute("SELECT COUNT(*) AS n FROM events WHERE latency <= " + value).longAt(0, 0);
-            double error = Math.abs((double) count / values - rank);
-            maximumRankError = Math.max(maximumRankError, error);
-            assertThat(error).as("KLL empirical Spark rank " + rank).isLessThan(0.025);
-        }
-        System.out.println("CONSISTENCY_PASS sketches HLL_truth=" + truth + " estimate=" + estimate
-                + " string_estimate=" + stringEstimate + " single_estimate=" + singleEstimate + " duplicate_estimate=" + duplicateEstimate
-                + " KLL_values=" + values + " max_rank_error=" + maximumRankError);
-    }
-
-    @Test void hllStringEdgeCasesAgreeWithSparkDistinctNullAndEmptySemantics() {
-        String source = "SELECT CAST(NULL AS STRING) AS value UNION ALL SELECT '' UNION ALL SELECT '' "
-                + "UNION ALL SELECT 'a' UNION ALL SELECT decode(unhex('00'), 'UTF-8')";
-        var first = new HyperLogLogDistinctCounter();
-        var second = new HyperLogLogDistinctCounter();
-        var rows = spark.sql(source).collectAsList();
-        for (int row = 0; row < rows.size(); row++) {
-            String value = rows.get(row).isNullAt(0) ? null : rows.get(row).getString(0);
-            (row % 2 == 0 ? first : second).add(value);
-        }
-        long truth = direct.execute("SELECT COUNT(DISTINCT value) AS n FROM (" + source + ") values_table").longAt(0, 0);
-        assertThat(truth).isEqualTo(3);
-        double estimate = HyperLogLogDistinctCounter.unionOf(List.of(first, second)).estimateDistinctCount();
-        assertThat(estimate).as("NULL is excluded, empty string and NUL are distinct values").isCloseTo(truth, within(0.001));
-        System.out.println("CONSISTENCY_PASS HLL-null-empty-NUL truth=" + truth + " estimate=" + estimate);
-    }
-
     @TestFactory Stream<DynamicTest> cubeComponentRollupsAgainstIndependentSpark() {
         String bounds = " FROM events WHERE ts >= " + BASE + " AND ts <= " + END;
         String measures = "SUM(amount) AS `SUM(amount)`, COUNT(amount) AS `COUNT(amount)`, "
@@ -484,7 +416,7 @@ class LocalSparkConsistencyIntegrationTest {
                     + " GROUP BY FLOOR(ts/300)*300, region ORDER BY ts, region";
             var stored = canonicalizer.canonicalize(storedSql);
             var m = stored.metadata();
-            var metadata = new com.cascada.cache.domain.query.QueryMetadata(true, m.stalenessToleranceMillis(),
+            var metadata = new com.cascada.cache.domain.model.query.QueryMetadata(true, m.stalenessToleranceMillis(),
                     m.originalAggregates(), m.compositeAliases(), Optional.of(step), false, m.aggregateSpecs(), m.measureAggregates());
             var request = new CanonicalQueryObject(stored.hashComponents(), stored.timeRange(), stored.postProcessing(),
                     metadata, storedSql, stored.sourceSignature(), stored.projectionSignature(), stored.logicSignature());

@@ -42,7 +42,6 @@
         <jqwik.version>1.8.4</jqwik.version>
         <archunit.version>1.4.2</archunit.version>
         <jackson.version>2.20.0</jackson.version>
-        <datasketches.version>6.2.0</datasketches.version>
         <calcite.version>1.37.0</calcite.version>
         <arrow.version>18.3.0</arrow.version>
         <zstd.version>1.5.6-3</zstd.version>
@@ -107,16 +106,6 @@
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
                 <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.datasketches</groupId>
-                <artifactId>datasketches-java</artifactId>
-                <version>${datasketches.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.datasketches</groupId>
-                <artifactId>datasketches-memory</artifactId>
-                <version>3.0.2</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.calcite</groupId>
@@ -213,7 +202,7 @@
     <profiles>
         <profile>
             <id>validation</id>
-            <!-- Isolate CLI verification from IDE auto-builders that write target/classes. -->
+            <!-- Isolate reactor verification from IDE auto-builders that write target/classes. -->
             <build><directory>${project.basedir}/target/validation/target</directory></build>
         </profile>
         <profile>

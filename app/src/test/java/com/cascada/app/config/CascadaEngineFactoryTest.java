@@ -129,5 +129,21 @@ class CascadaEngineFactoryTest {
                     "SELECT SUM(bytes) AS total_bytes FROM traffic WHERE event_time >= 0 AND event_time <= 86399");
             assertThat(result.servedThroughCache()).isTrue();
         }
+    }    @Test
+    void ownsASeparateCpuExecutorAndTerminatesItOnClose() throws Exception {
+        var cpuField = CascadaEngineFactory.class.getDeclaredField("mergeTasks");
+        cpuField.setAccessible(true);
+        var cpu = (java.util.concurrent.ThreadPoolExecutor) cpuField.get(factory);
+        var ioField = CascadaEngineFactory.class.getDeclaredField("cacheTasks");
+        ioField.setAccessible(true);
+        var io = (java.util.concurrent.ExecutorService) ioField.get(factory);
+        assertThat(cpu.submit(() -> Thread.currentThread().isVirtual()).get()).isFalse();
+        assertThat(cpu.submit(() -> Thread.currentThread().getName()).get()).startsWith("cache-merge-");
+        assertThat(io.submit(() -> Thread.currentThread().isVirtual()).get()).isTrue();
+        assertThat(cpu.getMaximumPoolSize()).isLessThanOrEqualTo(Runtime.getRuntime().availableProcessors());
+        factory.close();
+        assertThat(cpu.isTerminated()).isTrue();
+        assertThat(io.isTerminated()).isTrue();
     }
+
 }

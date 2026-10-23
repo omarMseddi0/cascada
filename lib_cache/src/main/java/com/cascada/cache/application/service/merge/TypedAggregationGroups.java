@@ -8,11 +8,8 @@ import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.time.BucketMath;
 import java.math.BigDecimal;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
@@ -20,21 +17,22 @@ import java.util.concurrent.Executor;
  * Open-addressing group table with row-major, paged group state.
  *
  * <p>Every group owns one contiguous run of {@code long} words (primitive keys, primitive measures,
- * dictionary ids of STRING measures, null flags and the group hash) plus, only when the schema needs
- * them, object slots for STRING/DECIMAL keys and DECIMAL measures. Merging one input row therefore
- * touches one or two cache lines instead of one line per key/measure array. State is stored in
- * fixed-size pages, so adding groups never copies existing state or over-allocates it by doubling.
+ * null flags and rehash bits) plus, only when the schema needs
+ * them, object slots for STRING/DECIMAL keys and DECIMAL measures. STRING aggregate winners use
+ * constant storage with sparse exception pages. The fused row update keeps each group state hot.
+ * Pages hold 1,024 groups. The first page grows from 16 groups; later pages never copy all existing
+ * group payload or double its entire capacity.
  *
  * <p>A slot stores {@code hashTag << 32 | groupId + 1}; a probe rejects a different group by its tag
  * without reading that group's state. A frame is hashed once. Each owned row probes its group and updates all measures
  * before moving on, preserving locality across the row-major state.
  */
 final class TypedAggregationGroups {
-    private static final int GROUPS_PER_PAGE_SHIFT = 14;
+    private static final int GROUPS_PER_PAGE_SHIFT = 10;
     private static final int GROUPS_PER_PAGE = 1 << GROUPS_PER_PAGE_SHIFT;
     private static final int GROUP_IN_PAGE_MASK = GROUPS_PER_PAGE - 1;
     private static final int INITIAL_PAGE_TABLE_LENGTH = 4;
-    private static final int INITIAL_SLOT_COUNT = 1024;
+    private static final int INITIAL_SLOT_COUNT = 16;
     private static final long EMPTY_SLOT = 0L;
     private static final long HASH_SEED = 0x9E3779B97F4A7C15L;
     private static final long HASH_MULTIPLIER = 0xFF51AFD7ED558CCDL;
@@ -62,13 +60,11 @@ final class TypedAggregationGroups {
     private final int[] measureObjectOffsets;
     private final int flagWordOffset;
     private final int hashWordOffset;
+    private final boolean packedHash;
     private final int wordsPerGroup;
     private final int objectsPerGroup;
 
-    private final List<List<String>> stringMeasureDictionaries = new ArrayList<>();
-    private final List<Map<String, Integer>> stringMeasureDictionaryIds = new ArrayList<>();
-    private final String[] lastDictionaryValues;
-    private final int[] lastDictionaryIds;
+    private final GroupedStringValues[] stringMeasures;
 
     private long[][] wordPages = new long[INITIAL_PAGE_TABLE_LENGTH][];
     private Object[][] objectPages = new Object[INITIAL_PAGE_TABLE_LENGTH][];
@@ -95,6 +91,7 @@ final class TypedAggregationGroups {
 
         int dimensionCount = dimensionColumns.length;
         int measureCount = measureColumns.length;
+        stringMeasures = new GroupedStringValues[measureCount];
         keyStorageTypes = new ColumnType[dimensionCount];
         dimensionWordOffsets = new int[dimensionCount];
         dimensionObjectOffsets = new int[dimensionCount];
@@ -116,17 +113,20 @@ final class TypedAggregationGroups {
         }
         for (int measure = 0; measure < measureCount; measure++) {
             if (measureTypes[measure] == ColumnType.DECIMAL) measureObjectOffsets[measure] = nextObject++;
-            else measureWordOffsets[measure] = nextWord++;
-            stringMeasureDictionaries.add(new ArrayList<>());
-            stringMeasureDictionaryIds.add(new HashMap<>());
+            else if (measureTypes[measure] == ColumnType.STRING) {
+                stringMeasures[measure] = new GroupedStringValues(measureFunctions[measure], GROUPS_PER_PAGE_SHIFT);
+            } else measureWordOffsets[measure] = nextWord++;
         }
         flagWordOffset = nextWord;
-        nextWord += (dimensionCount + measureCount + Long.SIZE - 1) / Long.SIZE;
-        hashWordOffset = nextWord++;
+        int flagCount = dimensionCount + measureCount;
+        int flagWords = (flagCount + Long.SIZE - 1) / Long.SIZE;
+        nextWord += flagWords;
+        // Rehashing only needs the low 32 hash bits; tags remain in the slot entries. Use the
+        // spare upper half of the final validity word when no flag can occupy those bits.
+        packedHash = flagWords > 0 && ((flagCount - 1) & 63) < 32;
+        hashWordOffset = packedHash ? flagWordOffset + flagWords - 1 : nextWord++;
         wordsPerGroup = nextWord;
         objectsPerGroup = nextObject;
-        lastDictionaryValues = new String[measureCount];
-        lastDictionaryIds = new int[measureCount];
     }
 
     private static boolean isObjectStored(ColumnType type) {
@@ -154,7 +154,8 @@ final class TypedAggregationGroups {
             frame.hashes = new long[rowCount];
             frame.rows = new int[rowCount];
         }
-        if (rowCount >= 262_144 && partitionCount > 1) {
+        boolean manyWorkers = partitionCount > 16 && rowCount >= Math.max(32_768L, partitionCount * 512L);
+        if ((rowCount >= 262_144 || manyWorkers) && partitionCount > 1) {
             return partitionInParallel(frame, rowCount, executor);
         }
         computeRowHashes(input, rowCount, frame.hashes);
@@ -177,7 +178,8 @@ final class TypedAggregationGroups {
 
     /** Stable parallel count/prefix/scatter: each chunk owns disjoint input and output ranges. */
     private CompletableFuture<Void> partitionInParallel(PartitionedFrame frame, int rowCount, Executor executor) {
-        int chunks = (int) Math.min(partitionCount, ((long) rowCount + 65_535) / 65_536);
+        int chunks = partitionCount > 16 ? Math.min(partitionCount, Math.max(1, rowCount / 512))
+                : (int) Math.min(partitionCount, ((long) rowCount + 65_535) / 65_536);
         int[][] cursors = new int[chunks][partitionCount];
         CompletableFuture<?>[] work = new CompletableFuture<?>[chunks];
         for (int chunk = 0; chunk < chunks; chunk++) {
@@ -309,27 +311,35 @@ final class TypedAggregationGroups {
             if (entry >>> Integer.SIZE == hashTag && sameDimensions(group, input, row)) return group;
             slot = (slot + 1) & slotMask;
         }
-        if ((groupCount + 1L) * 2 > slots.length) {
+        // Leave 20% of tag slots empty; payload pages do not move when this smaller index grows.
+        if ((groupCount + 1L) * 5 > slots.length * 4L) {
             growSlots();
             slot = (int) hash & slotMask;
             while (slots[slot] != EMPTY_SLOT) slot = (slot + 1) & slotMask;
         }
         int group = groupCount++;
-        ensurePage(group >>> GROUPS_PER_PAGE_SHIFT);
-        wordPage(group)[wordBase(group) + hashWordOffset] = hash;
+        ensurePage(group);
+        wordPage(group)[wordBase(group) + hashWordOffset] = packedHash ? hash << 32 : hash;
         copyDimensions(group, input, row);
         slots[slot] = hashTag << Integer.SIZE | (group + 1L);
         return group;
     }
 
-    private void ensurePage(int page) {
+    private void ensurePage(int group) {
+        int page = group >>> GROUPS_PER_PAGE_SHIFT;
         if (page == wordPages.length) {
             wordPages = Arrays.copyOf(wordPages, page * 2);
             objectPages = Arrays.copyOf(objectPages, page * 2);
         }
-        if (wordPages[page] != null) return;
-        wordPages[page] = new long[GROUPS_PER_PAGE * wordsPerGroup];
-        if (objectsPerGroup > 0) objectPages[page] = new Object[GROUPS_PER_PAGE * objectsPerGroup];
+        if (wordPages[page] != null && (page != 0 || (group + 1) * wordsPerGroup <= wordPages[page].length)) return;
+        int capacity = page == 0 ? Math.min(GROUPS_PER_PAGE,
+                wordPages[0] == null ? 16 : wordPages[0].length / wordsPerGroup * 2) : GROUPS_PER_PAGE;
+        wordPages[page] = wordPages[page] == null ? new long[capacity * wordsPerGroup]
+                : Arrays.copyOf(wordPages[page], capacity * wordsPerGroup);
+        if (objectsPerGroup > 0) {
+            objectPages[page] = objectPages[page] == null ? new Object[capacity * objectsPerGroup]
+                    : Arrays.copyOf(objectPages[page], capacity * objectsPerGroup);
+        }
     }
 
     private void copyDimensions(int group, FrameColumnReader[] input, int row) {
@@ -411,23 +421,7 @@ final class TypedAggregationGroups {
                             ? function.combine(Double.longBitsToDouble(words[slot]), incoming) : incoming;
                     words[slot] = Double.doubleToRawLongBits(value);
                 }
-                case STRING -> {
-                    int incoming = dictionaryId(measure, column.stringValue(row));
-                    if (!initialized) {
-                        words[slot] = incoming;
-                    } else {
-                        int previous = (int) words[slot];
-                        List<String> dictionary = stringMeasureDictionaries.get(measure);
-                        words[slot] = switch (function) {
-                            case MINIMUM -> previous == incoming || SparkValues.compareStrings(
-                                    dictionary.get(previous), dictionary.get(incoming)) <= 0 ? previous : incoming;
-                            case MAXIMUM -> previous == incoming || SparkValues.compareStrings(
-                                    dictionary.get(previous), dictionary.get(incoming)) >= 0 ? previous : incoming;
-                            case SUM, COUNT -> throw new IllegalArgumentException(
-                                    "STRING aggregate column requires MIN or MAX, got " + function);
-                        };
-                    }
-                }
+                case STRING -> stringMeasures[measure].accumulate(group, column.stringValue(row), initialized);
                 case DECIMAL -> {
                     Object[] objects = objectPage(group);
                     int objectSlot = objectBase(group) + measureObjectOffsets[measure];
@@ -450,19 +444,6 @@ final class TypedAggregationGroups {
         }
     }
 
-    /** Equal values share one id, so MIN/MAX compare strings only when two different values meet. */
-    private int dictionaryId(int measure, String value) {
-        if (value == lastDictionaryValues[measure]) return lastDictionaryIds[measure];
-        List<String> dictionary = stringMeasureDictionaries.get(measure);
-        int id = stringMeasureDictionaryIds.get(measure).computeIfAbsent(value, newValue -> {
-            dictionary.add(newValue);
-            return dictionary.size() - 1;
-        });
-        lastDictionaryValues[measure] = value;
-        lastDictionaryIds[measure] = id;
-        return id;
-    }
-
     private void growSlots() {
         if (slots.length > Integer.MAX_VALUE / 2) {
             throw new IllegalStateException("too many distinct groups to merge in one frame");
@@ -472,7 +453,8 @@ final class TypedAggregationGroups {
         for (long entry : slots) {
             if (entry == EMPTY_SLOT) continue;
             int group = (int) entry - 1;
-            int slot = (int) wordPage(group)[wordBase(group) + hashWordOffset] & grownMask;
+            long storedHash = wordPage(group)[wordBase(group) + hashWordOffset];
+            int slot = (int) (packedHash ? storedHash >>> 32 : storedHash) & grownMask;
             while (grownSlots[slot] != EMPTY_SLOT) slot = (slot + 1) & grownMask;
             grownSlots[slot] = entry;
         }
@@ -565,7 +547,7 @@ final class TypedAggregationGroups {
     /** The group's merged STRING measure, or {@code null} when every input value was NULL. */
     String stringMeasure(int group, int measure) {
         return hasMeasure(group, measure)
-                ? stringMeasureDictionaries.get(measure).get((int) measureWord(group, measure))
+                ? stringMeasures[measure].value(group)
                 : null;
     }
 

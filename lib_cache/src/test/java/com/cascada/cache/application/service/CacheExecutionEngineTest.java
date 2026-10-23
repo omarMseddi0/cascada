@@ -96,6 +96,35 @@ class CacheExecutionEngineTest {
         }
     }
 
+    @Test
+    void streamedRetrievalAndCpuMergingUseIndependentExecutors() throws Exception {
+        CanonicalQueryObject canonical = globalAggregateOverThreeDays();
+        QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
+        var cpuSubmissions = new AtomicInteger();
+        BucketCachePort backend = new BucketCachePort() {
+            @Override public List<Boolean> existsForKeys(List<String> keys) { return keys.stream().map(key -> true).toList(); }
+            @Override public List<Optional<ResultFrame>> multiGet(List<String> keys) { throw new AssertionError("stream required"); }
+            @Override public void visitKeys(List<String> keys, java.util.function.BiConsumer<Integer,Optional<ResultFrame>> visitor) {
+                assertThat(Thread.currentThread().getName()).startsWith("cache-io-test");
+                for (int index = 0; index < keys.size(); index++) visitor.accept(index, Optional.of(appFrame("netflix", 10)));
+            }
+            @Override public void store(String key, ResultFrame frame, Duration ttl) { }
+            @Override public void evict(String key) { }
+        };
+        var io = java.util.concurrent.Executors.newSingleThreadExecutor(Thread.ofPlatform().daemon().name("cache-io-test").factory());
+        var cpu = java.util.concurrent.Executors.newFixedThreadPool(2, Thread.ofPlatform().daemon().name("cache-cpu-test").factory());
+        var request = java.util.concurrent.Executors.newSingleThreadExecutor(Thread.ofPlatform().daemon().factory());
+        try {
+            java.util.concurrent.Executor countedCpu = work -> { cpuSubmissions.incrementAndGet(); cpu.execute(work); };
+            var engine = new CacheExecutionEngine(backend, sql -> { throw new AssertionError("unexpected fallback"); },
+                    (sql, gap) -> "GAP_SQL", new CacheExecutionConfiguration(DAY, 300, "ts", 100),
+                    null, null, io, java.time.Clock.systemUTC(), countedCpu);
+            ResultFrame answer = request.submit(() -> engine.execute(canonical, hash)).get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(answer.rows().get(0).get("bytes")).isEqualTo(30.0);
+            assertThat(cpuSubmissions.get()).isGreaterThan(0);
+        } finally { request.shutdownNow(); io.shutdownNow(); cpu.shutdownNow(); }
+    }
+
     private static final long DAY = 86_400L;
 
     private final PortableFrameSerializer serializer = new PortableFrameSerializer();

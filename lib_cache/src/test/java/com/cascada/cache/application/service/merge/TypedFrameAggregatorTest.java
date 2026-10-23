@@ -135,7 +135,7 @@ class TypedFrameAggregatorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {2, 3, 8, 10})
+    @ValueSource(ints = {2, 3, 8, 10, 100})
     void partitionedMergeEqualsSinglePartitionMergeForEveryKeyAndMeasureType(int partitionCount) {
         List<ResultFrame> frames = mixedTypeFrames();
         Map<String, AggregateFunction> functions = Map.of(
@@ -424,6 +424,54 @@ class TypedFrameAggregatorTest {
             for (int row = 0; row < 3; row++) {
                 assertThat(result.longAt(row, 0)).isEqualTo(row);
                 assertThat(result.longAt(row, 1)).isEqualTo(90_000);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {31, 32, 33, 63, 64, 65, 96, 97})
+    void compactHashPreservesValidityAcrossBitBoundariesAndTableGrowth(int flagCount) {
+        ResultFrameBuilder input = ResultFrame.builder().expectedRows(2_500).column("key", ColumnType.LONG);
+        for (int column = 1; column < flagCount; column++) input.column("SUM(x" + column + ")", ColumnType.LONG);
+        for (int row = 0; row < 2_500; row++) {
+            input.appendLong(row);
+            for (int column = 1; column < flagCount; column++) {
+                if ((row + column) % 13 == 0) input.appendNull(); else input.appendLong(row + column);
+            }
+        }
+        ResultFrame frame = input.build();
+        TypedFrameAccumulator accumulator = new TypedFrameAccumulator(frame, List.of("key"), Map.of(), "ts", 300);
+        accumulator.accept(frame);accumulator.accept(frame);
+        ResultFrame result = accumulator.finish();
+        assertThat(result.rowCount()).isEqualTo(2_500);
+        for (int row = 0; row < 2_500; row++) {
+            if (result.longAt(row, 0) != row) throw new AssertionError("wrong key");
+            for (int column = 1; column < flagCount; column++) {
+                boolean missing = (row + column) % 13 == 0;
+                if (result.isNullAt(row, column) != missing
+                        || (!missing && result.longAt(row, column) != 2L * (row + column))) {
+                    throw new AssertionError("wrong validity/value at " + row + "," + column);
+                }
+            }
+        }
+    }
+
+    @Test
+    void oneHundredPartitionsPreserveResultsWithAnEightThreadCpuBudget() {
+        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(70_003)
+                .column("key", ColumnType.LONG).column("SUM(x)", ColumnType.LONG);
+        for (int row = 0; row < 70_003; row++) builder.appendLong(row).appendLong(row + 1L);
+        ResultFrame input = builder.build();
+        try (ExecutorService executor = Executors.newFixedThreadPool(8)) {
+            TypedFrameAccumulator accumulator = new TypedFrameAccumulator(input, List.of("key"),
+                    Map.of(), "ts", 300, 100, executor);
+            accumulator.accept(input);accumulator.accept(input);accumulator.accept(input);
+            ResultFrame result = accumulator.finish();
+            assertThat(result.rowCount()).isEqualTo(70_003);
+            for (int row = 0; row < result.rowCount(); row++) {
+                if (result.longAt(row, 0) != row || result.longAt(row, 1) != 3L * (row + 1)) {
+                    throw new AssertionError("wrong 100-partition result at " + row);
+                }
             }
         }
     }

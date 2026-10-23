@@ -86,8 +86,8 @@ public final class CacheExecutionEngine {
     }
 
     /**
-     * The full constructor accepts the executor owned by the composition root so concurrent requests share
-     * one bounded work queue. Existing overloads retain their behavior through the JDK common pool.
+     * Accepts the executor owned by the composition root. The separate-merge-executor overload lets
+     * the application give blocking retrieval and CPU aggregation different execution budgets.
      */
     public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
@@ -101,6 +101,15 @@ public final class CacheExecutionEngine {
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
                                 CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor,
                                 Clock clock) {
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, coverageIndex, cubeCatalog,
+                executor, clock, executor);
+    }
+
+    /** Separate blocking retrieval from the composition root's shared CPU merge budget. */
+    public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
+                                GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
+                                CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor,
+                                Clock clock, Executor mergeExecutor) {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.cacheBackend = Objects.requireNonNull(cacheBackend, "cacheBackend");
         this.sparkExecutor = Objects.requireNonNull(sparkExecutor, "sparkExecutor");
@@ -111,7 +120,8 @@ public final class CacheExecutionEngine {
         this.executor = Objects.requireNonNull(executor, "executor");
         this.timeBucketCalculator = new TimeBucketCalculator(configuration.bucketSeconds());
         this.frameMergeService = new FrameMergeService(configuration.fixedStepSeconds(),
-                configuration.timeColumnName(), configuration.mergeWorkerCount(), executor);
+                configuration.timeColumnName(), configuration.mergeWorkerCount(),
+                Objects.requireNonNull(mergeExecutor, "mergeExecutor"));
     }
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {

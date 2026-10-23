@@ -2,6 +2,211 @@
 
 A lakehouse query engine with a smart bucket cache
 
+## Direct CPU occupancy checks: 23 October 2026
+
+These tests answer whether configured threads actually run on CPUs. They instrument unchanged production revision `33e9c4b` using [Java 21 ThreadMXBean platform-thread CPU counters](https://docs.oracle.com/en/java/javase/21/docs/api/java.management/java/lang/management/ThreadMXBean.html). Each worker's occupancy is its CPU-time delta divided by merge wall time. The sum is busy-core equivalents: four workers continuously on CPU would total 4.0. These are interval averages, not a guarantee of 100% in every sampling window. They exclude caller, GC, compiler, and profiler CPU; they are not whole-process CPU utilization.
+
+The input and independent oracle match the compact-state experiment above: 20 million globally shuffled rows, one million groups, three weighted AVG outputs, NULLs, and exactly 12 columns. Input generation, validation, and explicit GC stay outside timing. The four-worker/300-frame LONG cell has three warmups and five measured rounds with JFR profiling enabled. Each additional cell has two warmups and three measured rounds without JFR. Different frame/key shapes are separate cells, not a controlled before/after optimization comparison.
+
+| Keys | Frames | Workers | Verified rounds | Wall seconds | Per-worker median CPU occupancy | Median busy-core equivalents |
+|---|---:|---:|---:|---:|---|---:|
+| LONG | 300 | 4 | 5 | 2.160 | 94.9%, 96.5%, 96.4%, 94.2% | 3.80 |
+| LONG | 20 | 4 | 3 | 2.174 | 96.1%, 97.6%, 97.0%, 96.8% | 3.88 |
+| STRING | 300 | 4 | 3 | 2.976 | 97.5%, 98.5%, 94.7%, 97.0% | 3.87 |
+| LONG | 300 | 8 | 3 | 1.150 | 96.8%, 96.1%, 97.5%, 95.4%, 96.8%, 97.9%, 96.8%, 97.5% | 7.72 |
+
+All 14 measured rounds passed: **280 million row visits, 14 million output groups, and 42 million checked averages**. LONG/300-frame aggregation acceptance averaged 3.86 busy-core equivalents at four workers, with finishing at 3.70. At eight workers those stages reached 7.84 and 7.48 respectively. Stage values include their scheduling/coordination time. The caller also performs routing for small frames, so configuring four workers is not a hard four-core limit for the whole JVM.
+
+Platform threads can migrate between logical processors; these counters establish CPU work and concurrency, not affinity to four distinct physical cores. This host has eight physical cores and sixteen logical processors. No CPU affinity or host power settings were changed. No hardware performance counters were collected, so cache-miss, memory-bandwidth, NUMA, and SIMD-efficiency claims would require further measurement. An idle worker is not the same as an executing worker stalled on memory; high occupancy alone does not prove efficient execution.
+
+### Profiler findings and hardware-level choices
+
+The JFR profile contains 6,181 top-frame execution samples on merge workers across warmup and measured merges. `accumulateRow` accounts for 31.5%, `sameDimensions` 28.4%, `findOrCreate` 21.2%, and stable sorting 8.3%. Samples are an approximate attribution, not exact phase timing. There is no evidence here that adding a busy-spin queue would improve throughput; the four workers already spend most of the merge interval on CPU. The next controlled optimization candidates are typed update loops and key comparison/probing. Any change must preserve NULL handling, overflow behavior, cancellation, and floating-point update order, then win an equal-input comparison.
+
+The existing representation already uses primitive pages, bit-packed flags/hash storage, hash tags, exclusive group ownership, stable parallel routing, and disjoint output ranges. [Agrona](https://github.com/aeron-io/agrona) offers primitive collections and direct buffers, but replacing this composite-key table requires measured benefits. [FFM was finalized for JDK 22](https://bugs.openjdk.org/browse/JDK-8312523); this project targets Java 21. Native memory or native calls do not by themselves fix arithmetic/probing hotspots, and would add runtime/lifetime considerations. No FFM migration or new production dependency was introduced merely to increase CPU percentage. [DuckDB's tuning guide](https://www.duckdb.org/docs/current/guides/performance/how_to_tune_workloads) likewise recommends measuring workload-specific parallelism and warns that additional threads can slow execution.
+
+### Reproduce occupancy and JFR profiling
+
+The complete instrumentation harness follows. Save it as `CoreUtilizationBenchmark.java`, compile as for `CompactMergeBenchmark` above, and select the same classpath and heap. Its JSON reports caller first, followed by workers, for total merge, acceptance, and finishing CPU deltas. Enable thread CPU measurement before warmups; worker threads are prestarted and remain alive while counters are read. Run cells sequentially. Local raw JSON, the recording, exported JFR events, and `SUMMARY.json` are retained under ignored `docs/benchmarks/core-utilization-2026-10-23/`.
+
+```powershell
+javac -cp $classes -d evidence CoreUtilizationBenchmark.java
+java -Xms5g -Xmx5g -XX:+UseParallelGC -XX:StartFlightRecording=filename=four-workers.jfr,settings=profile,dumponexit=true -cp "evidence;$classes" com.cascada.cache.benchmark.CoreUtilizationBenchmark 20000000 1000000 300 LONG 4 3 5 four-workers.json
+# Without recording: LONG/20 frames/4 workers, STRING/300/4, LONG/300/8;
+# use two warmups and three measured rounds for each additional cell.
+jfr print --json --events jdk.ExecutionSample,jdk.ThreadPark,jdk.JavaMonitorEnter four-workers.jfr
+```
+
+<details><summary>CoreUtilizationBenchmark.java</summary>
+
+```java
+package com.cascada.cache.benchmark;
+
+import com.cascada.cache.application.service.FrameMergeService;
+import com.cascada.cache.domain.frame.*;
+import com.cascada.cache.domain.merge.*;
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.model.query.*;
+import com.cascada.cache.domain.model.time.TimeRange;
+import java.lang.management.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
+
+/** Local reproducible harness: real incremental merge and typed AVG; no Spark/network in timer. */
+public final class CoreUtilizationBenchmark {
+    static final String ALIAS = "avg_value";
+    static final com.sun.management.ThreadMXBean THREAD = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+    static final com.sun.management.OperatingSystemMXBean OS = (com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
+    static final MemoryMXBean MEMORY = ManagementFactory.getMemoryMXBean();
+    record Dataset(List<ResultFrame> frames, CanonicalQueryObject query, int id) {}
+    record Answer(ResultFrame frame, Object owner, int id) {}
+    static FrameMergeService service;
+    static volatile Object retainedAnswer;
+    static long[] allocationThreads;
+    static long allocated() { long sum=0;for(long n:THREAD.getThreadAllocatedBytes(allocationThreads))sum+=Math.max(0,n);return sum; }
+    static long[] cpuSnapshot() { long[] a=new long[allocationThreads.length];for(int i=0;i<a.length;i++)a[i]=THREAD.getThreadCpuTime(allocationThreads[i]);return a; }
+    static List<Double> cpuDelta(long[] start,long[] end) {var out=new ArrayList<Double>();for(int i=0;i<start.length;i++)out.add((end[i]-start[i])/1e9);return out;}
+    static long used() { return MEMORY.getHeapMemoryUsage().getUsed(); }
+    static void fullGc() throws Exception { System.gc();Thread.sleep(30);System.gc();Thread.sleep(30); }
+    static String json(Object v) {
+        if (v == null) return "null";
+        if (v instanceof Number || v instanceof Boolean) return v.toString();
+        if (v instanceof Map<?,?> m) return "{" + String.join(",", m.entrySet().stream().map(e -> json(e.getKey().toString()) + ":" + json(e.getValue())).toList()) + "}";
+        if (v instanceof Collection<?> c) return "[" + String.join(",", c.stream().map(CoreUtilizationBenchmark::json).toList()) + "]";
+        return "\"" + v.toString().replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\"";
+    }
+    static long gcCount() { return ManagementFactory.getGarbageCollectorMXBeans().stream().mapToLong(x -> Math.max(0,x.getCollectionCount())).sum(); }
+    static long gcTime() { return ManagementFactory.getGarbageCollectorMXBeans().stream().mapToLong(x -> Math.max(0,x.getCollectionTime())).sum(); }
+    static double base(int group, int query) { return (group % 1000) * 0.125 + query * 3.5; }
+    static boolean empty(int group, int occurrence) { return group % 9973 == 0 || group % 97 == 0 && occurrence % 3 == 0; }
+    static Dataset generate(int rows, int groups, int buckets, boolean strings, int id) {
+        String[] keys = strings ? new String[groups] : null;
+        if(strings)for(int g=0;g<groups;g++)keys[g]="q"+id+"-g"+g;
+        int[] permutation=new int[rows];for(int row=0;row<rows;row++)permutation[row]=row;
+        Random random=new Random(777L);
+        for(int row=rows-1;row>0;row--){int at=random.nextInt(row+1),temp=permutation[row];permutation[row]=permutation[at];permutation[at]=temp;}
+        List<ResultFrame> frames=new ArrayList<>(buckets);int index=0;
+        for(int bucket=0;bucket<buckets;bucket++) {
+            int size=rows/buckets+(bucket<rows%buckets?1:0);
+            var b=ResultFrame.builder().expectedRows(size).column("group_id",strings?ColumnType.STRING:ColumnType.LONG)
+                    .column("region_id",ColumnType.LONG).column("device_id",ColumnType.LONG);
+            for(int metric=0;metric<3;metric++) {
+                String alias="avg_value_"+metric;
+                b.column(AverageIngredients.sumColumn(alias),ColumnType.DOUBLE)
+                 .column(AverageIngredients.countColumn(alias),ColumnType.LONG)
+                 .column(AverageIngredients.typeColumn(alias),ColumnType.STRING);
+            }
+            for(int j=0;j<size;j++,index++) {
+                int ordinal=permutation[index],g=ordinal%groups,occurrence=ordinal/groups;
+                if(strings)b.appendString(keys[g]);else b.appendLong(g+(long)id*groups);
+                b.appendLong(g%101).appendLong(g%17);
+                for(int metric=0;metric<3;metric++) {
+                    long count=empty(g+metric*11,occurrence+metric)?0:(occurrence+metric)%5+1;
+                    if(count==0)b.appendNull();else b.appendDouble((base(g,id)+metric*11.25+occurrence*(metric+1))*count);
+                    b.appendLong(count).appendString("double");
+                }
+            }
+            var frame=b.build();if(frame.columnNames().size()!=12)throw new AssertionError("input must have exactly 12 columns");frames.add(frame);
+        }
+        if(index!=rows)throw new AssertionError("incorrect input row count");
+        var measures=new LinkedHashMap<String,AggregateFunction>();var specs=new ArrayList<String>();var output=new ArrayList<String>(List.of("group_id","region_id","device_id"));
+        for(int metric=0;metric<3;metric++){String alias="avg_value_"+metric;measures.put(alias,AggregateFunction.AVERAGE);specs.add("AVG(value_"+metric+") AS "+alias);output.add(alias);}
+        var metadata=QueryMetadata.globalAggregate().withAggregateSpecs(specs).withMeasureAggregates(measures);
+        var query=new CanonicalQueryObject(HashComponents.of(List.of("group_id","region_id","device_id"),specs,List.of()),
+                new TimeRange(0,buckets*7200L-1),PostProcessing.none(),metadata,
+                "SELECT group_id,region_id,device_id,AVG(value_0),AVG(value_1),AVG(value_2) FROM benchmark GROUP BY group_id,region_id,device_id",List.of("benchmark"),List.of(),List.of(),output);
+        return new Dataset(List.copyOf(frames),query,id);
+    }
+    static Map<String,Object> verify(Answer a,int rows,int groups,boolean strings) {
+        var frame=a.frame();var expectedColumns=List.of("group_id","region_id","device_id","avg_value_0","avg_value_1","avg_value_2");
+        if(frame.rowCount()!=groups||!frame.columnNames().equals(expectedColumns))throw new AssertionError("wrong shape "+frame.columnNames());
+        int key=frame.columnIndex("group_id"),region=frame.columnIndex("region_id"),device=frame.columnIndex("device_id"),nulls=0;
+        int[] averages=new int[3];for(int m=0;m<3;m++){averages[m]=frame.columnIndex("avg_value_"+m);if(frame.columnType("avg_value_"+m)!=ColumnType.DOUBLE)throw new AssertionError("wrong AVG type");}
+        BitSet seen=new BitSet(groups);double checksum=0,maxError=0;
+        for(int r=0;r<groups;r++) {
+            int g;
+            if(strings){String v=frame.stringAt(r,key);if(!v.startsWith("q"+a.id()+"-g"))throw new AssertionError("mixed query");g=Integer.parseInt(v.substring(v.indexOf("-g")+2));}
+            else g=Math.toIntExact(frame.longAt(r,key)-(long)a.id()*groups);
+            if(g<0||g>=groups||seen.get(g))throw new AssertionError("duplicate/missing key");seen.set(g);
+            if(frame.longAt(r,region)!=g%101||frame.longAt(r,device)!=g%17)throw new AssertionError("corrupt composite key");
+            for(int metric=0;metric<3;metric++) {
+                long count=0,weighted=0;int occurrences=(rows-1-g)/groups+1;
+                for(int occurrence=0;occurrence<occurrences;occurrence++)if(!empty(g+metric*11,occurrence+metric)){long n=(occurrence+metric)%5+1;count+=n;weighted+=n*occurrence;}
+                int avg=averages[metric];
+                if(count==0){if(!frame.isNullAt(r,avg))throw new AssertionError("all-null AVG");nulls++;}
+                else {
+                    if(frame.isNullAt(r,avg))throw new AssertionError("missing AVG");
+                    double expected=base(g,a.id())+metric*11.25+(metric+1)*(double)weighted/count,actual=frame.doubleAt(r,avg),error=Math.abs(expected-actual);
+                    if(error>1e-10*Math.max(1,Math.abs(expected)))throw new AssertionError("wrong weighted AVG group="+g+" metric="+metric+" actual="+actual+" expected="+expected);
+                    checksum+=actual;maxError=Math.max(maxError,error);
+                }
+            }
+        }
+        if(seen.cardinality()!=groups)throw new AssertionError("missing groups");
+        return Map.of("checkedGroups",groups,"checkedAverages",(long)groups*3,"nullAverages",nulls,"maxAbsoluteError",maxError,"checksum",checksum);
+    }
+
+    static Map<String,Object> trial(Dataset dataset, int trial, int rows, int groups, boolean strings) throws Exception {
+        retainedAnswer=null;fullGc();
+        long retained=used();AtomicLong peak=new AtomicLong(retained);
+        var sampling=new java.util.concurrent.atomic.AtomicBoolean(true);
+        Thread sampler=Thread.ofPlatform().daemon().start(()->{
+            while(sampling.get()){peak.accumulateAndGet(used(),Math::max);try{Thread.sleep(5);}catch(InterruptedException e){return;}}
+        });
+        long[] threads0=cpuSnapshot();long allocated0=allocated(),cpu0=OS.getProcessCpuTime(),begin=System.nanoTime();
+        var merge=service.incremental(dataset.query());
+        for(ResultFrame frame:dataset.frames())merge.add(frame);
+        long accepted=System.nanoTime();long[] threadsAccepted=cpuSnapshot();ResultFrame result=merge.finish();long ended=System.nanoTime();long[] threadsEnd=cpuSnapshot();
+        long cpu=OS.getProcessCpuTime()-cpu0,allocation=allocated()-allocated0;
+        peak.accumulateAndGet(used(),Math::max);sampling.set(false);sampler.join();
+        Answer answer=new Answer(result,merge,dataset.id());
+        Map<String,Object> correctness=verify(answer,rows,groups,strings);
+        retainedAnswer=answer;fullGc();long live=used()-retained;
+        var metrics=new LinkedHashMap<String,Object>();
+        metrics.put("threadCpuSecondsCallerThenWorkers",cpuDelta(threads0,threadsEnd));metrics.put("acceptThreadCpuSeconds",cpuDelta(threads0,threadsAccepted));metrics.put("finishThreadCpuSeconds",cpuDelta(threadsAccepted,threadsEnd));
+        metrics.put("trial",trial);metrics.put("warmup",trial<0);
+        metrics.put("seconds",(ended-begin)/1e9);metrics.put("acceptSeconds",(accepted-begin)/1e9);
+        metrics.put("finishSeconds",(ended-accepted)/1e9);metrics.put("cpuSeconds",cpu/1e9);
+        metrics.put("engineAllocatedBytes",allocation);metrics.put("sampledExtraHeapBytes",peak.get()-retained);
+        metrics.put("liveMergeAndOutputHeapBytes",live);metrics.put("correctness",correctness);
+        retainedAnswer=null;
+        return metrics;
+    }
+
+    public static void main(String[] args) throws Exception {
+        int rows=Integer.parseInt(args[0]),groups=Integer.parseInt(args[1]),frames=Integer.parseInt(args[2]);
+        boolean strings=args[3].equals("STRING");int workers=Integer.parseInt(args[4]);
+        int warmups=Integer.parseInt(args[5]),rounds=Integer.parseInt(args[6]);Path output=Path.of(args[7]);
+        THREAD.setThreadAllocatedMemoryEnabled(true);THREAD.setThreadCpuTimeEnabled(true);
+        var ids=new ArrayList<Long>();ids.add(Thread.currentThread().threadId());
+        ThreadFactory factory=r->{Thread t=Thread.ofPlatform().name("merge-worker-"+ids.size()).unstarted(r);ids.add(t.threadId());return t;};
+        var executor=new ThreadPoolExecutor(workers,workers,0,TimeUnit.SECONDS,new LinkedBlockingQueue<>(),factory);
+        executor.prestartAllCoreThreads();allocationThreads=ids.stream().mapToLong(Long::longValue).toArray();
+        try {
+            try {service=FrameMergeService.class.getConstructor(int.class,String.class,int.class,Executor.class)
+                    .newInstance(300,"ts",workers,executor);}
+            catch(NoSuchMethodException olderMain){if(workers!=1)throw new IllegalArgumentException("main supports one worker");service=new FrameMergeService(300,"ts");}
+            Dataset dataset=generate(rows,groups,frames,strings,0);
+            var results=new ArrayList<Map<String,Object>>();
+            for(int round=-warmups;round<rounds;round++) {
+                Map<String,Object> metrics=trial(dataset,round,rows,groups,strings);results.add(metrics);
+                System.out.println(json(metrics));
+                var report=new LinkedHashMap<String,Object>();
+                report.put("rows",rows);report.put("groups",groups);report.put("frames",frames);
+                report.put("keyType",args[3]);report.put("workers",workers);report.put("shuffle","global Fisher-Yates of all input row ordinals before framing, seed 777");
+                report.put("javaVersion",System.getProperty("java.version"));report.put("rounds",results);
+                Files.writeString(output,json(report)+"\n");
+            }
+        } finally {executor.shutdownNow();}
+    }
+}
+
+```
+
+</details>
+
 ## Compact merge research and verification: 23 October 2026
 
 The current implementation is `33e9c4b`, following the research below. The comparison uses local `main` at `8c60a35` (the complete pre-redesign source tree), previous review `b9f5d6d`, and the current implementation. Remote `origin/main` has a different model-refactor history and is not the performance baseline. Earlier experiments below remain historical records tied to their stated revisions.

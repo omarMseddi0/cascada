@@ -31,6 +31,10 @@ Small-frame routing and the single-partition fast path can execute in the produc
 
 Stable row scatter and per-partition frame dependencies retain each group's original update order. A global aggregate or one dominant group still has one state owner. This merger consumes already-aggregated bucket frames; it is not a new distributed Spark stage or a raw-data scan engine.
 
+### Direct CPU measurements
+
+Additional unchanged-code tests measure actual per-worker CPU time, not just thread count or speedup. Four-worker runs sustain approximately 94–99% occupancy per worker across LONG/STRING keys and 20/300 frames. Eight-worker LONG merging reaches 7.72 busy-core equivalents. All 14 measured rounds verify every output (280 million input-row visits). The README records individual occupancies, JFR findings, measurement limitations, and the complete harness. OS thread counters do not establish physical-core affinity or cache-miss rates.
+
 ### Current validation
 
 The clean eight-module reactor passed with **708 registered tests, 680 executed, 28 skipped, zero failures/errors**. The new tests cover compressed winners, equal-but-distinct String objects, Unicode order, sparse exception pages, packed validity/hash boundaries, 100 partitions, independent retrieval/CPU executors, and shutdown.

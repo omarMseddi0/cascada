@@ -1,4 +1,187 @@
+# Cascada: code guide and preserved implementation record
+
+## Start here: how the current code works (23 October 2026)
+
+This section explains the code at the reviewed branch, rather than treating a list of commits as its architecture. Everything below the historical-record separator remains the original planning/review evidence, including the local edits present when this task began. Old findings and timings describe their named snapshots. They are not fresh test claims for the implementation described here.
+
+### Reading order and responsibilities
+
+| Read | Source from the repository root | What to learn |
+|---|---|---|
+| 1 | `app/src/main/java/com/cascada/app/bootstrap/CascadaLauncher.java`, `CascadaRuntime.java` | Startup, server ownership, and shutdown. |
+| 2 | `app/src/main/java/com/cascada/app/config/CascadaEngineFactory.java` | How real adapters, executors, cache services, SQL compiler, and warming are connected. |
+| 3 | `lib_cache/src/main/java/com/cascada/cache/application/service/ExecuteLogicalQueryService.java` | Translation/canonicalization followed by execution. |
+| 4 | `lib_sql/src/main/java/com/cascada/sql/adapter/out/calcite/CalciteCanonicalObjectFactory.java` | Turning SQL into the query contract: dimensions, aggregate specifications, time bounds, deferred processing, and merge eligibility. |
+| 5 | `lib_cache/src/main/java/com/cascada/cache/application/service/ExecuteCachedQueryService.java` | Safety decisions, query identity, and choosing cached versus direct execution. |
+| 6 | `lib_cache/src/main/java/com/cascada/cache/application/service/CacheExecutionEngine.java` | Coverage planning, cache reads, parallel gap queries, vanished-bucket recovery, merge, and authoritative fallback. |
+| 7 | `lib_cache/src/main/java/com/cascada/cache/application/service/FrameMergeService.java`, `IncrementalFrameMerge.java` | Incremental input validation, merge setup, reconstruction, projection, ordering, and limit. |
+| 8 | `lib_cache/src/main/java/com/cascada/cache/application/service/merge/TypedFrameAccumulator.java`, `TypedAggregationGroups.java` | The parallel aggregation implementation explained below. |
+| 9 | `lib_cache/src/main/java/com/cascada/cache/application/service/merge/SparkAverage.java`, `SparkValues.java` | Spark-compatible AVG result types, decimal rounding, null/NaN/zero comparisons. |
+| 10 | `lib_cache/src/main/java/com/cascada/cache/domain/frame/ResultFrame.java`, `ResultFrameBuilder.java` | Physical storage, typed readers, null bitmaps, and output allocation. |
+
+The package boundary matters: domain types express data and semantics; application services coordinate work through ports; adapters connect to Calcite, Spark, Arrow, Valkey, HTTP, and gRPC. The `model` convention groups data records within their owning layer. It does not make every record an entity or move application policy into an adapter.
+
+### Follow one query through the engine
+
+1. The transport validates a request and establishes query cancellation. The SQL path translates the logical query and obtains a `CanonicalQueryObject`. Canonical metadata tells later code which dimensions and aggregates exist; it also carries typed composite formulas and deferred `ORDER BY`/`LIMIT` information.
+2. Safety rules determine whether the query has a shape the bucket cache can reproduce exactly. A query outside that supported shape executes directly. Avoid reading a bypass as a wrong cached answer: it is a capability boundary.
+3. Query identity and time-bucket planning identify completed storage buckets. The live bucket is excluded from ordinary completed-bucket caching. The engine can short-circuit to physical SQL when there are no cacheable body buckets or no cached buckets.
+4. For a partial hit, the engine visits cached frames while a Spark gap query runs concurrently. Cached frames enter one incremental merger in visit order. The visitor validates indexes and the delivered frame count.
+5. A key that existed during presence checking can disappear before reading. The engine records those vanished days and starts a supplemental gap query. This prevents a cache expiry race from silently dropping part of the answer.
+6. After cache input completes, Spark's main gap frame and the vanished-day recovery frame enter the same merger. The merger finishes only after all partition work completes. Reconstruction, deferred processing, and projection produce the public result schema.
+7. Incompatible or corrupt cached merge data triggers an authoritative full physical query. Cancellation must propagate through recovery rather than starting unwanted fallback work. A verified completed-window result may become a revision/TTL-bound cube candidate.
+
+### What a frame is, and why it avoids row maps
+
+`ResultFrame` is an immutable columnar table. Numeric columns use primitive arrays, strings and decimals use their corresponding reference storage, and nullable columns have packed presence bits. Schema names resolve to integer column positions. A `FrameColumnReader` provides typed access without looking up a map key per cell. `rows()` is a compatibility view; the merge hot path uses typed readers.
+
+`ResultFrameBuilder` declares the output schema, reserves expected row capacity, and appends typed cells. Input frames, aggregation state, sorting indexes, and output arrays can coexist. Reporting only the aggregation-table size would understate total query memory.
+
+### What incremental merge adds
+
+`IncrementalFrameMerge.add` remembers a schema descriptor, validates every later frame (including empty frames), counts input rows, and initializes the accumulator on the first non-empty frame. It records merge failures so `CacheExecutionEngine` can apply its authoritative fallback after the original fetch phases. `finish` handles the no-input/empty-input cases and delegates normal reconstruction to `FrameMergeService`.
+
+`FrameMergeService.createAccumulator` selects grouping dimensions, adds the time dimension for a time series, resolves aggregate combine operations once, and passes worker configuration plus the executor. Aggregate resolution respects declared aliases: a column named `peak_latency` from `MAX(latency) AS peak_latency` must combine with MAX, not SUM.
+
+The same group receives input rows in exactly their original frame/row order. This matters for floating-point addition: `(1e16 + -1e16) + 1` differs from `1e16 + (-1e16 + 1)`. Parallelism is across disjoint groups, not arbitrary reduction trees within a group.
+
+### Group state: keys, hash slots, pages, and values
+
+`TypedAggregationGroups` owns an open-addressing hash table. A slot stores a hash tag and a group ID. A matching tag is only a quick filter; full dimension equality still decides whether two rows belong to the same group. Colliding hashes must never merge unrelated keys.
+
+The group ID addresses paged, row-major state. Each group has contiguous primitive words for numeric keys/measures, string dictionary IDs, presence flags, and the stored hash. Object slots are allocated when string/decimal keys or decimal measures need them. Pages contain 16,384 groups. Growing the page directory does not copy every existing group, although hash-slot growth still allocates and rehashes the slot array.
+
+Time dimensions are floored to the configured bucket start, including negative epochs. Grouping normalizes floating-point NaNs and signed zero and uses scale-insensitive decimal equality. These rules are correctness requirements, not optional speed shortcuts.
+
+Measure loops resolve type and combine operation outside the per-row loop. SUM/COUNT combine additively; MIN/MAX compare with the relevant Spark-compatible rules. Strings used by aggregate MIN/MAX use dictionary IDs in group state. This does not mean all string grouping keys are dictionary-encoded or that arbitrary decimal values become primitive doubles.
+
+### Parallel routing and buffer ownership after this review
+
+The original redesign let every partition hash and scan every input row, then skip rows owned elsewhere. With P partitions that repeated dimension hashing and ownership scanning P times. The review changes that path:
+
+1. The single producer hashes each frame once. Hashes select each row's sole partition.
+2. Counts become prefix offsets into one flat row-index array. Filling it in input order gives a stable contiguous range for each partition.
+3. Each partition's future follows its previous future. That partition alone probes and mutates its group table; it only scans its own row range for each measure.
+4. The producer keeps at most **two input frames and two routing buffers in flight**. Before reusing a buffer it joins the completion covering every partition consumer of that buffer. A fast partition alone cannot release memory still in use by a slow partition.
+5. Hash and row-index buffers grow to the largest frame they have handled and are reused. Group-index scratch is owned and reused by each partition. Prefix offsets tell consumers the valid range, so a smaller later frame cannot process stale entries from a larger frame.
+6. Query scope is propagated into partition and sorting tasks. Coarse cancellation checks in hashing, probing, and measure loops stop unwanted work without a check at every cell.
+
+For maximum frame length N, two routing buffers contain roughly `2 * (8N + 4N) = 24N` bytes of primitive payload, plus small offset arrays. Partition group-ID scratch adds four bytes per retained local-row capacity. Under balanced frames its total is about 4N; changing skew can increase the sum of retained local maxima. These are scratch estimates, not a total heap cap. Schema width, distinct groups, strings/decimals, sorting, and output still contribute memory.
+
+The two-frame pipeline overlaps producer routing with partition aggregation. It also bounds decoded input retention. More workers are not automatically faster: the producer's hash/routing pass, memory bandwidth, partition skew, sorting, and final output construction remain relevant.
+
+### Finishing AVG and ordered output
+
+A cached `AVG(x) AS a` carries reserved SUM/COUNT/type ingredients. Across buckets, `AVG` is `sum(partial sums) / sum(partial counts)`, not the average of bucket averages. For example, partial `(sum=10,count=2)` and `(sum=90,count=3)` produce 20, not 17.5.
+
+`finishWithAverages` can emit an AVG directly from group state, replacing the ingredient columns with the public alias. It avoids allocating a full intermediate ingredient frame solely to reconstruct AVG. When that fast path does not apply, the established `SparkAverage.finish` path remains available. Spark's input-type metadata controls output type and decimal rounding; zero counts and nulls need explicit handling.
+
+Each partition sorts its own group IDs. A final ordered merge combines those sorted partitions before constructing output. This does not make all work parallel: output assembly and the partition-head selection loop are still serial. `FrameMergeService` then reconstructs typed composite expressions and applies deferred ordering, limit, and output projection.
+
+### Configuration and the remaining scalability limits
+
+`CacheExecutionConfiguration.mergeWorkerCount` and `CASCADA_MERGE_WORKERS` choose partitions per query. The default is half the available processors, clamped to 1 through 4. Global aggregates without dimensions use one partition, because every row belongs to the same group and the reduction order is preserved.
+
+The application currently shares a virtual-thread executor for cache/gap and merge tasks. This supports blocking I/O concurrency but does not impose a global CPU or memory budget across requests. Per-query worker limits and a two-frame bound do not make an unbounded number of simultaneous queries safe.
+
+All group state remains in heap. The implementation does not spill aggregation pages to disk, enforce a global distinct-group memory budget, or turn a single-machine merger into a distributed shuffle engine. Large/skewed string and decimal workloads need separate measurement. No 10x/30x speed or fixed memory guarantee follows from the design alone.
+
+### Why DuckDB is relevant, and what does not transfer automatically
+
+DuckDB's grouped aggregation uses local hash tables and partitioned parallel combination. Its external aggregation adds memory management and spillable page layouts. These explain why partition ownership and compact state are useful. Cascada instead merges already-aggregated bucket frames, preserves per-group floating-point order, uses Java heap objects for some values, and has a separate Spark/cache retrieval path. Those differences prevent borrowing a DuckDB speedup number as a Cascada result.
+
+The next substantial improvements should evaluate a global CPU/admission budget, byte-based memory accounting, partition-skew handling, and spill-capable state. A new collection library is worthwhile only where a measured hot structure benefits; replacing a composite-key paged table with a general map can lose existing properties.
+
+## Current verification and measured limits
+
+The final clean Java 21 validation reactor passed: 685 registered tests, 657 executed, 28 skipped, zero failures/errors. The 13 focused merger cases passed. The README's [current verification record](../README.md#merge-routing-verification-23-october-2026) contains the command, complete benchmark harness, and all final raw rounds.
+
+For the controlled 20M-row/12-column/1M-group/20-frame four-worker workload, median time changed from 3.307 s to 3.150 s. Median sampled extra heap changed from 363.5 MiB to 347.5 MiB. Every main grouping key and three AVG values was checked in every round. The ranges overlap; the improvement is modest and does not establish a general speedup. String/decimal/skewed workloads, global admission control, spill, and live retrieval require separate work. Earlier fresh-allocation routing increased memory and was replaced before publication.
+
+## Commit dates, branch boundaries, and recovery (23 October 2026)
+
+There were **25 unpublished commits**, not 27: 24 on local `main`, followed by the merge redesign. Their author and committer timestamps were redistributed from 17 through 23 October 2026 (+02:00). For every rewritten commit, its tree was verified identical to its original tree. This changes commit IDs and date metadata; it does not claim the work was performed on those dates or change when a push happens.
+
+Recovery references preserve the old histories: `backup/main-before-date-rewrite-20261023` and `backup/merge-before-date-rewrite-20261023`. The existing `perf/merge-redesign` reference also remains available. The reviewed work is on `perf/scalable-merge-review`. Remote `main` contains a separate model-refactor merge, so it is left untouched. Publishing the review branch necessarily includes its unpublished ancestor commits as dependencies; the merge redesign remains a separate commit after the local-main tip.
+
+| Original commit | Rewritten commit | Assigned date/time |
+|---|---|---|
+| `c04b398abe79` | `f0ecc054ec82` | 2026-10-17T10:00:00+02:00 |
+| `8893e2393dc3` | `8f3f6192f356` | 2026-10-17T16:02:30+02:00 |
+| `9f6c77f29ae3` | `619344050cef` | 2026-10-17T22:05:00+02:00 |
+| `f76f08e4e5bc` | `70aefd42582e` | 2026-10-18T04:07:30+02:00 |
+| `f207a9270dfb` | `ea7f0fdabbb2` | 2026-10-18T10:10:00+02:00 |
+| `d4e8c2d9ead1` | `8f622718becf` | 2026-10-18T16:12:30+02:00 |
+| `b66812180d9e` | `6afadc113456` | 2026-10-18T22:15:00+02:00 |
+| `aa6ccd501f3a` | `42fe4cabc0a7` | 2026-10-19T04:17:30+02:00 |
+| `3bb7dcf8eacd` | `1dd657f4cd41` | 2026-10-19T10:20:00+02:00 |
+| `c6ebd69331c7` | `21ba86f256b9` | 2026-10-19T16:22:30+02:00 |
+| `6d73914b097e` | `030789c13a1e` | 2026-10-19T22:25:00+02:00 |
+| `0d85f97e17f9` | `1867f986745f` | 2026-10-20T04:27:30+02:00 |
+| `96c9f1390db7` | `d3329d7be028` | 2026-10-20T10:30:00+02:00 |
+| `3bcc82b37f8b` | `f90364b2acc8` | 2026-10-20T16:32:30+02:00 |
+| `5db1a0a43869` | `67704e2dc343` | 2026-10-20T22:35:00+02:00 |
+| `7f86df68bfe6` | `7d822cd434cc` | 2026-10-21T04:37:30+02:00 |
+| `2ac55e438acc` | `3288a29da1e7` | 2026-10-21T10:40:00+02:00 |
+| `1d13b1ed8cf6` | `fbf8a34f5cb4` | 2026-10-21T16:42:30+02:00 |
+| `486129d27bbc` | `4259049782ad` | 2026-10-21T22:45:00+02:00 |
+| `bb931182d4d7` | `c90c04c640b9` | 2026-10-22T04:47:30+02:00 |
+| `028433731ab7` | `6f4e7acf8306` | 2026-10-22T10:50:00+02:00 |
+| `4f3f33742c98` | `451c545beb88` | 2026-10-22T16:52:30+02:00 |
+| `8842f11f988f` | `6311b560e285` | 2026-10-22T22:55:00+02:00 |
+| `8aa6d74e8987` | `8c60a35ba20e` | 2026-10-23T04:57:30+02:00 |
+| `d9a3bd2b254c` | `c01ab014eaf6` | 2026-10-23T11:00:00+02:00 |
+
+---
+
+## Preserved historical planning and review record
+
 # Cascada: complete working-tree and recent-commit review map
+
+## Corrected 12-column AVG experiment with CPU and RAM — 18 October 2026
+
+**This supersedes the earlier four-column timings for the user's requested row width.** The ignored `HighCardinalityAvg12ColumnBenchmark.java` uses exactly **12 input columns**: three real grouping keys plus three distinct SUM/COUNT/type triplets for three weighted AVG outputs. The result has six columns. Every AVG has different weights/value/null patterns, and the full composite key and all AVG values are independently checked. The extra columns are processed, not ignored padding. Region/device keys are derived from the main group ID to preserve the stated cardinality; this is not a random/skewed independent-key workload.
+
+Every query merges **20,000,000 partial rows across exactly 300 two-hour buckets** (25 days). Four queries each have independent input frames, for **80,000,000 rows / 960,000,000 input cells per round**. One full-size warm-up and three measured rounds per scenario. Pure in-memory production merger/AVG time excludes generation, explicit pre-round GC, verification, Spark/network/cache/codec work and API serialization. The heap cap was 14 GiB to accommodate the wider independent datasets; that differs from the older 8 GiB/four-column experiment. No production source was changed.
+
+| Keys / groups per query | Concurrent queries | Median all-query time | Observed peak process RSS | Peak sampled merge heap | Average JVM CPU, share of 16 logical processors | Median process CPU-seconds per round |
+|---|---:|---:|---:|---:|---:|---:|
+| LONG / 1,000,000 | 1 | 9.103 s | 2.65 GiB | 2.18 GiB | 6.3% | 9.38 CPU-s |
+| LONG / 1,000,000 | 4 | 10.306 s | 9.93 GiB | 8.59 GiB | 26.3% | 43.28 CPU-s |
+| STRING / 1,000,000 | 1 | 9.294 s | 2.66 GiB | 2.14 GiB | 6.3% | 9.34 CPU-s |
+| STRING / 1,000,000 | 4 | 10.642 s | 9.86 GiB | 8.36 GiB | 26.4% | 44.94 CPU-s |
+| LONG / 5,000,000 | 1 | 12.772 s | 4.76 GiB | 3.78 GiB | 7.0% | 14.34 CPU-s |
+| LONG / 5,000,000 | 4 | 15.252 s | 14.20 GiB | 13.90 GiB | 29.0% | 69.55 CPU-s |
+
+All six scenarios completed successfully. **900 million measured input rows, 105 million composite groups, 315 million AVG outputs checked**, maximum absolute AVG error about `1.42e-14`. The largest case uses nearly the 14 GiB Java heap cap; no general memory/SLA guarantee is inferred. CPU percentages are measured-window process CPU time divided by wall time and 16 logical processors: one saturated logical processor is roughly 6.25%. They are not peak CPU or total system CPU including other apps. Process RSS includes generation/warm-up/verification and native/JVM memory; sampled merge heap is a different, sampled metric. CPU time, wall time and memory are reported separately rather than conflated.
+
+**New artifact verdicts:** ACCEPT — ignored `lib_cache/src/benchmark/java/com/cascada/cache/benchmark/HighCardinalityAvg12ColumnBenchmark.java` provides exact-width workload and independent three-AVG oracle; ignored `docs/benchmarks/avg20m-12cols-2026-10-18/run_benchmark.py` runs six scenarios and records OS memory with bounded host-memory/timeout safeguards; ignored `create_report.py` writes a full Markdown/HTML report from actual measurements. All JSON/log/GC/telemetry/report/checksum files in that ignored directory are retained as local evidence. SHA256 checks passed. Prior four-column artifacts remain unchanged and are labelled a different workload.
+
+Full report: `docs/benchmarks/avg20m-12cols-2026-10-18/REPORT.md` and `REPORT.html`. Exact schema, commands, every trial and worker latency, phase allocation/CPU/GC, RAM definitions, environment and limitations are documented. This plan's experiment record is left uncommitted; benchmark artifacts stay ignored and are not pushed. Production implementation/test sources are unchanged.
+
+---
+
+
+## Local high-cardinality AVG speed experiment — 18 October 2026
+
+**Measured, not estimated:** the complete local main implementation at `8aa6d74e89879adee42afa34f46885fcc6915c8a` was benchmarked with the real incremental FrameMergeService and SparkAverage reconstruction. This is the API-complete local branch, not the incomplete model-only remote main baseline. Production sources were not edited. A fresh cache/identity reactor package build succeeded before compiling the standalone harness.
+
+Every query consumes **20,000,000 partial-aggregate rows across 300 two-hour buckets**, a 25-day window. Four-query rounds use four independent 20-million-row datasets, **80 million rows total**. Inputs are prebuilt outside the timer; no Spark/cache/network/decode or API serialization time is included. Counts vary and null cases are present; AVG correctness uses an independent weighted oracle. One full-size warm-up and three measured rounds per scenario, six fresh JVM processes total, `-Xms1g -Xmx8g`, G1GC, Ryzen 7 5700G, 32 GB RAM.
+
+| Key / groups per query | Single-query median | Four-query makespan median | Four-query throughput | Peak process RSS for four queries |
+|---|---:|---:|---:|---:|
+| LONG / 1,000,000 | 3.556 s | 4.525 s | 17.68 million rows/s | 3.92 GiB |
+| STRING / 1,000,000 | 3.730 s | 4.628 s | 17.29 million rows/s | 3.90 GiB |
+| LONG / 5,000,000 | 5.209 s | 6.114 s | 13.08 million rows/s | 7.49 GiB |
+
+All six cases completed with correct output. Across measured rounds: **900 million input rows scanned, 105 million output groups checked**; the maximum absolute AVG error was about `3.55e-15`. The 642-test result elsewhere is a correctness-suite result, not this performance result. No p95/p99/SLA claim is made from three samples. High cardinality here means 1 million or 5 million groups with one grouping key; DECIMAL, skew, composite keys, retrieval, distributed execution and response serialization are outside scope.
+
+**Artifact/code verdicts:** ACCEPT — ignored `lib_cache/src/benchmark/java/com/cascada/cache/benchmark/HighCardinalityAvgBenchmark.java` exercises real merge/AVG code and checks every group; ignored `docs/benchmarks/avg20m-2026-10-18/run_benchmark.py` runs six scenarios and samples process memory; ignored `create_report.py` derives report tables without inventing measurements; all raw JSON/log/GC/memory outputs and REPORT.md/REPORT.html/SHA256SUMS.txt remain ignored local evidence. This tracked plan update records the required experiment verdict and is intentionally left uncommitted. No benchmark file was added to Git or pushed.
+
+Full report: `docs/benchmarks/avg20m-2026-10-18/REPORT.md`. Exact commands, per-query phase times/CPU/allocation, every measured round, checksums, memory-method distinctions and limitations are in the report and its raw artifacts. All SHA256 evidence entries were verified. Performance numbers are local in-memory merge measurements, not end-to-end query time.
+
+---
+
 
 ## Actual local commit history — 24 commits (18 October 2026)
 

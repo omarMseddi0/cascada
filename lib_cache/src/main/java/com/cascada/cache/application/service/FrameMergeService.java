@@ -18,6 +18,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.Executor;
 import java.util.function.IntBinaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,10 +32,19 @@ public final class FrameMergeService {
 
     private final int fixedStepSeconds;
     private final String timeColumnName;
+    private final int mergeWorkerCount;
+    private final Executor mergeExecutor;
 
     public FrameMergeService(int fixedStepSeconds, String timeColumnName) {
+        this(fixedStepSeconds, timeColumnName, 1, Runnable::run);
+    }
+
+    /** Incremental merges split their groups across {@code mergeWorkerCount} partitions run on {@code mergeExecutor}. */
+    public FrameMergeService(int fixedStepSeconds, String timeColumnName, int mergeWorkerCount, Executor mergeExecutor) {
         this.fixedStepSeconds = fixedStepSeconds;
         this.timeColumnName = timeColumnName;
+        this.mergeWorkerCount = mergeWorkerCount;
+        this.mergeExecutor = Objects.requireNonNull(mergeExecutor, "mergeExecutor");
     }
 
     /** Same ordered merge and final reconstruction, without retaining each completed input frame. */
@@ -60,7 +71,8 @@ public final class FrameMergeService {
         if (timeSeries) dimensions.add(timeColumnName);
         dimensions.addAll(dimensionColumns(schema, canonicalObject, timeSeries));
         int step = timeSeries ? timeSeriesStep(canonicalObject) : fixedStepSeconds;
-        return new TypedFrameAccumulator(schema, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step);
+        return new TypedFrameAccumulator(schema, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step,
+                mergeWorkerCount, mergeExecutor);
     }
 
     ResultFrame finishMergedFrame(ResultFrame merged, CanonicalQueryObject canonicalObject) {
@@ -70,6 +82,19 @@ public final class FrameMergeService {
         ResultFrame reconstructed = averages.isEmpty()
                 ? reconstructAverages(merged, canonicalObject)
                 : SparkAverage.finish(merged, averages);
+        return finishReconstructedFrame(reconstructed, canonicalObject);
+    }
+
+    /** Same answer as {@link #finishMergedFrame} over {@code accumulator.finish()}, without the ingredient frame. */
+    ResultFrame finishAccumulatedFrame(TypedFrameAccumulator accumulator, CanonicalQueryObject canonicalObject) {
+        List<String> averages = averageAliases(canonicalObject);
+        ResultFrame reconstructed = averages.isEmpty()
+                ? reconstructAverages(accumulator.finish(), canonicalObject)
+                : accumulator.finishWithAverages(averages);
+        return finishReconstructedFrame(reconstructed, canonicalObject);
+    }
+
+    private ResultFrame finishReconstructedFrame(ResultFrame reconstructed, CanonicalQueryObject canonicalObject) {
         ResultFrame composites = reconstructCompositeAliases(reconstructed, canonicalObject);
         return projectOutput(applyPostProcessing(composites, canonicalObject), canonicalObject);
     }

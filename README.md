@@ -137,6 +137,8 @@ ports; legacy engine environment settings continue to work.
 ```
 
 Configured physical time columns must match `CASCADA_TIME_COLUMN`, the existing cache merge clock.
+`CASCADA_MERGE_WORKERS` sets how many hash partitions merge one query's cached frames in parallel
+(default: half the hardware threads, between 1 and 4); results are identical for every value.
 Use SQL aliases for the desired output column labels. Table configuration is loaded at startup;
 this is not a new live table-registration feature. Warming runs only complete buckets and has
 bounded, configurable observation retention. Disabling scheduled warming also disables automatic

@@ -1,14 +1,24 @@
 package com.cascada.cache.application.service.merge;
 
+import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.merge.AverageIngredients;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TypedFrameAggregatorTest {
 
@@ -113,5 +123,125 @@ class TypedFrameAggregatorTest {
         assertThat(merged.rows().get(1).get("SUM(x)")).isEqualTo(2.0);
         assertThat(merged.rows().get(2).get("ts")).isEqualTo(0L);
         assertThat(merged.rows().get(2).get("SUM(x)")).isEqualTo(7.0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {2, 3, 8})
+    void partitionedMergeEqualsSinglePartitionMergeForEveryKeyAndMeasureType(int partitionCount) {
+        List<ResultFrame> frames = mixedTypeFrames();
+        Map<String, AggregateFunction> functions = Map.of(
+                "SUM(order_sensitive)", AggregateFunction.SUM,
+                "SUM(quantity)", AggregateFunction.SUM,
+                "MIN(label)", AggregateFunction.MINIMUM,
+                "SUM(amount)", AggregateFunction.SUM);
+        List<String> dimensions = List.of("long_key", "string_key", "double_key", "decimal_key");
+
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            TypedFrameAccumulator single = new TypedFrameAccumulator(frames.get(0), dimensions, functions, "ts", 300);
+            TypedFrameAccumulator partitioned = new TypedFrameAccumulator(frames.get(0), dimensions, functions, "ts", 300,
+                    partitionCount, executor);
+            frames.forEach(single::accept);
+            frames.forEach(partitioned::accept);
+
+            assertThat(partitioned.finish().rows()).isEqualTo(single.finish().rows());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 4})
+    void averagesFromGroupStateEqualSparkAverageOverTheIngredientFrame(int partitionCount) {
+        String doubleAverage = "average_value";
+        String decimalAverage = "average_amount";
+        List<ResultFrame> frames = averageIngredientFrames(doubleAverage, decimalAverage);
+        // Keys use the merge's normalized column identity, as FrameMergeService registers AVG ingredients.
+        Map<String, AggregateFunction> functions = Map.of(
+                ColumnNames.identity(AverageIngredients.sumColumn(doubleAverage)), AggregateFunction.SUM,
+                ColumnNames.identity(AverageIngredients.countColumn(doubleAverage)), AggregateFunction.COUNT,
+                ColumnNames.identity(AverageIngredients.typeColumn(doubleAverage)), AggregateFunction.MINIMUM,
+                ColumnNames.identity(AverageIngredients.sumColumn(decimalAverage)), AggregateFunction.SUM,
+                ColumnNames.identity(AverageIngredients.countColumn(decimalAverage)), AggregateFunction.COUNT,
+                ColumnNames.identity(AverageIngredients.typeColumn(decimalAverage)), AggregateFunction.MINIMUM);
+        List<String> averages = List.of(doubleAverage, decimalAverage);
+
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            TypedFrameAccumulator ingredients = new TypedFrameAccumulator(frames.get(0), List.of("device"), functions,
+                    "ts", 300, partitionCount, executor);
+            TypedFrameAccumulator averaged = new TypedFrameAccumulator(frames.get(0), List.of("device"), functions,
+                    "ts", 300, partitionCount, executor);
+            frames.forEach(ingredients::accept);
+            frames.forEach(averaged::accept);
+
+            ResultFrame expected = SparkAverage.finish(ingredients.finish(), averages);
+            ResultFrame actual = averaged.finishWithAverages(averages);
+
+            assertThat(actual.columnNames()).isEqualTo(expected.columnNames());
+            assertThat(actual.columnTypes()).isEqualTo(expected.columnTypes());
+            assertThat(actual.rows()).isEqualTo(expected.rows());
+        }
+    }
+
+    @Test
+    void partitionFailureSurfacesAsTheOriginalMergeException() {
+        ResultFrame largeCount = ResultFrame.builder()
+                .column("device", ColumnType.LONG).column("SUM(x)", ColumnType.LONG)
+                .row(1L, Long.MAX_VALUE).row(2L, 5L).build();
+        ResultFrame overflowingCount = ResultFrame.builder()
+                .column("device", ColumnType.LONG).column("SUM(x)", ColumnType.LONG)
+                .row(1L, 1L).build();
+
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            TypedFrameAccumulator partitioned = new TypedFrameAccumulator(largeCount, List.of("device"),
+                    Map.of("SUM(x)", AggregateFunction.SUM), "ts", 300, 4, executor);
+            partitioned.accept(largeCount);
+            partitioned.accept(overflowingCount);
+
+            assertThatThrownBy(partitioned::finish).isInstanceOf(ArithmeticException.class);
+        }
+    }
+
+    private static List<ResultFrame> mixedTypeFrames() {
+        Random random = new Random(7);
+        String[] labels = {"alpha", "beta", "gamma", "Ωmega", "beta"};
+        Double[] doubleKeys = {null, 0.0, -0.0, Double.NaN, 1.5};
+        BigDecimal[] decimalKeys = {null, new BigDecimal("1.0"), new BigDecimal("1.00"), new BigDecimal("2.5")};
+        return IntStream.range(0, 12).mapToObj(frameIndex -> {
+            ResultFrameBuilder builder = ResultFrame.builder()
+                    .column("long_key", ColumnType.LONG).column("string_key", ColumnType.STRING)
+                    .column("double_key", ColumnType.DOUBLE).column("decimal_key", ColumnType.DECIMAL)
+                    .column("SUM(order_sensitive)", ColumnType.DOUBLE).column("SUM(quantity)", ColumnType.LONG)
+                    .column("MIN(label)", ColumnType.STRING).column("SUM(amount)", ColumnType.DECIMAL);
+            IntStream.range(0, 400).forEach(row -> builder.row(
+                    random.nextInt(9) == 0 ? null : (long) random.nextInt(40),
+                    "key-" + random.nextInt(6),
+                    doubleKeys[random.nextInt(doubleKeys.length)],
+                    decimalKeys[random.nextInt(decimalKeys.length)],
+                    random.nextInt(5) == 0 ? null : (random.nextBoolean() ? 1.0e16 : -1.0e16) + random.nextInt(3),
+                    random.nextInt(7) == 0 ? null : (long) random.nextInt(1000),
+                    random.nextInt(4) == 0 ? null : labels[random.nextInt(labels.length)],
+                    random.nextInt(6) == 0 ? null : new BigDecimal(random.nextInt(10_000)).movePointLeft(2)));
+            return builder.build();
+        }).toList();
+    }
+
+    private static List<ResultFrame> averageIngredientFrames(String doubleAverage, String decimalAverage) {
+        Random random = new Random(11);
+        return IntStream.range(0, 6).mapToObj(frameIndex -> {
+            ResultFrameBuilder builder = ResultFrame.builder()
+                    .column("device", ColumnType.LONG)
+                    .column(AverageIngredients.sumColumn(doubleAverage), ColumnType.DOUBLE)
+                    .column(AverageIngredients.countColumn(doubleAverage), ColumnType.LONG)
+                    .column(AverageIngredients.typeColumn(doubleAverage), ColumnType.STRING)
+                    .column(AverageIngredients.sumColumn(decimalAverage), ColumnType.DECIMAL)
+                    .column(AverageIngredients.countColumn(decimalAverage), ColumnType.LONG)
+                    .column(AverageIngredients.typeColumn(decimalAverage), ColumnType.STRING);
+            IntStream.range(0, 200).forEach(row -> {
+                long count = random.nextInt(4);
+                builder.row((long) random.nextInt(30),
+                        count == 0 ? null : random.nextDouble() * 100 * count, count, "DOUBLE",
+                        count == 0 ? null : new BigDecimal(random.nextInt(100_000)).movePointLeft(2), count,
+                        "decimal(10,2)");
+            });
+            return builder.build();
+        }).toList();
     }
 }

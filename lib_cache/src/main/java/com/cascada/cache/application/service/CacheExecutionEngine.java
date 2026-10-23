@@ -110,8 +110,8 @@ public final class CacheExecutionEngine {
         this.configuration = Objects.requireNonNull(configuration, "configuration");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.timeBucketCalculator = new TimeBucketCalculator(configuration.bucketSeconds());
-        this.frameMergeService =
-                new FrameMergeService(configuration.fixedStepSeconds(), configuration.timeColumnName());
+        this.frameMergeService = new FrameMergeService(configuration.fixedStepSeconds(),
+                configuration.timeColumnName(), configuration.mergeWorkerCount(), executor);
     }
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {

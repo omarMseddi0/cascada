@@ -1,0 +1,64 @@
+START 20000000 1000000 LONG seq 1 base 1 3
+RESULT round=0 mode=base w=1 q=1 groups=1000000 LONG seq wall=4.469s accept=4.166s Mrows/s=4.48 cpu=4.6s cores=1.03 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.265GiB verify=PASS
+RESULT round=1 mode=base w=1 q=1 groups=1000000 LONG seq wall=4.262s accept=4.005s Mrows/s=4.69 cpu=4.4s cores=1.03 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.265GiB verify=PASS
+RESULT round=2 mode=base w=1 q=1 groups=1000000 LONG seq wall=4.281s accept=4.043s Mrows/s=4.67 cpu=4.4s cores=1.02 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.265GiB verify=PASS
+END exit=0
+START 20000000 1000000 LONG seq 1 base 4 3
+RESULT round=0 mode=base w=4 q=1 groups=1000000 LONG seq wall=2.085s accept=1.805s Mrows/s=9.59 cpu=8.0s cores=3.86 peakHeapOverInput=0.305GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+RESULT round=1 mode=base w=4 q=1 groups=1000000 LONG seq wall=2.079s accept=1.820s Mrows/s=9.62 cpu=7.9s cores=3.80 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+RESULT round=2 mode=base w=4 q=1 groups=1000000 LONG seq wall=2.059s accept=1.805s Mrows/s=9.72 cpu=7.7s cores=3.73 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+END exit=0
+START 20000000 1000000 LONG seq 1 base 8 3
+RESULT round=0 mode=base w=8 q=1 groups=1000000 LONG seq wall=1.915s accept=1.588s Mrows/s=10.44 cpu=12.8s cores=6.66 peakHeapOverInput=0.289GiB state/q=0.000GiB alloc/q=0.121GiB verify=PASS
+RESULT round=1 mode=base w=8 q=1 groups=1000000 LONG seq wall=2.102s accept=1.764s Mrows/s=9.51 cpu=13.7s cores=6.51 peakHeapOverInput=0.281GiB state/q=0.000GiB alloc/q=0.121GiB verify=PASS
+RESULT round=2 mode=base w=8 q=1 groups=1000000 LONG seq wall=1.878s accept=1.587s Mrows/s=10.65 cpu=12.5s cores=6.66 peakHeapOverInput=0.281GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+END exit=0
+START 20000000 1000000 LONG shuffled 1 base 1 3
+RESULT round=0 mode=base w=1 q=1 groups=1000000 LONG shuffled wall=12.384s accept=10.990s Mrows/s=1.62 cpu=12.5s cores=1.01 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.265GiB verify=PASS
+RESULT round=1 mode=base w=1 q=1 groups=1000000 LONG shuffled wall=11.955s accept=10.818s Mrows/s=1.67 cpu=12.1s cores=1.01 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.265GiB verify=PASS
+RESULT round=2 mode=base w=1 q=1 groups=1000000 LONG shuffled wall=11.838s accept=10.817s Mrows/s=1.69 cpu=11.7s cores=0.99 peakHeapOverInput=0.305GiB state/q=0.000GiB alloc/q=0.265GiB verify=PASS
+END exit=0
+START 20000000 1000000 LONG shuffled 1 base 4 3
+RESULT round=0 mode=base w=4 q=1 groups=1000000 LONG shuffled wall=4.261s accept=3.547s Mrows/s=4.69 cpu=15.1s cores=3.54 peakHeapOverInput=0.305GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+RESULT round=1 mode=base w=4 q=1 groups=1000000 LONG shuffled wall=4.283s accept=3.563s Mrows/s=4.67 cpu=15.0s cores=3.50 peakHeapOverInput=0.305GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+RESULT round=2 mode=base w=4 q=1 groups=1000000 LONG shuffled wall=4.253s accept=3.538s Mrows/s=4.70 cpu=15.0s cores=3.54 peakHeapOverInput=0.305GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+END exit=0
+START 20000000 1000000 LONG shuffled 1 base 8 3
+RESULT round=0 mode=base w=8 q=1 groups=1000000 LONG shuffled wall=3.036s accept=2.383s Mrows/s=6.59 cpu=19.4s cores=6.38 peakHeapOverInput=0.289GiB state/q=0.000GiB alloc/q=0.121GiB verify=PASS
+RESULT round=1 mode=base w=8 q=1 groups=1000000 LONG shuffled wall=3.482s accept=2.762s Mrows/s=5.74 cpu=21.7s cores=6.24 peakHeapOverInput=0.289GiB state/q=0.000GiB alloc/q=0.121GiB verify=PASS
+RESULT round=2 mode=base w=8 q=1 groups=1000000 LONG shuffled wall=3.463s accept=2.790s Mrows/s=5.78 cpu=22.2s cores=6.42 peakHeapOverInput=0.289GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+END exit=0
+START 20000000 1000000 STRING shuffled 1 base 1 3
+RESULT round=0 mode=base w=1 q=1 groups=1000000 STRING shuffled wall=16.995s accept=13.768s Mrows/s=1.18 cpu=16.8s cores=0.99 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.258GiB verify=PASS
+RESULT round=1 mode=base w=1 q=1 groups=1000000 STRING shuffled wall=15.721s accept=12.515s Mrows/s=1.27 cpu=15.8s cores=1.00 peakHeapOverInput=0.289GiB state/q=0.000GiB alloc/q=0.258GiB verify=PASS
+RESULT round=2 mode=base w=1 q=1 groups=1000000 STRING shuffled wall=16.068s accept=12.877s Mrows/s=1.24 cpu=16.2s cores=1.01 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.258GiB verify=PASS
+END exit=0
+START 20000000 1000000 STRING shuffled 1 base 4 3
+RESULT round=0 mode=base w=4 q=1 groups=1000000 STRING shuffled wall=5.896s accept=4.629s Mrows/s=3.39 cpu=20.9s cores=3.55 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.116GiB verify=PASS
+RESULT round=1 mode=base w=4 q=1 groups=1000000 STRING shuffled wall=6.089s accept=4.834s Mrows/s=3.28 cpu=22.8s cores=3.74 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.116GiB verify=PASS
+RESULT round=2 mode=base w=4 q=1 groups=1000000 STRING shuffled wall=5.705s accept=4.466s Mrows/s=3.51 cpu=20.8s cores=3.65 peakHeapOverInput=0.297GiB state/q=0.000GiB alloc/q=0.116GiB verify=PASS
+END exit=0
+START 20000000 5000000 LONG shuffled 1 base 1 3
+RESULT round=0 mode=base w=1 q=1 groups=5000000 LONG shuffled wall=19.295s accept=11.242s Mrows/s=1.04 cpu=19.5s cores=1.01 peakHeapOverInput=1.547GiB state/q=0.000GiB alloc/q=1.409GiB verify=PASS
+RESULT round=1 mode=base w=1 q=1 groups=5000000 LONG shuffled wall=19.063s accept=11.147s Mrows/s=1.05 cpu=19.3s cores=1.01 peakHeapOverInput=1.547GiB state/q=0.000GiB alloc/q=1.409GiB verify=PASS
+RESULT round=2 mode=base w=1 q=1 groups=5000000 LONG shuffled wall=17.283s accept=11.229s Mrows/s=1.16 cpu=17.2s cores=1.00 peakHeapOverInput=1.547GiB state/q=0.000GiB alloc/q=1.409GiB verify=PASS
+END exit=0
+START 20000000 5000000 LONG shuffled 1 base 4 3
+RESULT round=0 mode=base w=4 q=1 groups=5000000 LONG shuffled wall=7.702s accept=3.413s Mrows/s=2.60 cpu=22.1s cores=2.87 peakHeapOverInput=1.369GiB state/q=0.000GiB alloc/q=0.598GiB verify=PASS
+RESULT round=1 mode=base w=4 q=1 groups=5000000 LONG shuffled wall=7.414s accept=3.549s Mrows/s=2.70 cpu=22.0s cores=2.96 peakHeapOverInput=1.633GiB state/q=0.000GiB alloc/q=0.598GiB verify=PASS
+RESULT round=2 mode=base w=4 q=1 groups=5000000 LONG shuffled wall=7.333s accept=3.656s Mrows/s=2.73 cpu=21.8s cores=2.97 peakHeapOverInput=1.641GiB state/q=0.000GiB alloc/q=0.598GiB verify=PASS
+END exit=0
+START 20000000 5000000 LONG shuffled 1 base 8 3
+RESULT round=0 mode=base w=8 q=1 groups=5000000 LONG shuffled wall=6.589s accept=2.673s Mrows/s=3.04 cpu=30.2s cores=4.58 peakHeapOverInput=1.680GiB state/q=0.000GiB alloc/q=0.599GiB verify=PASS
+RESULT round=1 mode=base w=8 q=1 groups=5000000 LONG shuffled wall=6.702s accept=2.805s Mrows/s=2.98 cpu=31.6s cores=4.72 peakHeapOverInput=1.680GiB state/q=0.000GiB alloc/q=0.598GiB verify=PASS
+RESULT round=2 mode=base w=8 q=1 groups=5000000 LONG shuffled wall=6.301s accept=2.598s Mrows/s=3.17 cpu=28.5s cores=4.53 peakHeapOverInput=1.680GiB state/q=0.000GiB alloc/q=0.599GiB verify=PASS
+END exit=0
+START 20000000 1000000 LONG shuffled 4 base 1 2
+RESULT round=0 mode=base w=1 q=4 groups=1000000 LONG shuffled wall=16.472s accept=14.576s Mrows/s=4.86 cpu=65.1s cores=3.95 peakHeapOverInput=1.219GiB state/q=0.000GiB alloc/q=0.265GiB verify=PASS
+RESULT round=1 mode=base w=1 q=4 groups=1000000 LONG shuffled wall=16.220s accept=14.430s Mrows/s=4.93 cpu=63.5s cores=3.91 peakHeapOverInput=1.211GiB state/q=0.000GiB alloc/q=0.265GiB verify=PASS
+END exit=0
+START 20000000 1000000 LONG shuffled 4 base 4 2
+RESULT round=0 mode=base w=4 q=4 groups=1000000 LONG shuffled wall=10.318s accept=9.476s Mrows/s=7.75 cpu=121.3s cores=11.76 peakHeapOverInput=1.234GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+RESULT round=1 mode=base w=4 q=4 groups=1000000 LONG shuffled wall=10.283s accept=9.212s Mrows/s=7.78 cpu=120.8s cores=11.75 peakHeapOverInput=1.227GiB state/q=0.000GiB alloc/q=0.120GiB verify=PASS
+END exit=0
+ALLDONE

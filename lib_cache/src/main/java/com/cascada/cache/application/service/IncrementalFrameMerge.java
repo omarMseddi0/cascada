@@ -48,8 +48,7 @@ public final class IncrementalFrameMerge {
         if (accumulator == null) return service.finishMergedFrame(firstEmpty == null ? schema : firstEmpty, canonical);
         boolean monitor = LOGGER.isLoggable(Level.FINE);
         long started = monitor ? System.nanoTime() : 0L;
-        ResultFrame merged = accumulator.finish();
-        ResultFrame answer = service.finishMergedFrame(merged, canonical);
+        ResultFrame answer = service.finishAccumulatedFrame(accumulator, canonical);
         if (monitor) LOGGER.fine("Incremental cache merge: input_rows=" + inputRows
                 + " output_rows=" + answer.rowCount() + " finish_ms=" + (System.nanoTime() - started) / 1_000_000.0);
         return answer;

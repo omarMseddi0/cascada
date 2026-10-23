@@ -113,17 +113,21 @@ public final class SparkAverage {
     }
 
     private static void appendAverage(ResultFrameBuilder builder, ResultFrame merged, int row, AverageColumn average) {
-        long count = merged.isNullAt(row, average.countColumn()) ? 0L
-                : exactCount(merged.valueAt(row, average.countColumn()));
-        if (count == 0 || merged.isNullAt(row, average.sumColumn())) {
+        Object count = merged.valueAt(row, average.countColumn());
+        appendAverage(builder, (Number) merged.valueAt(row, average.sumColumn()),
+                count == null ? 0L : exactCount(count), average.resultType(), average.inputType());
+    }
+
+    /** Appends Spark's AVG of merged ingredients: NULL when the SUM is absent or the COUNT is zero. */
+    static void appendAverage(ResultFrameBuilder builder, Number sum, long count, ColumnType resultType, String inputType) {
+        if (count == 0 || sum == null) {
             builder.appendNull();
             return;
         }
-        Object sum = merged.valueAt(row, average.sumColumn());
-        if (average.resultType() == ColumnType.DECIMAL) {
-            builder.appendDecimal(decimalAverage((BigDecimal) sum, count, average.inputType()));
+        if (resultType == ColumnType.DECIMAL) {
+            builder.appendDecimal(decimalAverage((BigDecimal) sum, count, inputType));
         } else {
-            builder.appendDouble(((Number) sum).doubleValue() / count);
+            builder.appendDouble(sum.doubleValue() / count);
         }
     }
 
@@ -157,7 +161,7 @@ public final class SparkAverage {
         return "double";
     }
 
-    private static ColumnType resultType(String inputType) {
+    static ColumnType resultType(String inputType) {
         if (DECIMAL_TYPE.matcher(inputType).matches()) return ColumnType.DECIMAL;
         return switch (inputType) {
             case "tinyint", "smallint", "int", "bigint", "float", "double" -> ColumnType.DOUBLE;

@@ -2,6 +2,7 @@ package com.cascada.app.adapter.out.configuration;
 
 import com.cascada.app.model.config.CacheBackend;
 import com.cascada.app.model.config.EngineSettings;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -51,6 +52,28 @@ class EnvironmentSettingsReaderTest {
         assertThatThrownBy(() -> read(Map.of("CASCADA_WARMING_TOP_N", "4294967297")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("CASCADA_WARMING_TOP_N");
+    }
+
+    @Test
+    void mergeWorkerCountIsReadFromTheEnvironment() {
+        EngineSettings settings = read(Map.of("CASCADA_MERGE_WORKERS", "8"));
+
+        assertThat(settings.cacheExecution().mergeWorkerCount()).isEqualTo(8);
+    }
+
+    @Test
+    void mergeWorkerCountDefaultsWhenUnset() {
+        EngineSettings settings = read(Map.of());
+
+        assertThat(settings.cacheExecution().mergeWorkerCount())
+                .isEqualTo(CacheExecutionConfiguration.DEFAULT_MERGE_WORKER_COUNT);
+    }
+
+    @Test
+    void mergeWorkerCountRejectsZero() {
+        assertThatThrownBy(() -> read(Map.of("CASCADA_MERGE_WORKERS", "0")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("CASCADA_MERGE_WORKERS");
     }
 
     private static EngineSettings read(Map<String, String> values) {

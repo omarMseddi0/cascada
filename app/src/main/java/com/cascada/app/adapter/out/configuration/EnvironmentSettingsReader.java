@@ -21,7 +21,8 @@ public final class EnvironmentSettingsReader {
         CacheExecutionConfiguration cacheExecution = new CacheExecutionConfiguration(
                 longSetting("CASCADA_BUCKET_SECONDS", defaults.cacheExecution().bucketSeconds()),
                 intSetting("CASCADA_FIXED_STEP_SECONDS", defaults.cacheExecution().fixedStepSeconds()),
-                setting("CASCADA_TIME_COLUMN", defaults.cacheExecution().timeColumnName()));
+                setting("CASCADA_TIME_COLUMN", defaults.cacheExecution().timeColumnName()),
+                positiveIntSetting("CASCADA_MERGE_WORKERS", defaults.cacheExecution().mergeWorkerCount()));
 
         boolean localSpark = localSparkMode(setting("CASCADA_RUN_MODE", "local"));
 
@@ -50,6 +51,10 @@ public final class EnvironmentSettingsReader {
 
     private int intSetting(String name, int fallback) {
         return SettingValues.intValue(name, environment.apply(name), fallback, Integer.MIN_VALUE, Integer.MAX_VALUE);
+    }
+
+    private int positiveIntSetting(String name, int fallback) {
+        return SettingValues.intValue(name, environment.apply(name), fallback, 1, Integer.MAX_VALUE);
     }
 
     private long longSetting(String name, long fallback) {

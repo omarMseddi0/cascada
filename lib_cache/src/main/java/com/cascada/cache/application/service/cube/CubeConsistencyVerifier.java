@@ -72,6 +72,7 @@ public final class CubeConsistencyVerifier {
         }
 
         Set<String> extraFilters = filterEvaluator.extraFilters(candidate.shape(), query);
+        CompiledFilters compiledFilters = filterEvaluator.compile(extraFilters);
         Map<String, AggregateFunction> declared = CubeShapeAnalysis.declaredAggregateFunctions(candidate.shape(), query);
         AggregateFunction[] measureFunctions = CubeShapeAnalysis.measureFunctions(measures, declared);
 
@@ -91,7 +92,7 @@ public final class CubeConsistencyVerifier {
         Map<List<Object>, CubeVerifierGroup> oracle = new LinkedHashMap<>();
         for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
             if (!extraFilters.isEmpty()
-                    && !filterEvaluator.matchesAll(frame, frame.rows().get(rowIndex), extraFilters)) {
+                    && !filterEvaluator.matchesAll(frame, rowIndex, compiledFilters)) {
                 continue;
             }
             List<Object> parts = new ArrayList<>(dimensions.size());

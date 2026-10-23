@@ -1,6 +1,7 @@
 package com.cascada.cache.application.service.cube;
 
 import com.cascada.cache.application.model.cube.CubeFilterLiteral;
+import com.cascada.cache.application.model.cube.PreparedCubeFilter;
 import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -58,6 +59,20 @@ final class CubeFilterEvaluator {
             }
         }
         return true;
+    }
+
+    /**
+     * A per-scan filter plan. Individual predicates are prepared on first evaluation, rather than
+     * up front, to preserve the old left-to-right AND short-circuiting: an unsupported later
+     * predicate is still ignored when an earlier predicate rejects every row, and an empty input
+     * never parses predicates that the row-map path would not have visited.
+     */
+    CompiledFilters compile(Set<String> filters) {
+        return new CompiledFilters(this, filters);
+    }
+
+    boolean matchesAll(ResultFrame frame, int rowIndex, CompiledFilters filters) {
+        return filters.matches(frame, rowIndex);
     }
 
     private boolean rowMatchesFilter(ResultFrame frame, Map<String, Object> row, String filter) {
@@ -202,4 +217,74 @@ final class CubeFilterEvaluator {
         Matcher equality = EQUALITY_FILTER.matcher(filter);
         return equality.matches() ? Optional.of(equality.group(1)) : Optional.empty();
     }
+
+    PreparedCubeFilter prepare(ResultFrame frame, String filter) {
+        Matcher in = IN_FILTER.matcher(filter);
+        if (in.matches()) {
+            String column = in.group(1);
+            int columnIndex = requiredColumnIndex(frame, column, true);
+            return new PreparedCubeFilter(columnIndex, frame.columnTypeAt(columnIndex),
+                    List.copyOf(parseInList(in.group(2))), true);
+        }
+        Matcher equality = EQUALITY_FILTER.matcher(filter);
+        if (!equality.matches()) {
+            throw new CubeRollUpUnavailableException("filter '" + filter + "' cannot be evaluated in memory");
+        }
+        String column = equality.group(1);
+        int columnIndex = requiredColumnIndex(frame, column, false);
+        return new PreparedCubeFilter(columnIndex, frame.columnTypeAt(columnIndex),
+                List.of(parseLiteral(equality.group(2))), false);
+    }
+
+    private int requiredColumnIndex(ResultFrame frame, String column, boolean inFilter) {
+        try {
+            return frame.columnIndex(column);
+        } catch (IllegalArgumentException absent) {
+            String kind = inFilter ? "IN filter" : "equality filter";
+            throw new CubeRollUpUnavailableException(kind + " on absent column '" + column + "'");
+        }
+    }
+
+    boolean frameValueEqualsLiteral(ResultFrame frame, int rowIndex, int columnIndex,
+                                    ColumnType type, CubeFilterLiteral literal) {
+        // SQL equality with NULL is UNKNOWN, and therefore never selects a row.
+        if (frame.isNullAt(rowIndex, columnIndex) || literal.sqlNull()) {
+            return false;
+        }
+        try {
+            return switch (type) {
+                case STRING -> {
+                    if (!literal.quoted()) {
+                        throw new CubeRollUpUnavailableException("unquoted literal for STRING dimension");
+                    }
+                    yield frame.stringAt(rowIndex, columnIndex).equals(literal.value());
+                }
+                case LONG -> {
+                    if (literal.quoted()) {
+                        throw new CubeRollUpUnavailableException("quoted literal for numeric dimension");
+                    }
+                    yield BigDecimal.valueOf(frame.longAt(rowIndex, columnIndex))
+                            .compareTo(new BigDecimal(literal.value())) == 0;
+                }
+                case DECIMAL -> {
+                    if (literal.quoted()) {
+                        throw new CubeRollUpUnavailableException("quoted literal for numeric dimension");
+                    }
+                    yield ((BigDecimal) frame.valueAt(rowIndex, columnIndex))
+                            .compareTo(new BigDecimal(literal.value())) == 0;
+                }
+                case DOUBLE -> {
+                    if (literal.quoted()) {
+                        throw new CubeRollUpUnavailableException("quoted literal for numeric dimension");
+                    }
+                    double left = frame.doubleAt(rowIndex, columnIndex);
+                    double right = Double.parseDouble(literal.value());
+                    yield left == right || Double.isNaN(left) && Double.isNaN(right);
+                }
+            };
+        } catch (NumberFormatException malformedNumericLiteral) {
+            throw new CubeRollUpUnavailableException("numeric filter literal cannot be parsed for " + type);
+        }
+    }
+
 }

@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service.merge;
 
+import com.cascada.cache.application.execution.QueryCancellation;
+import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -29,8 +31,8 @@ import static com.cascada.cache.application.service.merge.TypedFrameAggregator.*
  * last frame.
  */
 public final class TypedFrameAccumulator {
-    /** Bounds the frames retained by queued partition work, so a slow partition back-pressures the producer. */
-    private static final int MAXIMUM_FRAMES_IN_FLIGHT = 4;
+    /** Two frames overlap routing with aggregation while bounding retained inputs and routing scratch. */
+    private static final int MAXIMUM_FRAMES_IN_FLIGHT = 2;
     private static final int NOT_PRESENT = -1;
     private static final String DEFAULT_AVERAGE_INPUT_TYPE = "double";
 
@@ -45,6 +47,8 @@ public final class TypedFrameAccumulator {
     private final Executor partitionExecutor;
     private final List<CompletableFuture<Void>> partitionTails;
     private final Deque<CompletableFuture<Void>> framesInFlight = new ArrayDeque<>();
+    // The producer reuses a buffer only after every consumer of that frame has completed.
+    private final Deque<PartitionedFrame> routingBuffers = new ArrayDeque<>();
 
     public TypedFrameAccumulator(ResultFrame inputSchema, List<String> dimensions,
                                  Map<String, AggregateFunction> functions, String timeColumn, int step) {
@@ -107,6 +111,7 @@ public final class TypedFrameAccumulator {
     }
 
     public void accept(ResultFrame input) {
+        QueryCancellation.requireCurrentActive();
         validateCompatibleSchemas(List.of(schema, input));
         if (input.rowCount() == 0) {
             return;
@@ -115,15 +120,24 @@ public final class TypedFrameAccumulator {
             accumulateFrame(partitions.get(0), input);
             return;
         }
+        // Wait before scheduling more work so the number of retained input frames never exceeds
+        // MAXIMUM_FRAMES_IN_FLIGHT, even when a partition is slower than its producer.
+        PartitionedFrame reusable = null;
+        if (framesInFlight.size() == MAXIMUM_FRAMES_IN_FLIGHT) {
+            awaitCompletion(framesInFlight.removeFirst());
+            reusable = routingBuffers.removeFirst();
+        }
+        FrameColumnReader[] columns = new FrameColumnReader[input.columnNames().size()];
+        Arrays.setAll(columns, input::columnReader);
+        PartitionedFrame routedFrame = partitions.get(0).partitionFrame(columns, input.rowCount(), reusable);
         for (int partition = 0; partition < partitions.size(); partition++) {
             TypedAggregationGroups groups = partitions.get(partition);
             partitionTails.set(partition, partitionTails.get(partition)
-                    .thenRunAsync(() -> accumulateFrame(groups, input), partitionExecutor));
+                    .thenRunAsync(QueryExecutionScope.propagate(() -> groups.accumulateFrame(routedFrame)),
+                            partitionExecutor));
         }
         framesInFlight.addLast(allPartitionWork());
-        if (framesInFlight.size() > MAXIMUM_FRAMES_IN_FLIGHT) {
-            awaitCompletion(framesInFlight.removeFirst());
-        }
+        routingBuffers.addLast(routedFrame);
     }
 
     private static void accumulateFrame(TypedAggregationGroups groups, ResultFrame input) {
@@ -241,13 +255,17 @@ public final class TypedFrameAccumulator {
      * dimension order: each partition is sorted on its own, then the sorted partitions are merged.
      */
     private long[] orderedGroups() {
+        QueryCancellation.requireCurrentActive();
         awaitCompletion(allPartitionWork());
         framesInFlight.clear();
+        routingBuffers.clear();
         if (partitions.size() == 1) {
+            QueryCancellation.requireCurrentActive();
             return Arrays.stream(partitions.get(0).sortedGroupIds(dimensions)).asLongStream().toArray();
         }
         List<CompletableFuture<int[]>> sortedPartitions = partitions.stream()
-                .map(groups -> CompletableFuture.supplyAsync(() -> groups.sortedGroupIds(dimensions), partitionExecutor))
+                .map(groups -> CompletableFuture.supplyAsync(
+                        QueryExecutionScope.propagate(() -> groups.sortedGroupIds(dimensions)), partitionExecutor))
                 .toList();
         awaitCompletion(CompletableFuture.allOf(sortedPartitions.toArray(CompletableFuture[]::new)));
         return mergeSortedPartitions(sortedPartitions.stream().map(CompletableFuture::join).toList());

@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.merge;
 
+import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -73,7 +74,10 @@ final class TypedAggregationGroups {
     private int slotMask = INITIAL_SLOT_COUNT - 1;
     private long[] rowHashes = new long[0];
     private int[] rowGroups = new int[0];
+    /** Reused by this table; same-partition frame work is chained, so only one task uses it at a time. */
+    private int[] partitionGroupScratch = new int[0];
     int groupCount;
+
 
     TypedAggregationGroups(ResultFrame schema, int[] dimensionColumns, ColumnType[] dimensionTypes,
                            boolean[] timeDimensions, int step, int[] measureColumns,
@@ -135,42 +139,93 @@ final class TypedAggregationGroups {
             rowHashes = new long[rowCount];
             rowGroups = new int[rowCount];
         }
-        computeRowHashes(input, rowCount);
+        computeRowHashes(input, rowCount, rowHashes);
         for (int row = 0; row < rowCount; row++) {
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
             rowGroups[row] = ownsHash(rowHashes[row]) ? findOrCreate(input, row, rowHashes[row]) : NOT_OWNED;
         }
         for (int measure = 0; measure < measureColumns.length; measure++) {
             FrameColumnReader column = input[measureColumns[measure]];
-            switch (measureTypes[measure]) {
-                case LONG -> accumulateLongColumn(measure, column, rowCount);
-                case DOUBLE -> accumulateDoubleColumn(measure, column, rowCount);
-                case STRING -> accumulateStringColumn(measure, column, rowCount);
-                case DECIMAL -> accumulateDecimalColumn(measure, column, rowCount);
-            }
+            accumulateColumn(measure, column, rowCount, null, null, 0);
         }
     }
 
-    private void computeRowHashes(FrameColumnReader[] input, int rowCount) {
-        Arrays.fill(rowHashes, 0, rowCount, HASH_SEED);
+    /** Computes hashes once, then groups row indices by partition without changing their order. */
+    PartitionedFrame partitionFrame(FrameColumnReader[] input, int rowCount, PartitionedFrame reusable) {
+        PartitionedFrame frame = reusable == null ? new PartitionedFrame(partitionCount) : reusable;
+        frame.columns = input;
+        if (frame.hashes.length < rowCount) {
+            frame.hashes = new long[rowCount];
+            frame.rows = new int[rowCount];
+        }
+        computeRowHashes(input, rowCount, frame.hashes);
+        Arrays.fill(frame.offsets, 0);
+        for (int row = 0; row < rowCount; row++) {
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+            frame.offsets[partitionForHash(frame.hashes[row], partitionCount) + 1]++;
+        }
+        for (int partition = 0; partition < partitionCount; partition++) {
+            frame.offsets[partition + 1] += frame.offsets[partition];
+        }
+        int[] cursors = Arrays.copyOf(frame.offsets, partitionCount);
+        for (int row = 0; row < rowCount; row++) {
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+            int partition = partitionForHash(frame.hashes[row], partitionCount);
+            frame.rows[cursors[partition]++] = row;
+        }
+        return frame;
+    }
+
+    void accumulateFrame(PartitionedFrame frame) {
+        int start = frame.offsets[partitionIndex];
+        int count = frame.offsets[partitionIndex + 1] - start;
+        if (partitionGroupScratch.length < count) {
+            partitionGroupScratch = new int[count];
+        }
+        int[] groups = partitionGroupScratch;
+        for (int position = 0; position < count; position++) {
+            if ((position & 1023) == 0) QueryCancellation.requireCurrentActive();
+            int row = frame.rows[start + position];
+            groups[position] = findOrCreate(frame.columns, row, frame.hashes[row]);
+        }
+        for (int measure = 0; measure < measureColumns.length; measure++) {
+            accumulateColumn(measure, frame.columns[measureColumns[measure]], count, frame.rows, groups, start);
+        }
+    }
+
+    private void computeRowHashes(FrameColumnReader[] input, int rowCount, long[] hashes) {
+        Arrays.fill(hashes, 0, rowCount, HASH_SEED);
         for (int dimension = 0; dimension < dimensionColumns.length; dimension++) {
+            QueryCancellation.requireCurrentActive();
             int column = dimensionColumns[dimension];
             if (column < 0) {
-                for (int row = 0; row < rowCount; row++) rowHashes[row] = mixHash(rowHashes[row], NULL_KEY_HASH);
+                for (int row = 0; row < rowCount; row++) {
+                    if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+                    hashes[row] = mixHash(hashes[row], NULL_KEY_HASH);
+                }
                 continue;
             }
             FrameColumnReader reader = input[column];
             for (int row = 0; row < rowCount; row++) {
+                if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
                 long keyHash = reader.isNullAt(row) ? NULL_KEY_HASH : keyHash(reader, row, dimension);
-                rowHashes[row] = mixHash(rowHashes[row], keyHash);
+                hashes[row] = mixHash(hashes[row], keyHash);
             }
         }
-        for (int row = 0; row < rowCount; row++) rowHashes[row] = finalizeHash(rowHashes[row]);
+        for (int row = 0; row < rowCount; row++) {
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+            hashes[row] = finalizeHash(hashes[row]);
+        }
     }
 
     /** Partitions split the hash space, so every group and its summation order have exactly one owner. */
     private boolean ownsHash(long hash) {
         return partitionCount == 1
-                || (int) ((hash >>> PARTITION_HASH_SHIFT) * partitionCount >>> PARTITION_FRACTION_BITS) == partitionIndex;
+                || partitionForHash(hash, partitionCount) == partitionIndex;
+    }
+
+    private static int partitionForHash(long hash, int partitionCount) {
+        return (int) ((hash >>> PARTITION_HASH_SHIFT) * partitionCount >>> PARTITION_FRACTION_BITS);
     }
 
     private long keyHash(FrameColumnReader reader, int row, int dimension) {
@@ -284,16 +339,29 @@ final class TypedAggregationGroups {
         return BucketMath.floor(timestamp, step);
     }
 
-    private void accumulateLongColumn(int measure, FrameColumnReader column, int rowCount) {
+    private void accumulateColumn(int measure, FrameColumnReader column, int rowCount,
+                                  int[] rows, int[] groups, int rowOffset) {
+        switch (measureTypes[measure]) {
+            case LONG -> accumulateLongColumn(measure, column, rowCount, rows, groups, rowOffset);
+            case DOUBLE -> accumulateDoubleColumn(measure, column, rowCount, rows, groups, rowOffset);
+            case STRING -> accumulateStringColumn(measure, column, rowCount, rows, groups, rowOffset);
+            case DECIMAL -> accumulateDecimalColumn(measure, column, rowCount, rows, groups, rowOffset);
+        }
+    }
+
+    private void accumulateLongColumn(int measure, FrameColumnReader column, int rowCount,
+                                      int[] rows, int[] groups, int rowOffset) {
         int valueOffset = measureWordOffsets[measure];
         int flag = measureFlag(measure);
         AggregateOperation function = measureFunctions[measure];
         for (int row = 0; row < rowCount; row++) {
-            int group = rowGroups[row];
-            if (group == NOT_OWNED || column.isNullAt(row)) continue;
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+            int inputRow = rows == null ? row : rows[rowOffset + row];
+            int group = rows == null ? rowGroups[row] : groups[row];
+            if (group == NOT_OWNED || column.isNullAt(inputRow)) continue;
             long[] words = wordPage(group);
             int wordBase = wordBase(group);
-            long incoming = column.longValue(row);
+            long incoming = column.longValue(inputRow);
             if (!hasFlag(words, wordBase, flag)) {
                 words[wordBase + valueOffset] = incoming;
                 setFlag(words, wordBase, flag);
@@ -308,16 +376,19 @@ final class TypedAggregationGroups {
         }
     }
 
-    private void accumulateDoubleColumn(int measure, FrameColumnReader column, int rowCount) {
+    private void accumulateDoubleColumn(int measure, FrameColumnReader column, int rowCount,
+                                        int[] rows, int[] groups, int rowOffset) {
         int valueOffset = measureWordOffsets[measure];
         int flag = measureFlag(measure);
         AggregateOperation function = measureFunctions[measure];
         for (int row = 0; row < rowCount; row++) {
-            int group = rowGroups[row];
-            if (group == NOT_OWNED || column.isNullAt(row)) continue;
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+            int inputRow = rows == null ? row : rows[rowOffset + row];
+            int group = rows == null ? rowGroups[row] : groups[row];
+            if (group == NOT_OWNED || column.isNullAt(inputRow)) continue;
             long[] words = wordPage(group);
             int wordBase = wordBase(group);
-            double incoming = column.doubleValue(row);
+            double incoming = column.doubleValue(inputRow);
             if (!hasFlag(words, wordBase, flag)) {
                 words[wordBase + valueOffset] = Double.doubleToRawLongBits(incoming);
                 setFlag(words, wordBase, flag);
@@ -328,17 +399,20 @@ final class TypedAggregationGroups {
         }
     }
 
-    private void accumulateStringColumn(int measure, FrameColumnReader column, int rowCount) {
+    private void accumulateStringColumn(int measure, FrameColumnReader column, int rowCount,
+                                        int[] rows, int[] groups, int rowOffset) {
         int valueOffset = measureWordOffsets[measure];
         int flag = measureFlag(measure);
         AggregateOperation function = measureFunctions[measure];
         List<String> dictionary = stringMeasureDictionaries.get(measure);
         for (int row = 0; row < rowCount; row++) {
-            int group = rowGroups[row];
-            if (group == NOT_OWNED || column.isNullAt(row)) continue;
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+            int inputRow = rows == null ? row : rows[rowOffset + row];
+            int group = rows == null ? rowGroups[row] : groups[row];
+            if (group == NOT_OWNED || column.isNullAt(inputRow)) continue;
             long[] words = wordPage(group);
             int wordBase = wordBase(group);
-            int incomingId = dictionaryId(measure, column.stringValue(row));
+            int incomingId = dictionaryId(measure, column.stringValue(inputRow));
             if (!hasFlag(words, wordBase, flag)) {
                 words[wordBase + valueOffset] = incomingId;
                 setFlag(words, wordBase, flag);
@@ -371,19 +445,22 @@ final class TypedAggregationGroups {
         return id;
     }
 
-    private void accumulateDecimalColumn(int measure, FrameColumnReader column, int rowCount) {
+    private void accumulateDecimalColumn(int measure, FrameColumnReader column, int rowCount,
+                                         int[] rows, int[] groups, int rowOffset) {
         int valueOffset = measureObjectOffsets[measure];
         int flag = measureFlag(measure);
         AggregateOperation function = measureFunctions[measure];
         String columnName = schema.columnNames().get(measureColumns[measure]);
         for (int row = 0; row < rowCount; row++) {
-            int group = rowGroups[row];
-            if (group == NOT_OWNED || column.isNullAt(row)) continue;
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+            int inputRow = rows == null ? row : rows[rowOffset + row];
+            int group = rows == null ? rowGroups[row] : groups[row];
+            if (group == NOT_OWNED || column.isNullAt(inputRow)) continue;
             long[] words = wordPage(group);
             int wordBase = wordBase(group);
             Object[] objects = objectPage(group);
             int objectSlot = objectBase(group) + valueOffset;
-            BigDecimal incoming = column.decimalValue(row);
+            BigDecimal incoming = column.decimalValue(inputRow);
             SparkValues.requireDecimal(incoming, columnName);
             if (!hasFlag(words, wordBase, flag)) {
                 objects[objectSlot] = incoming;

@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service.merge;
 
+import com.cascada.cache.application.execution.QueryCancellation;
+import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -7,11 +9,18 @@ import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.AverageIngredients;
 import java.math.BigDecimal;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Queue;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -199,6 +208,136 @@ class TypedFrameAggregatorTest {
         }
     }
 
+    @Test
+    void queuedPartitionWorkInheritsQueryCancellation() {
+        ResultFrame frame = ResultFrame.builder()
+                .column("device", ColumnType.LONG).column("SUM(x)", ColumnType.LONG)
+                .row(1L, 2L).row(2L, 3L).build();
+        QueuedExecutor executor = new QueuedExecutor();
+        QueryCancellation cancellation = new QueryCancellation();
+        TypedFrameAccumulator partitioned = new TypedFrameAccumulator(frame, List.of("device"),
+                Map.of("SUM(x)", AggregateFunction.SUM), "ts", 300, 2, executor);
+
+        try (QueryExecutionScope ignored = new QueryExecutionScope(cancellation)) {
+            partitioned.accept(frame);
+        }
+        cancellation.cancel();
+        executor.runAll();
+
+        assertThatThrownBy(partitioned::finish).isInstanceOf(CancellationException.class);
+    }
+
+    @Test
+    void partitionedMergeBackpressuresBeforeAcceptingMoreThanTwoFrames() throws Exception {
+        ResultFrame frame = ResultFrame.builder()
+                .column("device", ColumnType.LONG).column("SUM(x)", ColumnType.LONG)
+                .row(1L, 2L).row(2L, 3L).build();
+        QueuedExecutor executor = new QueuedExecutor();
+        TypedFrameAccumulator partitioned = new TypedFrameAccumulator(frame, List.of("device"),
+                Map.of("SUM(x)", AggregateFunction.SUM), "ts", 300, 2, executor);
+        for (int index = 0; index < 2; index++) partitioned.accept(frame);
+
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread producer = Thread.ofVirtual().start(() -> {
+            started.countDown();
+            try {
+                partitioned.accept(frame);
+            } catch (Throwable error) {
+                failure.set(error);
+            } finally {
+                finished.countDown();
+            }
+        });
+
+        assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (finished.getCount() != 0 && producer.getState() != Thread.State.WAITING
+                && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        assertThat(producer.getState()).isEqualTo(Thread.State.WAITING);
+        executor.runAll();
+        assertThat(finished.await(2, TimeUnit.SECONDS)).isTrue();
+        producer.join();
+        executor.runAll();
+        executor.runInline();
+
+        assertThat(failure.get()).isNull();
+        assertThat(partitioned.finish().rows()).containsExactly(
+                Map.of("device", 1L, "SUM(x)", 6L), Map.of("device", 2L, "SUM(x)", 9L));
+    }
+
+    @Test
+    void growsPagedGroupsAndHashSlotsPastSixtyFiveThousandGroups() {
+        int keyCount = 70_000;
+        ResultFrameBuilder ascendingBuilder = ResultFrame.builder()
+                .column("device", ColumnType.LONG).column("SUM(x)", ColumnType.LONG);
+        ResultFrameBuilder descendingBuilder = ResultFrame.builder()
+                .column("device", ColumnType.LONG).column("SUM(x)", ColumnType.LONG);
+        for (int key = 0; key < keyCount; key++) ascendingBuilder.row((long) key, (long) key + 1L);
+        for (int key = keyCount - 1; key >= 0; key--) descendingBuilder.row((long) key, 2L * (key + 1L));
+        ResultFrame ascending = ascendingBuilder.build();
+        ResultFrame descending = descendingBuilder.build();
+        Map<String, AggregateFunction> functions = Map.of("SUM(x)", AggregateFunction.SUM);
+
+        TypedFrameAccumulator single = new TypedFrameAccumulator(ascending, List.of("device"), functions, "ts", 300);
+        single.accept(ascending);
+        single.accept(descending);
+        ResultFrame expected = single.finish();
+
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            TypedFrameAccumulator partitioned = new TypedFrameAccumulator(ascending, List.of("device"), functions,
+                    "ts", 300, 4, executor);
+            partitioned.accept(ascending);
+            partitioned.accept(descending);
+            ResultFrame actual = partitioned.finish();
+
+            assertThat(expected.rowCount()).isEqualTo(keyCount);
+            assertThat(actual.rowCount()).isEqualTo(keyCount);
+            for (int row = 0; row < keyCount; row++) {
+                long key = row;
+                long expectedSum = 3L * (key + 1L);
+                if (expected.longAt(row, 0) != key || expected.longAt(row, 1) != expectedSum
+                        || actual.longAt(row, 0) != key || actual.longAt(row, 1) != expectedSum) {
+                    throw new AssertionError("unexpected merge result at sorted row " + row);
+                }
+            }
+        }
+    }
+
+    @Test
+    void reusesRoutingBuffersAcrossGrowingShrinkingEmptyAndSkewedFrames() {
+        int[] sizes = {1_100, 3, 0, 2_048, 1, 17, 4_097, 2, 33, 500, 1, 7};
+        var expected = new java.util.TreeMap<Long, Long>();
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            ResultFrame schema = ResultFrame.builder().column("device", ColumnType.LONG)
+                    .column("SUM(x)", ColumnType.LONG).build();
+            TypedFrameAccumulator accumulator = new TypedFrameAccumulator(schema, List.of("device"),
+                    Map.of("SUM(x)", AggregateFunction.SUM), "ts", 300, 4, executor);
+            for (int frame = 0; frame < sizes.length; frame++) {
+                ResultFrameBuilder input = ResultFrame.builder().column("device", ColumnType.LONG)
+                        .column("SUM(x)", ColumnType.LONG);
+                for (int row = 0; row < sizes[frame]; row++) {
+                    long key = frame % 2 == 0 ? row % 37 : 0;
+                    long value = row + frame + 1L;
+                    input.row(key, value);
+                    expected.merge(key, value, Long::sum);
+                }
+                accumulator.accept(input.build());
+            }
+            ResultFrame actual = accumulator.finish();
+            assertThat(actual.rowCount()).isEqualTo(expected.size());
+            int row = 0;
+            for (var entry : expected.entrySet()) {
+                assertThat(actual.longAt(row, 0)).isEqualTo(entry.getKey());
+                assertThat(actual.longAt(row, 1)).isEqualTo(entry.getValue());
+                row++;
+            }
+        }
+    }
+
     private static List<ResultFrame> mixedTypeFrames() {
         Random random = new Random(7);
         String[] labels = {"alpha", "beta", "gamma", "Ωmega", "beta"};
@@ -243,5 +382,38 @@ class TypedFrameAggregatorTest {
             });
             return builder.build();
         }).toList();
+    }
+
+    private static final class QueuedExecutor implements Executor {
+        private final Queue<Runnable> queued = new ArrayDeque<>();
+        private boolean inline;
+
+        @Override
+        public void execute(Runnable command) {
+            synchronized (queued) {
+                if (inline) {
+                    command.run();
+                } else {
+                    queued.add(command);
+                }
+            }
+        }
+
+        private void runAll() {
+            while (true) {
+                Runnable next;
+                synchronized (queued) {
+                    next = queued.poll();
+                }
+                if (next == null) return;
+                next.run();
+            }
+        }
+
+        private void runInline() {
+            synchronized (queued) {
+                inline = true;
+            }
+        }
     }
 }

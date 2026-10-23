@@ -2,6 +2,250 @@
 
 A lakehouse query engine with a smart bucket cache
 
+## Single-query thread scaling: 23 October 2026
+
+This follow-up measures one query at different worker counts. Baseline is `c1392bf`; the updated implementation is `74b8acf`. Both were compiled and run with Temurin Java 21.0.12.1, a fixed 5 GiB heap, and Parallel GC on this Ryzen 7 5700G host (8 physical cores, 16 logical processors). Each cell uses a fresh JVM, two warmups, and five measured rounds, with the before/after cells run sequentially at each worker count.
+
+The controlled query has 20 million input rows, 12 columns, one million groups, and three AVG outputs. The main LONG grouping key is permuted; region/device derive from it. Per-alias counts are fixed and values depend on the group. Every returned grouping column and AVG value is checked against independent formulas after each timed round. Generation, explicit pre-round GC, and verification are outside timing. This measures the real accumulator and fused AVG finish, excluding cache retrieval, decoding, Spark, transport, and API serialization.
+
+### Completed 20-frame matrix
+
+All rounds in these cells passed verification. Values are medians. Speedup compares the updated implementation with its own one-worker result.
+
+| Workers | Previous merger (s) | Updated merger (s) | Updated speedup | Updated process CPU (s) | Updated sampled extra heap (MiB) |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 7.743 | 7.148 | 1.00x | 6.844 | 282.3 |
+| 2 | 5.482 | 3.996 | 1.79x | 7.422 | 304.2 |
+| 4 | 3.906 | 2.257 | 3.17x | 8.016 | 322.3 |
+| 8 | 3.513 | 1.863 | 3.84x | 11.516 | 316.0 |
+| 10 | 3.683 | 1.938 | 3.69x | 13.000 | 354.1 |
+
+The updated query scales from 7.15 seconds at one worker to 1.94 seconds at ten. At ten workers it also takes about half the baseline wall time and substantially less CPU. Eight workers were slightly faster than ten on this eight-core host. There is no linear-scaling or 10x/30x guarantee.
+
+Sampled extra heap subtracts the used-heap reading before merge and is sampled every 5 ms. It includes uncollected garbage and output; it is not a live-object, allocation-byte, or process-RSS measurement. Working heap increases at some higher worker counts. Parallel sorted finishing trades an additional group-index buffer for parallel execution; output writers share one allocation and avoid copying per-worker result frames.
+
+### What changed
+
+- Large frames use asynchronous parallel hash/count/scatter with stable per-partition row order. Partition work depends on routing completion and its previous frame.
+- Every owned row updates all its measures while its contiguous group state is hot, replacing separate state scans for each measure.
+- Sorted partitions combine through a balanced merge tree. Co-ranking splits even the final merge across workers, following the approach described by [Siebert and Traff](https://arxiv.org/abs/1303.4312).
+- Large results use disjoint, 64-row-aligned writers in one fixed-size allocation. Every validity word has one owner, and publication checks completeness and seals writers.
+
+The clean eight-module reactor passed with **693 registered tests, 665 executed, 28 skipped, zero failures/errors**. Tests include exact floating-point ordering across parallel routing chunks, ten-worker typed keys, null/decimal AVG output, validity-word ownership, immutable output, and large-frame acceptance on a one-thread executor.
+
+### 300-frame stress failure and runtime limitations
+
+A separate 300-frame case uses the same row count and schema, with the permutation continuing across frame boundaries. The primary updated ten-worker run failed in its last measured round with an out-of-range string dictionary ID (`67108864` for a one-entry dictionary). Its earlier completed rounds and later clean repeats do not establish that this failure is fixed. An instrumented repeat detected neither overlapping partition owners nor a stored-group hash mismatch. A separate read-only memory probe passed. A further uninstrumented 50-round run passed every check: one billion measured input-row visits and 150 million checked AVG outputs. The cause of the earlier failure remains unresolved; this path is experimental pending explanation.
+
+Earlier G1 runs crashed in native GC threads during input generation on both Oracle Java 21.0.6 and Temurin Java 21.0.12.1. The previous implementation also returned an extra group in Oracle Java 21.0.6 ten-worker runs. These failures are retained in local evidence. Switching collectors for the controlled matrix does not prove the G1 or oracle failures resolved, and production GC configuration was not changed.
+
+### Selecting workers
+
+For the application, set `CASCADA_MERGE_WORKERS=10`. Standalone callers must select both partitions and executor capacity, for example `new FrameMergeService(300, "ts", 10, executor)` with a ten-thread executor. The two-argument service constructor and static `TypedFrameAggregator.aggregate` remain single-worker paths. Global aggregation without dimensions retains one owner to preserve update order; a dominant group cannot be accelerated across owners by raising this setting.
+
+See the [updated code walkthrough](docs/UNCOMMITTED_COMMIT_PLAN.md#follow-up-scaling-one-query-across-threads) for ownership and memory details. The earlier four-worker routing comparison below remains a historical measurement, using a different runtime/collector setup.
+
+
+## Reproducing the thread-scaling experiment
+
+Use separate checkouts of `c1392bf` and `74b8acf`, build both with the same Java 21.0.12.1 toolchain (`mvn -B -Pvalidation -pl lib_cache -am -DskipTests compile`), and compile the harness below against each checkout. Run cells sequentially, with no simultaneous test/build work. The matrix alternated before and after at each worker count. Both used `-Xms5g -Xmx5g -XX:+UseParallelGC`; neither used the application environment variable to select workers. The harness selects its fixed thread pool and accumulator partition count explicitly.
+
+```powershell
+javac -cp lib_cache/target/validation/target/classes ScalingBenchmark.java
+foreach ($workers in 1,2,4,8,10) {
+    java -Xms5g -Xmx5g -XX:+UseParallelGC -cp ".;lib_cache/target/validation/target/classes" ScalingBenchmark $workers 1000000 20
+}
+# Separate 300-frame checks use the last argument 300.
+```
+
+```java
+import com.cascada.cache.domain.frame.*;
+import com.cascada.cache.domain.merge.*;
+import com.cascada.cache.application.service.merge.TypedFrameAccumulator;
+import java.util.*;
+import java.util.concurrent.*;
+import java.lang.management.*;
+public class ScalingBenchmark {
+ public static void main(String[] args) throws Exception {
+  int workers=Integer.parseInt(args[0]), groups=args.length>1?Integer.parseInt(args[1]):100000, frames=args.length>2?Integer.parseInt(args[2]):20; long totalRows=(long)groups*20; long globalRow=0;
+  List<ResultFrame> inputs=new ArrayList<>(); Map<String,AggregateFunction> functions=new HashMap<>();
+  for(int f=0;f<frames;f++) { int frameRows=(int)(totalRows/frames+(f<totalRows%frames?1:0));
+   var b=ResultFrame.builder().expectedRows(frameRows).column("k",ColumnType.LONG).column("region",ColumnType.LONG).column("device",ColumnType.LONG);
+   for(int a=0;a<3;a++) {String alias="avg"+a; b.column(AverageIngredients.sumColumn(alias),ColumnType.DOUBLE).column(AverageIngredients.countColumn(alias),ColumnType.LONG).column(AverageIngredients.typeColumn(alias),ColumnType.STRING); functions.put(AverageIngredients.sumColumn(alias),AggregateFunction.SUM);functions.put(AverageIngredients.countColumn(alias),AggregateFunction.SUM);functions.put(ColumnNames.identity(AverageIngredients.typeColumn(alias)),AggregateFunction.MINIMUM);}
+   for(int r=0;r<frameRows;r++,globalRow++) {int k=frames==20?(int)(((long)r*7919+f*17)%groups):(int)((globalRow*7919)%groups); b.appendLong(k).appendLong(k%17).appendLong(k%3); for(int a=0;a<3;a++) b.appendDouble((double)(k+a+1)*(a+1)).appendLong(a+1).appendString("double");}
+   inputs.add(b.build());
+  }
+  try(var pool=Executors.newFixedThreadPool(workers)) {
+   for(int round=-2;round<5;round++) {
+    System.gc(); Thread.sleep(100);
+    long retained=Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory();
+    var peak=new java.util.concurrent.atomic.AtomicLong(retained); var sampling=new java.util.concurrent.atomic.AtomicBoolean(true);
+    Thread sampler=Thread.ofPlatform().start(()->{while(sampling.get()){peak.accumulateAndGet(Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),Math::max);try{Thread.sleep(5);}catch(InterruptedException e){return;}}});
+    long cpu=((com.sun.management.OperatingSystemMXBean)ManagementFactory.getOperatingSystemMXBean()).getProcessCpuTime(); long start=System.nanoTime();
+    var merge=new TypedFrameAccumulator(inputs.get(0),List.of("k","region","device"),functions,"ts",300,workers,pool);
+    inputs.forEach(merge::accept); long accepted=System.nanoTime(); var result=merge.finishWithAverages(List.of("avg0","avg1","avg2"));
+    double secs=(System.nanoTime()-start)/1e9, cpus=(((com.sun.management.OperatingSystemMXBean)ManagementFactory.getOperatingSystemMXBean()).getProcessCpuTime()-cpu)/1e9;
+    sampling.set(false); sampler.join();
+    if(result.rowCount()!=groups) throw new AssertionError("groups expected="+groups+" actual="+result.rowCount());
+    for(int r=0;r<groups;r++){if(result.columnReader(0).longValue(r)!=r || result.columnReader(1).longValue(r)!=r%17 || result.columnReader(2).longValue(r)!=r%3)throw new AssertionError("key"); for(int a=0;a<3;a++)if(result.columnReader(3+a).doubleValue(r)!=r+a+1)throw new AssertionError("avg "+r);}
+    System.out.printf(Locale.ROOT,"workers=%d frames=%d round=%d seconds=%.6f cpu=%.6f accept=%.6f finish=%.6f retainedHeap=%d sampledPeakHeap=%d sampledExtraHeap=%d verified=%d%n",workers,frames,round,secs,cpus,(accepted-start)/1e9,secs-(accepted-start)/1e9,retained,peak.get(),peak.get()-retained,groups);
+   }
+  }
+ }
+}
+```
+
+<details>
+<summary>Complete primary matrix rounds, including the failed cell</summary>
+
+```text
+
+matrix-after-1-f20.log
+workers=1 frames=20 round=-2 seconds=6.782432 cpu=7.000000 accept=5.913221 finish=0.869210 retainedHeap=1705679528 sampledPeakHeap=2021469320 sampledExtraHeap=315789792 verified=1000000
+workers=1 frames=20 round=-1 seconds=7.068131 cpu=6.875000 accept=6.278401 finish=0.789730 retainedHeap=1681235936 sampledPeakHeap=1986190752 sampledExtraHeap=304954816 verified=1000000
+workers=1 frames=20 round=0 seconds=7.403614 cpu=7.062500 accept=6.629609 finish=0.774005 retainedHeap=1681236136 sampledPeakHeap=1977239592 sampledExtraHeap=296003456 verified=1000000
+workers=1 frames=20 round=1 seconds=7.021806 cpu=6.671875 accept=6.254857 finish=0.766949 retainedHeap=1681236136 sampledPeakHeap=1977239592 sampledExtraHeap=296003456 verified=1000000
+workers=1 frames=20 round=2 seconds=7.281733 cpu=6.890625 accept=6.335045 finish=0.946688 retainedHeap=1681236136 sampledPeakHeap=1990666624 sampledExtraHeap=309430488 verified=1000000
+workers=1 frames=20 round=3 seconds=7.100556 cpu=6.734375 accept=6.331929 finish=0.768628 retainedHeap=1681236872 sampledPeakHeap=1977240328 sampledExtraHeap=296003456 verified=1000000
+workers=1 frames=20 round=4 seconds=7.148245 cpu=6.843750 accept=6.369998 finish=0.778247 retainedHeap=1681236928 sampledPeakHeap=1990667416 sampledExtraHeap=309430488 verified=1000000
+
+matrix-after-1-f300.log
+workers=1 frames=300 round=-2 seconds=6.805836 cpu=7.156250 accept=5.683125 finish=1.122711 retainedHeap=1706324768 sampledPeakHeap=1993589472 sampledExtraHeap=287264704 verified=1000000
+workers=1 frames=300 round=-1 seconds=7.265615 cpu=6.812500 accept=6.305005 finish=0.960610 retainedHeap=1681692136 sampledPeakHeap=1970578520 sampledExtraHeap=288886384 verified=1000000
+workers=1 frames=300 round=0 seconds=7.333512 cpu=6.828125 accept=6.297302 finish=1.036210 retainedHeap=1681691992 sampledPeakHeap=1970578376 sampledExtraHeap=288886384 verified=1000000
+workers=1 frames=300 round=1 seconds=7.079654 cpu=6.609375 accept=6.240542 finish=0.839111 retainedHeap=1681691992 sampledPeakHeap=1970578376 sampledExtraHeap=288886384 verified=1000000
+workers=1 frames=300 round=2 seconds=7.137131 cpu=6.812500 accept=6.388783 finish=0.748348 retainedHeap=1681691992 sampledPeakHeap=1984005408 sampledExtraHeap=302313416 verified=1000000
+workers=1 frames=300 round=3 seconds=7.395485 cpu=6.859375 accept=6.502486 finish=0.892999 retainedHeap=1681693024 sampledPeakHeap=1997433464 sampledExtraHeap=315740440 verified=1000000
+workers=1 frames=300 round=4 seconds=8.493526 cpu=7.484375 accept=7.457393 finish=1.036133 retainedHeap=1681693120 sampledPeakHeap=1970579504 sampledExtraHeap=288886384 verified=1000000
+
+matrix-after-10-f20.log
+workers=10 frames=20 round=-2 seconds=2.514989 cpu=16.281250 accept=1.698548 finish=0.816441 retainedHeap=1705679528 sampledPeakHeap=2082884936 sampledExtraHeap=377205408 verified=1000000
+workers=10 frames=20 round=-1 seconds=2.347542 cpu=14.734375 accept=1.776084 finish=0.571458 retainedHeap=1681308408 sampledPeakHeap=2056485656 sampledExtraHeap=375177248 verified=1000000
+workers=10 frames=20 round=0 seconds=1.971601 cpu=13.546875 accept=1.525468 finish=0.446134 retainedHeap=1681308992 sampledPeakHeap=2066076952 sampledExtraHeap=384767960 verified=1000000
+workers=10 frames=20 round=1 seconds=2.018091 cpu=13.000000 accept=1.598619 finish=0.419472 retainedHeap=1681310944 sampledPeakHeap=2052651880 sampledExtraHeap=371340936 verified=1000000
+workers=10 frames=20 round=2 seconds=1.938479 cpu=14.187500 accept=1.589843 finish=0.348636 retainedHeap=1681310944 sampledPeakHeap=2052651808 sampledExtraHeap=371340864 verified=1000000
+workers=10 frames=20 round=3 seconds=1.684384 cpu=12.046875 accept=1.307191 finish=0.377194 retainedHeap=1681310944 sampledPeakHeap=2052651880 sampledExtraHeap=371340936 verified=1000000
+workers=10 frames=20 round=4 seconds=1.639970 cpu=10.843750 accept=1.271077 finish=0.368893 retainedHeap=1694737976 sampledPeakHeap=2066078912 sampledExtraHeap=371340936 verified=1000000
+
+matrix-after-10-f300.log
+workers=10 frames=300 round=-2 seconds=2.264212 cpu=14.250000 accept=1.631472 finish=0.632741 retainedHeap=1705985568 sampledPeakHeap=2076617976 sampledExtraHeap=370632408 verified=1000000
+workers=10 frames=300 round=-1 seconds=1.820433 cpu=11.593750 accept=1.425483 finish=0.394950 retainedHeap=1681744096 sampledPeakHeap=2027699720 sampledExtraHeap=345955624 verified=1000000
+workers=10 frames=300 round=0 seconds=1.261702 cpu=10.562500 accept=1.023661 finish=0.238042 retainedHeap=1681743936 sampledPeakHeap=2049391712 sampledExtraHeap=367647776 verified=1000000
+workers=10 frames=300 round=1 seconds=1.812554 cpu=11.781250 accept=1.487992 finish=0.324563 retainedHeap=1681745224 sampledPeakHeap=2025865816 sampledExtraHeap=344120592 verified=1000000
+workers=10 frames=300 round=2 seconds=1.772679 cpu=10.765625 accept=1.464652 finish=0.308027 retainedHeap=1681745224 sampledPeakHeap=2037214864 sampledExtraHeap=355469640 verified=1000000
+workers=10 frames=300 round=3 seconds=1.386243 cpu=10.093750 accept=1.170326 finish=0.215917 retainedHeap=1681746352 sampledPeakHeap=2041391168 sampledExtraHeap=359644816 verified=1000000
+Exception in thread "main" java.lang.IndexOutOfBoundsException: Index 67108864 out of bounds for length 1
+	at java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)
+	at java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)
+	at java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)
+	at java.base/java.util.Objects.checkIndex(Objects.java:385)
+	at java.base/java.util.ArrayList.get(ArrayList.java:427)
+	at com.cascada.cache.application.service.merge.TypedAggregationGroups.accumulateRow(TypedAggregationGroups.java:423)
+	at com.cascada.cache.application.service.merge.TypedAggregationGroups.accumulateFrame(TypedAggregationGroups.java:233)
+	at com.cascada.cache.application.service.merge.TypedFrameAccumulator.lambda$accept$3(TypedFrameAccumulator.java:138)
+	at com.cascada.cache.application.execution.QueryExecutionScope.lambda$propagate$2(QueryExecutionScope.java:22)
+	at com.cascada.cache.application.execution.QueryExecutionScope.lambda$propagate$3(QueryExecutionScope.java:23)
+	at java.base/java.util.concurrent.CompletableFuture$UniRun.tryFire(CompletableFuture.java:787)
+	at java.base/java.util.concurrent.CompletableFuture$Completion.run(CompletableFuture.java:482)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+
+matrix-after-2-f20.log
+workers=2 frames=20 round=-2 seconds=4.351277 cpu=8.593750 accept=3.242929 finish=1.108348 retainedHeap=1705402144 sampledPeakHeap=2047794304 sampledExtraHeap=342392160 verified=1000000
+workers=2 frames=20 round=-1 seconds=4.298508 cpu=7.765625 accept=3.149550 finish=1.148958 retainedHeap=1681298384 sampledPeakHeap=2007033304 sampledExtraHeap=325734920 verified=1000000
+workers=2 frames=20 round=0 seconds=4.018842 cpu=7.328125 accept=3.108310 finish=0.910532 retainedHeap=1681298512 sampledPeakHeap=2000319928 sampledExtraHeap=319021416 verified=1000000
+workers=2 frames=20 round=1 seconds=4.036586 cpu=7.546875 accept=3.121106 finish=0.915480 retainedHeap=1681298864 sampledPeakHeap=2000320280 sampledExtraHeap=319021416 verified=1000000
+workers=2 frames=20 round=2 seconds=3.995918 cpu=7.234375 accept=3.096145 finish=0.899774 retainedHeap=1681298864 sampledPeakHeap=2000320280 sampledExtraHeap=319021416 verified=1000000
+workers=2 frames=20 round=3 seconds=3.993403 cpu=7.421875 accept=3.090246 finish=0.903157 retainedHeap=1681298864 sampledPeakHeap=2000320280 sampledExtraHeap=319021416 verified=1000000
+workers=2 frames=20 round=4 seconds=3.957726 cpu=7.421875 accept=3.031029 finish=0.926697 retainedHeap=1681298920 sampledPeakHeap=2013747368 sampledExtraHeap=332448448 verified=1000000
+
+matrix-after-4-f20.log
+workers=4 frames=20 round=-2 seconds=2.798992 cpu=11.031250 accept=1.925559 finish=0.873433 retainedHeap=1705679528 sampledPeakHeap=2054915736 sampledExtraHeap=349236208 verified=1000000
+workers=4 frames=20 round=-1 seconds=2.462075 cpu=8.453125 accept=1.904672 finish=0.557403 retainedHeap=1681299520 sampledPeakHeap=2024614912 sampledExtraHeap=343315392 verified=1000000
+workers=4 frames=20 round=0 seconds=2.256699 cpu=7.703125 accept=1.662405 finish=0.594294 retainedHeap=1681299768 sampledPeakHeap=2024615192 sampledExtraHeap=343315424 verified=1000000
+workers=4 frames=20 round=1 seconds=2.414507 cpu=8.015625 accept=1.855512 finish=0.558994 retainedHeap=1681300296 sampledPeakHeap=2019244864 sampledExtraHeap=337944568 verified=1000000
+workers=4 frames=20 round=2 seconds=2.329431 cpu=8.078125 accept=1.795095 finish=0.534336 retainedHeap=1681300296 sampledPeakHeap=2019244872 sampledExtraHeap=337944576 verified=1000000
+workers=4 frames=20 round=3 seconds=2.227487 cpu=8.000000 accept=1.673028 finish=0.554460 retainedHeap=1681300848 sampledPeakHeap=2019245448 sampledExtraHeap=337944600 verified=1000000
+workers=4 frames=20 round=4 seconds=2.185531 cpu=8.140625 accept=1.684021 finish=0.501510 retainedHeap=1681300904 sampledPeakHeap=2032672536 sampledExtraHeap=351371632 verified=1000000
+
+matrix-after-8-f20.log
+workers=8 frames=20 round=-2 seconds=2.637119 cpu=16.875000 accept=1.866170 finish=0.770950 retainedHeap=1705679528 sampledPeakHeap=2056312208 sampledExtraHeap=350632680 verified=1000000
+workers=8 frames=20 round=-1 seconds=1.702809 cpu=10.812500 accept=1.231144 finish=0.471665 retainedHeap=1681305192 sampledPeakHeap=2017121936 sampledExtraHeap=335816744 verified=1000000
+workers=8 frames=20 round=0 seconds=1.879299 cpu=11.515625 accept=1.453223 finish=0.426076 retainedHeap=1681305616 sampledPeakHeap=2012646688 sampledExtraHeap=331341072 verified=1000000
+workers=8 frames=20 round=1 seconds=1.863146 cpu=11.828125 accept=1.467673 finish=0.395474 retainedHeap=1681306304 sampledPeakHeap=2026074440 sampledExtraHeap=344768136 verified=1000000
+workers=8 frames=20 round=2 seconds=1.704080 cpu=10.718750 accept=1.300445 finish=0.403635 retainedHeap=1681307288 sampledPeakHeap=2012648408 sampledExtraHeap=331341120 verified=1000000
+workers=8 frames=20 round=3 seconds=1.738217 cpu=10.656250 accept=1.349414 finish=0.388803 retainedHeap=1681307288 sampledPeakHeap=2012648392 sampledExtraHeap=331341104 verified=1000000
+workers=8 frames=20 round=4 seconds=2.178209 cpu=13.312500 accept=1.678464 finish=0.499745 retainedHeap=1694734320 sampledPeakHeap=2026075424 sampledExtraHeap=331341104 verified=1000000
+
+matrix-before-1-f20.log
+workers=1 frames=20 round=-2 seconds=7.819927 cpu=8.171875 accept=6.922422 finish=0.897506 retainedHeap=1705402056 sampledPeakHeap=2006344344 sampledExtraHeap=300942288 verified=1000000
+workers=1 frames=20 round=-1 seconds=7.252043 cpu=6.812500 accept=6.459017 finish=0.793026 retainedHeap=1681225784 sampledPeakHeap=1979789752 sampledExtraHeap=298563968 verified=1000000
+workers=1 frames=20 round=0 seconds=7.899334 cpu=7.015625 accept=7.057474 finish=0.841860 retainedHeap=1694652552 sampledPeakHeap=1993216520 sampledExtraHeap=298563968 verified=1000000
+workers=1 frames=20 round=1 seconds=8.167699 cpu=7.593750 accept=7.289828 finish=0.877871 retainedHeap=1681225592 sampledPeakHeap=1993216592 sampledExtraHeap=311991000 verified=1000000
+workers=1 frames=20 round=2 seconds=7.743056 cpu=7.218750 accept=6.931747 finish=0.811310 retainedHeap=1681226328 sampledPeakHeap=1979790296 sampledExtraHeap=298563968 verified=1000000
+workers=1 frames=20 round=3 seconds=7.074538 cpu=6.671875 accept=6.275982 finish=0.798555 retainedHeap=1681226328 sampledPeakHeap=1979790296 sampledExtraHeap=298563968 verified=1000000
+workers=1 frames=20 round=4 seconds=7.065617 cpu=6.906250 accept=6.243189 finish=0.822428 retainedHeap=1681226384 sampledPeakHeap=1993217384 sampledExtraHeap=311991000 verified=1000000
+
+matrix-before-1-f300.log
+workers=1 frames=300 round=-2 seconds=7.599644 cpu=8.031250 accept=6.682525 finish=0.917119 retainedHeap=1705985488 sampledPeakHeap=2001776016 sampledExtraHeap=295790528 verified=1000000
+workers=1 frames=300 round=-1 seconds=6.543650 cpu=6.343750 accept=5.765124 finish=0.778526 retainedHeap=1681681720 sampledPeakHeap=1969211336 sampledExtraHeap=287529616 verified=1000000
+workers=1 frames=300 round=0 seconds=6.847605 cpu=6.390625 accept=5.974420 finish=0.873185 retainedHeap=1681681528 sampledPeakHeap=1969211144 sampledExtraHeap=287529616 verified=1000000
+workers=1 frames=300 round=1 seconds=6.621242 cpu=6.781250 accept=5.812972 finish=0.808270 retainedHeap=1681681528 sampledPeakHeap=1969211144 sampledExtraHeap=287529616 verified=1000000
+workers=1 frames=300 round=2 seconds=7.250732 cpu=6.734375 accept=6.298571 finish=0.952161 retainedHeap=1681681528 sampledPeakHeap=1982638176 sampledExtraHeap=300956648 verified=1000000
+workers=1 frames=300 round=3 seconds=8.412363 cpu=7.593750 accept=7.400034 finish=1.012328 retainedHeap=1681682560 sampledPeakHeap=1982639224 sampledExtraHeap=300956664 verified=1000000
+workers=1 frames=300 round=4 seconds=8.134313 cpu=7.015625 accept=7.162361 finish=0.971952 retainedHeap=1681682656 sampledPeakHeap=1969212272 sampledExtraHeap=287529616 verified=1000000
+
+matrix-before-10-f20.log
+workers=10 frames=20 round=-2 seconds=4.232188 cpu=25.203125 accept=3.031351 finish=1.200837 retainedHeap=1705679440 sampledPeakHeap=2061252912 sampledExtraHeap=355573472 verified=1000000
+workers=10 frames=20 round=-1 seconds=3.849557 cpu=22.656250 accept=2.694000 finish=1.155557 retainedHeap=1681248592 sampledPeakHeap=2029492360 sampledExtraHeap=348243768 verified=1000000
+workers=10 frames=20 round=0 seconds=3.682571 cpu=22.593750 accept=2.659691 finish=1.022880 retainedHeap=1681248936 sampledPeakHeap=2025017016 sampledExtraHeap=343768080 verified=1000000
+workers=10 frames=20 round=1 seconds=3.962273 cpu=23.390625 accept=2.960801 finish=1.001471 retainedHeap=1681248936 sampledPeakHeap=2025017016 sampledExtraHeap=343768080 verified=1000000
+workers=10 frames=20 round=2 seconds=3.649920 cpu=21.765625 accept=2.636900 finish=1.013020 retainedHeap=1681248936 sampledPeakHeap=2025017016 sampledExtraHeap=343768080 verified=1000000
+workers=10 frames=20 round=3 seconds=3.788064 cpu=21.468750 accept=2.768589 finish=1.019475 retainedHeap=1681248936 sampledPeakHeap=2025017016 sampledExtraHeap=343768080 verified=1000000
+workers=10 frames=20 round=4 seconds=3.617294 cpu=21.750000 accept=2.595755 finish=1.021538 retainedHeap=1694675968 sampledPeakHeap=2038444048 sampledExtraHeap=343768080 verified=1000000
+
+matrix-before-10-f300.log
+workers=10 frames=300 round=-2 seconds=2.671425 cpu=13.156250 accept=1.488028 finish=1.183398 retainedHeap=1705985488 sampledPeakHeap=2035922400 sampledExtraHeap=329936912 verified=1000000
+workers=10 frames=300 round=-1 seconds=2.246417 cpu=9.703125 accept=1.327878 finish=0.918538 retainedHeap=1681712272 sampledPeakHeap=2015295000 sampledExtraHeap=333582728 verified=1000000
+workers=10 frames=300 round=0 seconds=2.290927 cpu=11.046875 accept=1.404174 finish=0.886753 retainedHeap=1681712576 sampledPeakHeap=2013190832 sampledExtraHeap=331478256 verified=1000000
+workers=10 frames=300 round=1 seconds=2.117670 cpu=10.718750 accept=1.337833 finish=0.779837 retainedHeap=1681712576 sampledPeakHeap=2005137816 sampledExtraHeap=323425240 verified=1000000
+workers=10 frames=300 round=2 seconds=1.719673 cpu=10.421875 accept=1.002367 finish=0.717306 retainedHeap=1681712576 sampledPeakHeap=2005137816 sampledExtraHeap=323425240 verified=1000000
+workers=10 frames=300 round=3 seconds=1.660899 cpu=9.609375 accept=0.973976 finish=0.686923 retainedHeap=1681712872 sampledPeakHeap=2031992168 sampledExtraHeap=350279296 verified=1000000
+workers=10 frames=300 round=4 seconds=1.618544 cpu=9.796875 accept=0.935601 finish=0.682944 retainedHeap=1681712968 sampledPeakHeap=2005138208 sampledExtraHeap=323425240 verified=1000000
+
+matrix-before-2-f20.log
+workers=2 frames=20 round=-2 seconds=5.819520 cpu=11.015625 accept=4.406808 finish=1.412712 retainedHeap=1705679440 sampledPeakHeap=2035391120 sampledExtraHeap=329711680 verified=1000000
+workers=2 frames=20 round=-1 seconds=5.248326 cpu=9.406250 accept=3.793791 finish=1.454535 retainedHeap=1681241328 sampledPeakHeap=2005861096 sampledExtraHeap=324619768 verified=1000000
+workers=2 frames=20 round=0 seconds=5.544395 cpu=9.796875 accept=3.976389 finish=1.568005 retainedHeap=1681241456 sampledPeakHeap=1999147696 sampledExtraHeap=317906240 verified=1000000
+workers=2 frames=20 round=1 seconds=5.556709 cpu=9.859375 accept=4.136428 finish=1.420281 retainedHeap=1681241456 sampledPeakHeap=1999147696 sampledExtraHeap=317906240 verified=1000000
+workers=2 frames=20 round=2 seconds=5.482101 cpu=9.578125 accept=4.168759 finish=1.313342 retainedHeap=1681241672 sampledPeakHeap=1999147912 sampledExtraHeap=317906240 verified=1000000
+workers=2 frames=20 round=3 seconds=5.296428 cpu=8.984375 accept=3.870256 finish=1.426172 retainedHeap=1681241672 sampledPeakHeap=2008099272 sampledExtraHeap=326857600 verified=1000000
+workers=2 frames=20 round=4 seconds=5.342126 cpu=9.296875 accept=4.088332 finish=1.253794 retainedHeap=1681242464 sampledPeakHeap=2012575736 sampledExtraHeap=331333272 verified=1000000
+
+matrix-before-4-f20.log
+workers=4 frames=20 round=-2 seconds=4.242907 cpu=14.843750 accept=3.088874 finish=1.154033 retainedHeap=1705679440 sampledPeakHeap=2046710768 sampledExtraHeap=341031328 verified=1000000
+workers=4 frames=20 round=-1 seconds=3.805390 cpu=11.921875 accept=2.765371 finish=1.040019 retainedHeap=1681248064 sampledPeakHeap=2008236184 sampledExtraHeap=326988120 verified=1000000
+workers=4 frames=20 round=0 seconds=4.006199 cpu=12.515625 accept=2.811528 finish=1.194671 retainedHeap=1681248520 sampledPeakHeap=2001523112 sampledExtraHeap=320274592 verified=1000000
+workers=4 frames=20 round=1 seconds=4.040404 cpu=12.734375 accept=2.961779 finish=1.078625 retainedHeap=1681248736 sampledPeakHeap=2001523328 sampledExtraHeap=320274592 verified=1000000
+workers=4 frames=20 round=2 seconds=3.906394 cpu=12.093750 accept=2.808297 finish=1.098097 retainedHeap=1681248736 sampledPeakHeap=2001523328 sampledExtraHeap=320274592 verified=1000000
+workers=4 frames=20 round=3 seconds=3.797331 cpu=12.265625 accept=2.799905 finish=0.997426 retainedHeap=1681248736 sampledPeakHeap=2001523328 sampledExtraHeap=320274592 verified=1000000
+workers=4 frames=20 round=4 seconds=3.751988 cpu=12.140625 accept=2.796810 finish=0.955178 retainedHeap=1694675768 sampledPeakHeap=2014950360 sampledExtraHeap=320274592 verified=1000000
+
+matrix-before-8-f20.log
+workers=8 frames=20 round=-2 seconds=4.226091 cpu=22.203125 accept=2.898679 finish=1.327412 retainedHeap=1705679440 sampledPeakHeap=2025728832 sampledExtraHeap=320049392 verified=1000000
+workers=8 frames=20 round=-1 seconds=3.614929 cpu=20.390625 accept=2.590537 finish=1.024392 retainedHeap=1681246816 sampledPeakHeap=2007393536 sampledExtraHeap=326146720 verified=1000000
+workers=8 frames=20 round=0 seconds=3.508034 cpu=19.125000 accept=2.539410 finish=0.968624 retainedHeap=1681247488 sampledPeakHeap=2002918520 sampledExtraHeap=321671032 verified=1000000
+workers=8 frames=20 round=1 seconds=3.882042 cpu=18.281250 accept=2.808454 finish=1.073588 retainedHeap=1681247488 sampledPeakHeap=2002918520 sampledExtraHeap=321671032 verified=1000000
+workers=8 frames=20 round=2 seconds=3.513048 cpu=19.953125 accept=2.505331 finish=1.007717 retainedHeap=1681247488 sampledPeakHeap=2002918520 sampledExtraHeap=321671032 verified=1000000
+workers=8 frames=20 round=3 seconds=3.475078 cpu=18.968750 accept=2.463438 finish=1.011639 retainedHeap=1681247488 sampledPeakHeap=2002918520 sampledExtraHeap=321671032 verified=1000000
+workers=8 frames=20 round=4 seconds=3.547225 cpu=19.125000 accept=2.552525 finish=0.994700 retainedHeap=1681247544 sampledPeakHeap=2016345608 sampledExtraHeap=335098064 verified=1000000
+```
+
+</details>
+
+The extended stress run uses the identical harness with the measured loop bound changed from 5 to 50. All 50 measured rounds passed; complete logs, failed-run diagnostics, the instrumented probe, compiler/runtime metadata, and SHA-256 checksums remain local under ignored `docs/benchmarks/thread-scaling-2026-10-23/`. The production code contains no diagnostic owner guard.
+
 ## Current code guide and merge review
 
 Start with [the code walkthrough](docs/UNCOMMITTED_COMMIT_PLAN.md#start-here-how-the-current-code-works-23-october-2026). It follows a query through SQL metadata, safety checks, bucket retrieval, aggregation, AVG reconstruction, and output. It explains paged group state, partition ownership, cancellation, and memory limits.

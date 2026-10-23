@@ -1,5 +1,39 @@
 # Cascada: code guide and preserved implementation record
 
+## Follow-up: scaling one query across threads
+
+The follow-up addresses the intended definition of scalability: compare the same one query at 1, 2, 4, 8, and 10 workers. Comparing two implementations at four workers alone did not answer that question.
+
+The previous revision is `c1392bf`; the new implementation is `74b8acf`. Read `partitionInParallel` and `accumulateRow` in `TypedAggregationGroups`; `mergeSortedPartitions`, `coRank`, `mergeRange`, and `emitFrame` in `TypedFrameAccumulator`; and `ParallelFrameBuilder` with the fixed-range support in `ResultFrameBuilder`.
+
+```mermaid
+flowchart LR
+  Input[Immutable input frame] --> Hash[Parallel hash and counts]
+  Hash --> Prefix[Small prefix-offset step]
+  Prefix --> Scatter[Parallel stable scatter]
+  Scatter --> Owners[Group owners: all measures per row]
+  Owners --> Sort[Parallel local sorting]
+  Sort --> Merge[Parallel co-ranked sorted merge]
+  Merge --> Output[Disjoint writers: one output allocation]
+  Output --> Seal[Validate and seal immutable result]
+```
+
+Large-frame routing returns a future. Partition tasks depend on that future and their own previous frame. Routing workers do not block waiting for queued child tasks. The single-producer contract and two-frame backpressure still apply; callers should not occupy every thread of a bounded executor with blocking producers or finishers.
+
+`CASCADA_MERGE_WORKERS=10` configures the engine's partitions per query. Standalone callers must use `new FrameMergeService(300, "ts", 10, executor)` with a suitably provisioned executor. The two-argument convenience constructor and `TypedFrameAggregator.aggregate` remain single-worker paths. Changing an unrelated executor's thread count does not change their partition count.
+
+Global aggregation without dimensions still uses one owner to preserve floating-point update order. A dominant hot group is also not split across workers. These scaling measurements use one million groups, so they do not establish scaling for every query shape. This host has eight physical cores and sixteen logical processors; ten workers do not mean ten independent physical cores.
+
+Stable sorted merging uses the co-ranking decomposition described by [Siebert and Traff](https://arxiv.org/abs/1303.4312). Group ownership follows the partitioning principle explained in [DuckDB's parallel aggregation](https://duckdb.org/2022/03/07/aggregate-hashtable), while retaining each group's original update order.
+
+The clean Java 21.0.12.1 reactor passed: **693 registered tests, 665 executed, 28 skipped, zero failures/errors**, using Maven's module summaries. Tests include ten-worker typed grouping, exact update order across routing chunks, decimal/null AVG output, validity-word ownership, immutable publication, and large-frame acceptance on a one-thread executor.
+
+Initial G1 runs produced native GC-thread crashes during input generation. Oracle Java 21.0.6 also produced an extra-group oracle failure with the previous implementation. The cause is unresolved. The controlled matrix therefore uses the same Temurin Java 21.0.12.1 build, fixed 5 GiB heap, and Parallel GC on both revisions. This is a benchmark configuration, not a production GC change or proof that earlier failures are resolved. The README contains the results and complete harness.
+
+The completed 20-frame matrix gives updated medians of 7.148, 3.996, 2.257, 1.863, and 1.938 seconds at 1, 2, 4, 8, and 10 workers. Ten workers therefore improve this one query by 3.69x over its updated single-worker path. Eight workers were fastest on this host.
+
+The primary 300-frame ten-worker run later failed with a string dictionary index of 67108864 in a one-entry dictionary. A normal repeat, an instrumented repeat, and a further 50 measured stress rounds passed. The instrumentation detected no overlapping partition owner or stored-hash mismatch; a separate read-only memory probe also passed. The failure remains unexplained and is not reported as fixed. The 300-frame path remains experimental, and the failed primary cell is excluded from successful timing comparisons rather than replaced with a faster repeat.
+
 ## Start here: how the current code works (23 October 2026)
 
 This section explains the code at the reviewed branch, rather than treating a list of commits as its architecture. Everything below the historical-record separator remains the original planning/review evidence, including the local edits present when this task began. Old findings and timings describe their named snapshots. They are not fresh test claims for the implementation described here.
@@ -53,22 +87,22 @@ The group ID addresses paged, row-major state. Each group has contiguous primiti
 
 Time dimensions are floored to the configured bucket start, including negative epochs. Grouping normalizes floating-point NaNs and signed zero and uses scale-insensitive decimal equality. These rules are correctness requirements, not optional speed shortcuts.
 
-Measure loops resolve type and combine operation outside the per-row loop. SUM/COUNT combine additively; MIN/MAX compare with the relevant Spark-compatible rules. Strings used by aggregate MIN/MAX use dictionary IDs in group state. This does not mean all string grouping keys are dictionary-encoded or that arbitrary decimal values become primitive doubles.
+Schema arrays resolve measure columns, types, and combine operations once. The current loop switches over all measures while each probed group's state is hot. SUM/COUNT combine additively; MIN/MAX use Spark-compatible comparisons. Aggregate MIN/MAX strings use dictionary IDs in group state. String grouping keys are not all dictionary-encoded, and decimals do not become primitive doubles.
 
 ### Parallel routing and buffer ownership after this review
 
 The original redesign let every partition hash and scan every input row, then skip rows owned elsewhere. With P partitions that repeated dimension hashing and ownership scanning P times. The review changes that path:
 
-1. The single producer hashes each frame once. Hashes select each row's sole partition.
-2. Counts become prefix offsets into one flat row-index array. Filling it in input order gives a stable contiguous range for each partition.
-3. Each partition's future follows its previous future. That partition alone probes and mutates its group table; it only scans its own row range for each measure.
+1. Each frame is hashed once. Frames with at least 262,144 rows use asynchronous hash/count chunks; smaller frames use the producer path to avoid task overhead.
+2. Counts become prefix offsets into a flat row-index array. Per-chunk offsets reserve disjoint slices in original chunk order, preserving each partition's row order during parallel scatter.
+3. Each partition waits for routing and its previous frame. It alone probes and mutates its table, updating all measures during the same owned-row visit.
 4. The producer keeps at most **two input frames and two routing buffers in flight**. Before reusing a buffer it joins the completion covering every partition consumer of that buffer. A fast partition alone cannot release memory still in use by a slow partition.
-5. Hash and row-index buffers grow to the largest frame they have handled and are reused. Group-index scratch is owned and reused by each partition. Prefix offsets tell consumers the valid range, so a smaller later frame cannot process stale entries from a larger frame.
+5. Hash and row-index buffers grow to the largest frame they have handled and are reused. Fused updates no longer need a frame-sized group-index scratch array. Prefix offsets define valid ranges, so smaller frames cannot process stale entries.
 6. Query scope is propagated into partition and sorting tasks. Coarse cancellation checks in hashing, probing, and measure loops stop unwanted work without a check at every cell.
 
-For maximum frame length N, two routing buffers contain roughly `2 * (8N + 4N) = 24N` bytes of primitive payload, plus small offset arrays. Partition group-ID scratch adds four bytes per retained local-row capacity. Under balanced frames its total is about 4N; changing skew can increase the sum of retained local maxima. These are scratch estimates, not a total heap cap. Schema width, distinct groups, strings/decimals, sorting, and output still contribute memory.
+For maximum frame length N, two routing buffers contain roughly `2 * (8N + 4N) = 24N` bytes of primitive payload, plus small offset arrays. The fused path has no partition group-ID scratch. Large sorted finishing uses two eight-byte-per-group index arrays plus local sorted IDs. These are scratch estimates, not a total heap cap. Schema width, distinct groups, strings/decimals, sorting, and output still contribute memory.
 
-The two-frame pipeline overlaps producer routing with partition aggregation. It also bounds decoded input retention. More workers are not automatically faster: the producer's hash/routing pass, memory bandwidth, partition skew, sorting, and final output construction remain relevant.
+The two-frame pipeline overlaps routing with aggregation and bounds decoded input retention. Memory bandwidth, partition skew, task granularity, and physical core count still limit speedup. Small frames route synchronously; large routing and finishing use the configured executor.
 
 ### Finishing AVG and ordered output
 
@@ -76,7 +110,7 @@ A cached `AVG(x) AS a` carries reserved SUM/COUNT/type ingredients. Across bucke
 
 `finishWithAverages` can emit an AVG directly from group state, replacing the ingredient columns with the public alias. It avoids allocating a full intermediate ingredient frame solely to reconstruct AVG. When that fast path does not apply, the established `SparkAverage.finish` path remains available. Spark's input-type metadata controls output type and decimal rounding; zero counts and nulls need explicit handling.
 
-Each partition sorts its own group IDs. A final ordered merge combines those sorted partitions before constructing output. This does not make all work parallel: output assembly and the partition-head selection loop are still serial. `FrameMergeService` then reconstructs typed composite expressions and applies deferred ordering, limit, and output projection.
+Each partition sorts its group IDs. For at least 65,536 groups, a balanced merge tree combines those runs; co-ranking splits even the final pair into independent output ranges. Large output construction uses one fixed-size allocation with 64-row-aligned writers. This gives every null bitmap word one owner. The builder checks completeness and seals writers before publishing the immutable frame. Smaller outputs retain simpler finishing. `FrameMergeService` then reconstructs composite expressions and applies deferred ordering, limit, and projection.
 
 ### Configuration and the remaining scalability limits
 

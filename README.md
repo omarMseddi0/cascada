@@ -2,6 +2,341 @@
 
 A lakehouse query engine with a smart bucket cache
 
+## Compact merge research and verification: 23 October 2026
+
+The current implementation is `33e9c4b`, following the research below. The comparison uses local `main` at `8c60a35` (the complete pre-redesign source tree), previous review `b9f5d6d`, and the current implementation. Remote `origin/main` has a different model-refactor history and is not the performance baseline. Earlier experiments below remain historical records tied to their stated revisions.
+
+### Decisions from primary sources
+
+| Research | Application to Cascada |
+|---|---|
+| [DuckDB constant vectors](https://duckdb.org/docs/preview/internals/vector) store repeated data once. | STRING aggregate state now keeps one shared winner and allocates exception pages only where a group differs. AVG type metadata needs no per-group string slot when uniform. This is a Cascada adaptation, not a claim that DuckDB uses this exact aggregate representation. |
+| [DataFusion grouped aggregation](https://arrow.apache.org/blog/2023/08/05/datafusion_fast_grouping/) explains typed state and allocation costs. | Keep primitive paged state, start its first page at 16 groups, cap later pages at 1,024 groups, and avoid doubling the whole payload. No object is allocated per group. |
+| [Swiss-table metadata](https://abseil.io/about/design/swisstables) and [F14's layout tradeoffs](https://engineering.fb.com/2019/04/25/developer-tools/f14/) distinguish probes from payload access. | Keep hash-tag filtering and test a denser tag index. An 80% growth threshold reduced index capacity in relevant cases without losing correctness. This remains scalar Java probing, not a SIMD Swiss-table implementation. |
+| [Global Hash Tables Strike Back](https://arxiv.org/abs/2505.04153) studies purpose-built concurrent aggregation. | Considered as an alternative, not transplanted: concurrent updates or local reductions would change the existing floating-point update-order contract. Cascada already keeps one state owner per group rather than duplicating it across worker-local maps. |
+| [DuckDB external aggregation](https://duckdb.org/2024/03/29/external-aggregation) and [memory management](https://duckdb.org/2024/07/09/memory-management) address larger-than-memory state. | Streaming and smaller state help, but disk spill and global query-memory admission remain separate architectural work. They are not implemented by this change. |
+| [LMAX Disruptor's wait strategies](https://lmax-exchange.github.io/disruptor/user-guide/) trade wake-up latency against CPU use. | No busy-spin event loop was added. CPU workers park when idle; two reusable frame buffers overlap retrieval and aggregation and apply backpressure. Zero buffering would remove that overlap. |
+
+The other compaction is specific to this table: resizing needs only the low 32 hash bits because hash tags remain in the slot index. When the last validity word has a spare upper half, those bits share that word. Wider schemas retain a separate hash word. Tests cross the 32-, 64-, and 96-flag boundaries and force table growth.
+
+STRING MIN/MAX now retains winners and one shared baseline value, rather than a dictionary of every distinct input string. Its state scales with groups and sparse pages, rather than with distinct losing candidates. SQL NULL remains represented by the existing group-presence flag; equal strings and Spark code-point ordering retain their semantics.
+
+### Configurable multicore execution
+
+Set `CASCADA_MERGE_WORKERS` to the requested partition/worker budget. The application owns a shared, prestarted CPU pool with `min(requested workers, JVM available processors)` threads, separate from virtual retrieval tasks. On a host exposing 100 processors, setting 100 permits 100 CPU workers; this host exposes only 16 logical processors. The default setting remains unchanged.
+
+Large routing, independent group owners, local sorts, co-ranked sorted merging, and output writers use the executor. Small-frame routing and the single-partition fast path can execute in the producer. The pool bounds worker threads, not all process CPU or total query memory. Global aggregates without dimensions and one dominant group retain one update owner. This is multicore merging within one JVM; it does not add a distributed shuffle across machines.
+
+Correctness tests exercise 100 partitions on an eight-thread test executor, high-worker routing, separate retrieval/CPU execution, validity-word ownership, and owned-executor shutdown. They establish correctness and wiring, not 100-core throughput.
+
+### Verification and measurement scope
+
+The clean eight-module Java 21 reactor passed: **708 registered tests, 680 executed, 28 skipped, zero failures/errors**. The opt-in external integration tests remain skipped.
+
+All performance comparisons below use the same Temurin Java 21.0.12.1 build, `-Xms5g -Xmx5g -XX:+UseParallelGC`, one query per JVM, two warmups, and three measured rounds. Every query merges 20 million rows across 300 frames with exactly 12 input columns: three grouping columns and three distinct weighted AVG ingredient triplets. A global Fisher-Yates shuffle of all row ordinals (seed 777) occurs before framing. Counts vary, NULL sums and all-zero-count groups are included, and every output key and all three averages are checked against an independent oracle.
+
+Generation, validation, and explicit GC are outside the merge timer. This is the production incremental `FrameMergeService` path, including finishing and output projection; it excludes cache retrieval/decoding, Spark, transport, and API serialization. The main branch is single-worker; its one-worker result is shown separately from the updated one-worker result so parallelism is not confused with layout improvements.
+
+Retained heap is measured after full GC with both the merger and final output explicitly held live, subtracting the pre-merge heap while inputs are held. Allocated bytes count the caller plus prestarted worker threads. These are not process RSS or end-to-end memory. Sampled heap can include unused TLAB reservations and uncollected garbage, especially with many threads, so it is retained as diagnostic evidence rather than called live state size. All values below are medians of three measurements, not latency percentiles or universal guarantees.
+
+### Measured speed, CPU work, and live state
+
+Host: Ryzen 7 5700G, eight physical cores / sixteen logical processors. Main uses its existing one-worker implementation; current uses ten workers in this comparison.
+
+| Input keys / groups | Main wall seconds | Current wall seconds | Wall speedup | Main retained MiB | Current retained MiB |
+|---|---:|---:|---:|---:|---:|
+| LONG / 1 million | 16.932 | 0.932 | 18.2x | 154.14 | 132.89 |
+| STRING / 1 million | 20.642 | 1.588 | 13.0x | 146.32 | 125.33 |
+| LONG / 5 million | 22.867 | 1.866 | 12.3x | 1,062.67 | 692.67 |
+
+For LONG / one million groups, current **one-worker** time is 7.239 seconds versus main's 16.932 seconds (2.34x). Current ten-worker CPU work is 9.344 CPU-seconds versus main's 16.859, about 45% lower; allocated bytes fall from 449.66 to 238.37 MiB. More cores are active simultaneously, even though total CPU work falls. Against the previous review's ten-worker result (1.132 seconds, 188.66 MiB retained), current is about 18% lower in elapsed time and 30% lower in retained heap.
+
+| Current workers | Wall seconds | Speedup over current one worker | CPU seconds | Retained MiB |
+|---:|---:|---:|---:|---:|
+| 1 | 7.239 | 1.00x | 7.188 | 139.00 |
+| 2 | 3.799 | 1.91x | 7.891 | 138.57 |
+| 4 | 2.082 | 3.48x | 8.438 | 138.57 |
+| 8 | 1.153 | 6.28x | 9.188 | 138.81 |
+| 10 | 0.932 | 7.77x | 9.344 | 132.89 |
+
+A separate STRING-winner query uses two million rows, 1,000 groups, 300 frames, and distinct candidate labels. Previous review retained about 120 MiB at ten workers; current retained about 0.074 MiB, because losing labels no longer accumulate in a dictionary. Current ten-worker time is 0.045 seconds versus previous review's 0.130. Main already used compact state here: about 0.055 MiB and 0.096 seconds at one worker. Current one-worker time is 0.113 seconds. This small-query tradeoff rules out claiming universally lower memory or faster one-worker execution.
+
+### Reproduce the compact-state comparisons
+
+The exact harnesses and raw JSON are retained locally under `docs/benchmarks/compact-state-2026-10-23/` (ignored benchmark evidence). The complete harness sources are embedded below so the published README remains self-contained. `FINAL_SUMMARY.json` records case medians and revisions locally; all primary cells have three verified measured rounds. Build separate checkouts of `8c60a35`, `b9f5d6d`, and `33e9c4b` with the same Java 21 toolchain and `mvn -B -Pvalidation -pl lib_cache -am -DskipTests compile`. Save both Java sources into an evidence directory, compile them against each revision's cache and identity classes, and run each cell sequentially in a fresh JVM. No simultaneous builds or benchmarks were running.
+
+```powershell
+$classes = "lib_cache/target/validation/target/classes;lib_identity/target/validation/target/classes"
+javac -cp $classes -d evidence CompactMergeBenchmark.java StringWinnerBenchmark.java
+# rows, groups, frames, key type, workers, warmups, measured rounds, JSON path:
+java -Xms5g -Xmx5g -XX:+UseParallelGC -cp "evidence;$classes" com.cascada.cache.benchmark.CompactMergeBenchmark 20000000 1000000 300 LONG 10 2 3 result.json
+# Repeat current with workers 1,2,4,8,10; main with 1; previous review with 10.
+# Additional shapes: STRING/1000000 and LONG/5000000, same row/frame counts.
+java -Xms5g -Xmx5g -XX:+UseParallelGC -cp "evidence;$classes" com.cascada.cache.benchmark.StringWinnerBenchmark 2000000 1000 10 winners.json
+```
+
+<details><summary>CompactMergeBenchmark.java</summary>
+
+```java
+package com.cascada.cache.benchmark;
+
+import com.cascada.cache.application.service.FrameMergeService;
+import com.cascada.cache.domain.frame.*;
+import com.cascada.cache.domain.merge.*;
+import com.cascada.cache.domain.model.hashing.HashComponents;
+import com.cascada.cache.domain.model.query.*;
+import com.cascada.cache.domain.model.time.TimeRange;
+import java.lang.management.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
+
+/** Local reproducible harness: real incremental merge and typed AVG; no Spark/network in timer. */
+public final class CompactMergeBenchmark {
+    static final String ALIAS = "avg_value";
+    static final com.sun.management.ThreadMXBean THREAD = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+    static final com.sun.management.OperatingSystemMXBean OS = (com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
+    static final MemoryMXBean MEMORY = ManagementFactory.getMemoryMXBean();
+    record Dataset(List<ResultFrame> frames, CanonicalQueryObject query, int id) {}
+    record Answer(ResultFrame frame, Object owner, int id) {}
+    static FrameMergeService service;
+    static volatile Object retainedAnswer;
+    static long[] allocationThreads;
+    static long allocated() { long sum=0;for(long n:THREAD.getThreadAllocatedBytes(allocationThreads))sum+=Math.max(0,n);return sum; }
+    static long used() { return MEMORY.getHeapMemoryUsage().getUsed(); }
+    static void fullGc() throws Exception { System.gc();Thread.sleep(30);System.gc();Thread.sleep(30); }
+    static String json(Object v) {
+        if (v == null) return "null";
+        if (v instanceof Number || v instanceof Boolean) return v.toString();
+        if (v instanceof Map<?,?> m) return "{" + String.join(",", m.entrySet().stream().map(e -> json(e.getKey().toString()) + ":" + json(e.getValue())).toList()) + "}";
+        if (v instanceof Collection<?> c) return "[" + String.join(",", c.stream().map(CompactMergeBenchmark::json).toList()) + "]";
+        return "\"" + v.toString().replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\"";
+    }
+    static long gcCount() { return ManagementFactory.getGarbageCollectorMXBeans().stream().mapToLong(x -> Math.max(0,x.getCollectionCount())).sum(); }
+    static long gcTime() { return ManagementFactory.getGarbageCollectorMXBeans().stream().mapToLong(x -> Math.max(0,x.getCollectionTime())).sum(); }
+    static double base(int group, int query) { return (group % 1000) * 0.125 + query * 3.5; }
+    static boolean empty(int group, int occurrence) { return group % 9973 == 0 || group % 97 == 0 && occurrence % 3 == 0; }
+    static Dataset generate(int rows, int groups, int buckets, boolean strings, int id) {
+        String[] keys = strings ? new String[groups] : null;
+        if(strings)for(int g=0;g<groups;g++)keys[g]="q"+id+"-g"+g;
+        int[] permutation=new int[rows];for(int row=0;row<rows;row++)permutation[row]=row;
+        Random random=new Random(777L);
+        for(int row=rows-1;row>0;row--){int at=random.nextInt(row+1),temp=permutation[row];permutation[row]=permutation[at];permutation[at]=temp;}
+        List<ResultFrame> frames=new ArrayList<>(buckets);int index=0;
+        for(int bucket=0;bucket<buckets;bucket++) {
+            int size=rows/buckets+(bucket<rows%buckets?1:0);
+            var b=ResultFrame.builder().expectedRows(size).column("group_id",strings?ColumnType.STRING:ColumnType.LONG)
+                    .column("region_id",ColumnType.LONG).column("device_id",ColumnType.LONG);
+            for(int metric=0;metric<3;metric++) {
+                String alias="avg_value_"+metric;
+                b.column(AverageIngredients.sumColumn(alias),ColumnType.DOUBLE)
+                 .column(AverageIngredients.countColumn(alias),ColumnType.LONG)
+                 .column(AverageIngredients.typeColumn(alias),ColumnType.STRING);
+            }
+            for(int j=0;j<size;j++,index++) {
+                int ordinal=permutation[index],g=ordinal%groups,occurrence=ordinal/groups;
+                if(strings)b.appendString(keys[g]);else b.appendLong(g+(long)id*groups);
+                b.appendLong(g%101).appendLong(g%17);
+                for(int metric=0;metric<3;metric++) {
+                    long count=empty(g+metric*11,occurrence+metric)?0:(occurrence+metric)%5+1;
+                    if(count==0)b.appendNull();else b.appendDouble((base(g,id)+metric*11.25+occurrence*(metric+1))*count);
+                    b.appendLong(count).appendString("double");
+                }
+            }
+            var frame=b.build();if(frame.columnNames().size()!=12)throw new AssertionError("input must have exactly 12 columns");frames.add(frame);
+        }
+        if(index!=rows)throw new AssertionError("incorrect input row count");
+        var measures=new LinkedHashMap<String,AggregateFunction>();var specs=new ArrayList<String>();var output=new ArrayList<String>(List.of("group_id","region_id","device_id"));
+        for(int metric=0;metric<3;metric++){String alias="avg_value_"+metric;measures.put(alias,AggregateFunction.AVERAGE);specs.add("AVG(value_"+metric+") AS "+alias);output.add(alias);}
+        var metadata=QueryMetadata.globalAggregate().withAggregateSpecs(specs).withMeasureAggregates(measures);
+        var query=new CanonicalQueryObject(HashComponents.of(List.of("group_id","region_id","device_id"),specs,List.of()),
+                new TimeRange(0,buckets*7200L-1),PostProcessing.none(),metadata,
+                "SELECT group_id,region_id,device_id,AVG(value_0),AVG(value_1),AVG(value_2) FROM benchmark GROUP BY group_id,region_id,device_id",List.of("benchmark"),List.of(),List.of(),output);
+        return new Dataset(List.copyOf(frames),query,id);
+    }
+    static Map<String,Object> verify(Answer a,int rows,int groups,boolean strings) {
+        var frame=a.frame();var expectedColumns=List.of("group_id","region_id","device_id","avg_value_0","avg_value_1","avg_value_2");
+        if(frame.rowCount()!=groups||!frame.columnNames().equals(expectedColumns))throw new AssertionError("wrong shape "+frame.columnNames());
+        int key=frame.columnIndex("group_id"),region=frame.columnIndex("region_id"),device=frame.columnIndex("device_id"),nulls=0;
+        int[] averages=new int[3];for(int m=0;m<3;m++){averages[m]=frame.columnIndex("avg_value_"+m);if(frame.columnType("avg_value_"+m)!=ColumnType.DOUBLE)throw new AssertionError("wrong AVG type");}
+        BitSet seen=new BitSet(groups);double checksum=0,maxError=0;
+        for(int r=0;r<groups;r++) {
+            int g;
+            if(strings){String v=frame.stringAt(r,key);if(!v.startsWith("q"+a.id()+"-g"))throw new AssertionError("mixed query");g=Integer.parseInt(v.substring(v.indexOf("-g")+2));}
+            else g=Math.toIntExact(frame.longAt(r,key)-(long)a.id()*groups);
+            if(g<0||g>=groups||seen.get(g))throw new AssertionError("duplicate/missing key");seen.set(g);
+            if(frame.longAt(r,region)!=g%101||frame.longAt(r,device)!=g%17)throw new AssertionError("corrupt composite key");
+            for(int metric=0;metric<3;metric++) {
+                long count=0,weighted=0;int occurrences=(rows-1-g)/groups+1;
+                for(int occurrence=0;occurrence<occurrences;occurrence++)if(!empty(g+metric*11,occurrence+metric)){long n=(occurrence+metric)%5+1;count+=n;weighted+=n*occurrence;}
+                int avg=averages[metric];
+                if(count==0){if(!frame.isNullAt(r,avg))throw new AssertionError("all-null AVG");nulls++;}
+                else {
+                    if(frame.isNullAt(r,avg))throw new AssertionError("missing AVG");
+                    double expected=base(g,a.id())+metric*11.25+(metric+1)*(double)weighted/count,actual=frame.doubleAt(r,avg),error=Math.abs(expected-actual);
+                    if(error>1e-10*Math.max(1,Math.abs(expected)))throw new AssertionError("wrong weighted AVG group="+g+" metric="+metric+" actual="+actual+" expected="+expected);
+                    checksum+=actual;maxError=Math.max(maxError,error);
+                }
+            }
+        }
+        if(seen.cardinality()!=groups)throw new AssertionError("missing groups");
+        return Map.of("checkedGroups",groups,"checkedAverages",(long)groups*3,"nullAverages",nulls,"maxAbsoluteError",maxError,"checksum",checksum);
+    }
+
+    static Map<String,Object> trial(Dataset dataset, int trial, int rows, int groups, boolean strings) throws Exception {
+        retainedAnswer=null;fullGc();
+        long retained=used();AtomicLong peak=new AtomicLong(retained);
+        var sampling=new java.util.concurrent.atomic.AtomicBoolean(true);
+        Thread sampler=Thread.ofPlatform().daemon().start(()->{
+            while(sampling.get()){peak.accumulateAndGet(used(),Math::max);try{Thread.sleep(5);}catch(InterruptedException e){return;}}
+        });
+        long allocated0=allocated(),cpu0=OS.getProcessCpuTime(),begin=System.nanoTime();
+        var merge=service.incremental(dataset.query());
+        for(ResultFrame frame:dataset.frames())merge.add(frame);
+        long accepted=System.nanoTime();ResultFrame result=merge.finish();long ended=System.nanoTime();
+        long cpu=OS.getProcessCpuTime()-cpu0,allocation=allocated()-allocated0;
+        peak.accumulateAndGet(used(),Math::max);sampling.set(false);sampler.join();
+        Answer answer=new Answer(result,merge,dataset.id());
+        Map<String,Object> correctness=verify(answer,rows,groups,strings);
+        retainedAnswer=answer;fullGc();long live=used()-retained;
+        var metrics=new LinkedHashMap<String,Object>();
+        metrics.put("trial",trial);metrics.put("warmup",trial<0);
+        metrics.put("seconds",(ended-begin)/1e9);metrics.put("acceptSeconds",(accepted-begin)/1e9);
+        metrics.put("finishSeconds",(ended-accepted)/1e9);metrics.put("cpuSeconds",cpu/1e9);
+        metrics.put("engineAllocatedBytes",allocation);metrics.put("sampledExtraHeapBytes",peak.get()-retained);
+        metrics.put("liveMergeAndOutputHeapBytes",live);metrics.put("correctness",correctness);
+        retainedAnswer=null;
+        return metrics;
+    }
+
+    public static void main(String[] args) throws Exception {
+        int rows=Integer.parseInt(args[0]),groups=Integer.parseInt(args[1]),frames=Integer.parseInt(args[2]);
+        boolean strings=args[3].equals("STRING");int workers=Integer.parseInt(args[4]);
+        int warmups=Integer.parseInt(args[5]),rounds=Integer.parseInt(args[6]);Path output=Path.of(args[7]);
+        THREAD.setThreadAllocatedMemoryEnabled(true);
+        var ids=new ArrayList<Long>();ids.add(Thread.currentThread().threadId());
+        ThreadFactory factory=r->{Thread t=Thread.ofPlatform().name("merge-worker-"+ids.size()).unstarted(r);ids.add(t.threadId());return t;};
+        var executor=new ThreadPoolExecutor(workers,workers,0,TimeUnit.SECONDS,new LinkedBlockingQueue<>(),factory);
+        executor.prestartAllCoreThreads();allocationThreads=ids.stream().mapToLong(Long::longValue).toArray();
+        try {
+            try {service=FrameMergeService.class.getConstructor(int.class,String.class,int.class,Executor.class)
+                    .newInstance(300,"ts",workers,executor);}
+            catch(NoSuchMethodException olderMain){if(workers!=1)throw new IllegalArgumentException("main supports one worker");service=new FrameMergeService(300,"ts");}
+            Dataset dataset=generate(rows,groups,frames,strings,0);
+            var results=new ArrayList<Map<String,Object>>();
+            for(int round=-warmups;round<rounds;round++) {
+                Map<String,Object> metrics=trial(dataset,round,rows,groups,strings);results.add(metrics);
+                System.out.println(json(metrics));
+                var report=new LinkedHashMap<String,Object>();
+                report.put("rows",rows);report.put("groups",groups);report.put("frames",frames);
+                report.put("keyType",args[3]);report.put("workers",workers);report.put("shuffle","global Fisher-Yates of all input row ordinals before framing, seed 777");
+                report.put("javaVersion",System.getProperty("java.version"));report.put("rounds",results);
+                Files.writeString(output,json(report)+"\n");
+            }
+        } finally {executor.shutdownNow();}
+    }
+}
+
+```
+
+</details>
+
+<details><summary>StringWinnerBenchmark.java</summary>
+
+```java
+package com.cascada.cache.benchmark;
+
+import com.cascada.cache.application.service.merge.TypedFrameAccumulator;
+import com.cascada.cache.domain.frame.*;
+import com.cascada.cache.domain.merge.AggregateFunction;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+/** Measures retention of distinct losing STRING MIN candidates, with an independent exact oracle. */
+public class StringWinnerBenchmark {
+    static List<ResultFrame> inputs;
+    static ExecutorService executor;
+    static int rows, groups, workers;
+    static java.lang.reflect.Constructor<?> constructor;
+    static boolean parallel;
+
+    static Map<String,Object> run(int trial) throws Exception {
+        CompactMergeBenchmark.retainedAnswer=null;CompactMergeBenchmark.fullGc();
+        long retained=CompactMergeBenchmark.used();AtomicLong peak=new AtomicLong(retained);
+        AtomicBoolean sampling=new AtomicBoolean(true);
+        Thread sampler=Thread.ofPlatform().daemon().start(()->{
+            while(sampling.get()){peak.accumulateAndGet(CompactMergeBenchmark.used(),Math::max);try{Thread.sleep(5);}catch(InterruptedException e){return;}}
+        });
+        long alloc0=CompactMergeBenchmark.allocated(),cpu0=CompactMergeBenchmark.OS.getProcessCpuTime(),start=System.nanoTime();
+        Map<String,AggregateFunction> functions=Map.of("MIN(label)",AggregateFunction.MINIMUM);
+        Object[] args=parallel?new Object[]{inputs.get(0),List.of("key"),functions,"ts",300,workers,executor}
+                :new Object[]{inputs.get(0),List.of("key"),functions,"ts",300};
+        TypedFrameAccumulator merge=(TypedFrameAccumulator)constructor.newInstance(args);
+        for(ResultFrame input:inputs)merge.accept(input);
+        ResultFrame result=merge.finish();long end=System.nanoTime();
+        long allocated=CompactMergeBenchmark.allocated()-alloc0,cpu=CompactMergeBenchmark.OS.getProcessCpuTime()-cpu0;
+        peak.accumulateAndGet(CompactMergeBenchmark.used(),Math::max);sampling.set(false);sampler.join();
+        if(result.rowCount()!=groups)throw new AssertionError("group count");
+        for(int key=0;key<groups;key++){
+            int last=key+(rows-1-key)/groups*groups;
+            while(last>=0&&last%97==0)last-=groups;
+            String expected=last<0?null:"v"+(1_000_000_000L+rows-last);
+            if(result.longAt(key,0)!=key||!Objects.equals(result.valueAt(key,1),expected)
+                    ||result.longAt(key,2)!=(rows-1-key)/groups+1L)throw new AssertionError("key "+key);
+        }
+        CompactMergeBenchmark.retainedAnswer=new Object[]{merge,result};CompactMergeBenchmark.fullGc();
+        long live=CompactMergeBenchmark.used()-retained;CompactMergeBenchmark.retainedAnswer=null;
+        return Map.of("trial",trial,"warmup",trial<0,"seconds",(end-start)/1e9,"cpuSeconds",cpu/1e9,
+                "allocatedBytes",allocated,"liveMergeAndOutputHeapBytes",live,"sampledExtraHeapBytes",peak.get()-retained,"verifiedGroups",groups);
+    }
+
+    public static void main(String[] args)throws Exception{
+        rows=Integer.parseInt(args[0]);groups=Integer.parseInt(args[1]);workers=Integer.parseInt(args[2]);Path output=Path.of(args[3]);
+        int[] order=new int[rows];for(int r=0;r<rows;r++)order[r]=r;
+        Random random=new Random(481);
+        for(int r=rows-1;r>0;r--){int j=random.nextInt(r+1),v=order[r];order[r]=order[j];order[j]=v;}
+        inputs=new ArrayList<>();int at=0;
+        for(int bucket=0;bucket<300;bucket++){
+            int size=rows/300+(bucket<rows%300?1:0);
+            ResultFrameBuilder b=ResultFrame.builder().expectedRows(size).column("key",ColumnType.LONG)
+                    .column("MIN(label)",ColumnType.STRING).column("SUM(q)",ColumnType.LONG);
+            for(int row=0;row<size;row++,at++){
+                int ordinal=order[at];b.appendLong(ordinal%groups)
+                        .appendString(ordinal%97==0?null:"v"+(1_000_000_000L+rows-ordinal)).appendLong(1);
+            }
+            inputs.add(b.build());
+        }
+        order=null;
+        CompactMergeBenchmark.THREAD.setThreadAllocatedMemoryEnabled(true);
+        ArrayList<Long> ids=new ArrayList<>();ids.add(Thread.currentThread().threadId());
+        ThreadFactory factory=r->{Thread t=Thread.ofPlatform().unstarted(r);ids.add(t.threadId());return t;};
+        var pool=new ThreadPoolExecutor(workers,workers,0,TimeUnit.SECONDS,new LinkedBlockingQueue<>(),factory);
+        pool.prestartAllCoreThreads();executor=pool;CompactMergeBenchmark.allocationThreads=ids.stream().mapToLong(Long::longValue).toArray();
+        try{
+            try{constructor=TypedFrameAccumulator.class.getConstructor(ResultFrame.class,List.class,Map.class,String.class,int.class,int.class,java.util.concurrent.Executor.class);parallel=true;}
+            catch(NoSuchMethodException old){if(workers!=1)throw old;constructor=TypedFrameAccumulator.class.getConstructor(ResultFrame.class,List.class,Map.class,String.class,int.class);}
+            List<Map<String,Object>> results=new ArrayList<>();
+            for(int trial=-2;trial<3;trial++){
+                Map<String,Object> value=run(trial);results.add(value);System.out.println(CompactMergeBenchmark.json(value));
+                Files.writeString(output,CompactMergeBenchmark.json(Map.of("rows",rows,"groups",groups,"workers",workers,"rounds",results))+"\n");
+            }
+        }finally{pool.shutdownNow();}
+    }
+}
+
+```
+
+</details>
+
+### Stress and remaining limits
+
+The current implementation passed a further 50 measured weighted-AVG rounds: one billion input-row visits, 50 million groups, and 150 million checked AVG outputs. Separate fixed-heap G1 runs with 300 and 20 frames also passed all measured checks. The previous dictionary-ID representation was removed; this does not establish the root cause of the earlier out-of-range ID or native GC crashes. Their records remain below.
+
+No disk spill, cross-machine execution, or global memory-admission guarantee is claimed. Skew, bandwidth, NUMA placement, and finite group cardinality can limit scaling. The 100-core throughput curve still requires a 100-core host. Small queries also have parallel scheduling overhead; increasing workers is a tuning choice, not a guarantee of lower latency for every shape.
+
 ## Single-query thread scaling: 23 October 2026
 
 This follow-up measures one query at different worker counts. Baseline is `c1392bf`; the updated implementation is `74b8acf`. Both were compiled and run with Temurin Java 21.0.12.1, a fixed 5 GiB heap, and Parallel GC on this Ryzen 7 5700G host (8 physical cores, 16 logical processors). Each cell uses a fresh JVM, two warmups, and five measured rounds, with the before/after cells run sequentially at each worker count.
@@ -260,7 +595,7 @@ DuckDB's [parallel aggregation design](https://duckdb.org/2022/03/07/aggregate-h
 
 DuckDB's [external aggregation design](https://duckdb.org/2024/03/29/external-aggregation) is a reference for a future spill design. Cascada still needs memory accounting and spillable representations for object-backed keys and group state.
 
-A global CPU and memory budget across requests is another substantial follow-up. The current virtual-thread executor does not enforce one. [Oracle's guide](https://docs.oracle.com/en/java/javase/21/core/virtual-threads.html) explains virtual threads' suitability for blocking work and limiting scarce resources separately.
+The current application separates virtual retrieval from a shared platform CPU worker pool. Small-frame producer work remains outside that pool; global memory admission and byte accounting across requests remain follow-up work. [Oracle's guide](https://docs.oracle.com/en/java/javase/21/core/virtual-threads.html) explains virtual threads' suitability for blocking work and limiting scarce resources separately.
 
 [fastutil](https://github.com/vigna/fastutil) provides primitive collections worth evaluating for individual hot structures. Replacing the existing composite-key paged table needs a workload-specific comparison. This review adds no collection dependency.
 

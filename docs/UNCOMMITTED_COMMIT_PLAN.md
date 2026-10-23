@@ -1,5 +1,42 @@
 # Cascada: code guide and preserved implementation record
 
+## Compact state layout and CPU execution
+
+The latest implementation is `33e9c4b`. The README's **Compact merge research and verification** section records the primary sources, complete protocol, and measurements against local `main` (`8c60a35`) and previous review (`b9f5d6d`). Those comparisons use the same globally shuffled, weighted, nullable 12-column inputs. Older benchmark records below use different workloads and remain historical evidence.
+
+### Read these methods to understand the new representation
+
+| Method or class | Responsibility |
+|---|---|
+| `TypedAggregationGroups` constructor | Lay out primitive keys/measures and validity words. STRING aggregate values have separate compressed storage. Pack low hash bits into a spare validity-word half only when safe. |
+| `GroupedStringValues.accumulate` | Keep one shared baseline winner; compare each initialized group's current winner with the incoming value using Spark string ordering. Retain only winners, not all observed strings. |
+| `GroupedStringValues.value` | A missing exception means the shared value. A group's validity flag still determines SQL NULL; missing exception storage does not mean SQL NULL. |
+| `TypedAggregationGroups.ensurePage` | Grow the first payload page from 16 through 1,024 groups, then allocate fixed 1,024-group pages. Only the small first page copies prior payload while growing. |
+| `TypedAggregationGroups.findOrCreate` / `growSlots` | Probe hash-tagged index entries, compare full keys on a tag match, grow the index at 80% occupancy, and rebuild it using saved low hash bits without moving payload pages. |
+| `partitionFrame` / `partitionInParallel` | Preserve stable row routing. Higher worker counts use finer hash/count/scatter chunks rather than inheriting the low-worker chunk limit. |
+| `CascadaEngineFactory` | Own separate virtual retrieval tasks and prestarted platform CPU workers. CPU worker count is `min(configured count, JVM processors)`; both executors close with the factory. |
+| `CacheExecutionEngine` separate-executor constructor | Keep retrieval progress independent of CPU tasks, avoiding a blocked I/O worker monopolizing the merge executor. Existing overloads preserve their supplied-executor behavior. |
+
+For the measured three-LONG-key/three-AVG schema, primitive keys and SUM/COUNT values occupy 72 bytes per group. Flags and the saved low hash bits share another eight bytes: **80 payload bytes per group**, before the index, padding, output, and object overhead. The previous review needed 112 primitive payload bytes and padded each touched page to 16,384 groups. These are layout calculations, not a total-heap guarantee.
+
+The high 32 hash-tag bits remain in slot entries. Resizing only masks the low hash bits to find a new slot, so it does not need a second complete hash stored in every group. If the last validity word uses more than 32 bits, a separate hash word remains. Tests exercise flag counts 31, 32, 33, 63, 64, 65, 96, and 97 while growing and rehashing the table.
+
+For STRING MIN/MAX, the first non-null value establishes the shared baseline. Groups whose winner differs receive an exception reference. A winner returning to the baseline clears its exception; losing candidates are not retained. Exception pages are lazy and their first page grows for small queries. This preserves arbitrary string winners, Unicode ordering, and NULL semantics while avoiding one repeated type string slot per group.
+
+### What thread count means
+
+`CASCADA_MERGE_WORKERS=100` selects 100 logical group partitions. The application can run 100 CPU workers when its JVM exposes at least 100 processors; on this host it caps the pool at the available 16 logical processors. Correctness was tested with 100 partitions on an eight-thread executor. There is no measured 100-core speedup claim.
+
+Small-frame routing and the single-partition fast path can execute in the producer. Thus the CPU pool is a worker budget, not a hard process-wide CPU quota. Its queue and concurrent query state do not provide global memory admission. Two frames are allowed in flight per merger so production can overlap retrieval and computation without retaining an arbitrary number of decoded frames.
+
+Stable row scatter and per-partition frame dependencies retain each group's original update order. A global aggregate or one dominant group still has one state owner. This merger consumes already-aggregated bucket frames; it is not a new distributed Spark stage or a raw-data scan engine.
+
+### Current validation
+
+The clean eight-module reactor passed with **708 registered tests, 680 executed, 28 skipped, zero failures/errors**. The new tests cover compressed winners, equal-but-distinct String objects, Unicode order, sparse exception pages, packed validity/hash boundaries, 100 partitions, independent retrieval/CPU executors, and shutdown.
+
+Current code also passed 50 additional measured 20-million-row rounds with every weighted AVG checked, plus fixed-heap G1 checks using both 300 and 20 frames. The old dictionary-ID representation was removed, but the cause of the previous invalid ID and native GC crashes was not established. Current passing runs do not retroactively identify that cause.
+
 ## Follow-up: scaling one query across threads
 
 The follow-up addresses the intended definition of scalability: compare the same one query at 1, 2, 4, 8, and 10 workers. Comparing two implementations at four workers alone did not answer that question.
@@ -83,11 +120,11 @@ The same group receives input rows in exactly their original frame/row order. Th
 
 `TypedAggregationGroups` owns an open-addressing hash table. A slot stores a hash tag and a group ID. A matching tag is only a quick filter; full dimension equality still decides whether two rows belong to the same group. Colliding hashes must never merge unrelated keys.
 
-The group ID addresses paged, row-major state. Each group has contiguous primitive words for numeric keys/measures, string dictionary IDs, presence flags, and the stored hash. Object slots are allocated when string/decimal keys or decimal measures need them. Pages contain 16,384 groups. Growing the page directory does not copy every existing group, although hash-slot growth still allocates and rehashes the slot array.
+The group ID addresses paged, row-major state. Numeric keys/measures and presence flags occupy primitive words; low hash bits share spare flag bits when possible. STRING aggregate winners use separate compressed exception pages. Object slots hold string/decimal keys or decimal measures. The first page grows from 16 to 1,024 groups; later pages contain 1,024 groups. Directory growth leaves existing full payload pages in place; hash-slot growth still allocates and rehashes the index.
 
 Time dimensions are floored to the configured bucket start, including negative epochs. Grouping normalizes floating-point NaNs and signed zero and uses scale-insensitive decimal equality. These rules are correctness requirements, not optional speed shortcuts.
 
-Schema arrays resolve measure columns, types, and combine operations once. The current loop switches over all measures while each probed group's state is hot. SUM/COUNT combine additively; MIN/MAX use Spark-compatible comparisons. Aggregate MIN/MAX strings use dictionary IDs in group state. String grouping keys are not all dictionary-encoded, and decimals do not become primitive doubles.
+Schema arrays resolve measure columns, types, and combine operations once. The current loop switches over all measures while each probed group's state is hot. SUM/COUNT combine additively; MIN/MAX use Spark-compatible comparisons. Aggregate MIN/MAX strings use a shared baseline plus sparse per-group winners. String grouping keys are not all dictionary-encoded, and decimals do not become primitive doubles.
 
 ### Parallel routing and buffer ownership after this review
 
@@ -116,7 +153,7 @@ Each partition sorts its group IDs. For at least 65,536 groups, a balanced merge
 
 `CacheExecutionConfiguration.mergeWorkerCount` and `CASCADA_MERGE_WORKERS` choose partitions per query. The default is half the available processors, clamped to 1 through 4. Global aggregates without dimensions use one partition, because every row belongs to the same group and the reduction order is preserved.
 
-The application currently shares a virtual-thread executor for cache/gap and merge tasks. This supports blocking I/O concurrency but does not impose a global CPU or memory budget across requests. Per-query worker limits and a two-frame bound do not make an unbounded number of simultaneous queries safe.
+The application separates virtual cache/gap tasks from a shared platform CPU worker pool, capped by configured workers and JVM processors. Small-frame producer work can run outside that pool. Per-query partitions and a two-frame bound do not provide global query-memory admission.
 
 All group state remains in heap. The implementation does not spill aggregation pages to disk, enforce a global distinct-group memory budget, or turn a single-machine merger into a distributed shuffle engine. Large/skewed string and decimal workloads need separate measurement. No 10x/30x speed or fixed memory guarantee follows from the design alone.
 
@@ -124,7 +161,7 @@ All group state remains in heap. The implementation does not spill aggregation p
 
 DuckDB's grouped aggregation uses local hash tables and partitioned parallel combination. Its external aggregation adds memory management and spillable page layouts. These explain why partition ownership and compact state are useful. Cascada instead merges already-aggregated bucket frames, preserves per-group floating-point order, uses Java heap objects for some values, and has a separate Spark/cache retrieval path. Those differences prevent borrowing a DuckDB speedup number as a Cascada result.
 
-The next substantial improvements should evaluate a global CPU/admission budget, byte-based memory accounting, partition-skew handling, and spill-capable state. A new collection library is worthwhile only where a measured hot structure benefits; replacing a composite-key paged table with a general map can lose existing properties.
+The next substantial improvements should evaluate global memory admission, byte-based accounting, partition-skew handling, and spill-capable state, with the shared CPU worker pool already in place. A new collection library is worthwhile only where a measured hot structure benefits; replacing a composite-key paged table with a general map can lose existing properties.
 
 ## Current verification and measured limits
 

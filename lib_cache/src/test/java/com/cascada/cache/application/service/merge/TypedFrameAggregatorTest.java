@@ -135,7 +135,7 @@ class TypedFrameAggregatorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {2, 3, 8})
+    @ValueSource(ints = {2, 3, 8, 10})
     void partitionedMergeEqualsSinglePartitionMergeForEveryKeyAndMeasureType(int partitionCount) {
         List<ResultFrame> frames = mixedTypeFrames();
         Map<String, AggregateFunction> functions = Map.of(
@@ -157,7 +157,7 @@ class TypedFrameAggregatorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {1, 4})
+    @ValueSource(ints = {1, 4, 10})
     void averagesFromGroupStateEqualSparkAverageOverTheIngredientFrame(int partitionCount) {
         String doubleAverage = "average_value";
         String decimalAverage = "average_amount";
@@ -334,6 +334,96 @@ class TypedFrameAggregatorTest {
                 assertThat(actual.longAt(row, 0)).isEqualTo(entry.getKey());
                 assertThat(actual.longAt(row, 1)).isEqualTo(entry.getValue());
                 row++;
+            }
+        }
+    }
+
+    @Test
+    void parallelHashScatterKeepsTheExactPerKeyUpdateOrderAcrossChunksAndFrames() {
+        double[] expected = new double[103];
+        ResultFrame schema = ResultFrame.builder().column("key", ColumnType.LONG)
+                .column("SUM(x)", ColumnType.DOUBLE).build();
+        try (ExecutorService executor = Executors.newFixedThreadPool(10)) {
+            TypedFrameAccumulator accumulator = new TypedFrameAccumulator(schema, List.of("key"),
+                    Map.of("SUM(x)", AggregateFunction.SUM), "ts", 300, 10, executor);
+            for (int size : new int[]{300_001, 271_119, 17, 320_001}) {
+                ResultFrameBuilder builder = ResultFrame.builder().expectedRows(size)
+                        .column("key", ColumnType.LONG).column("SUM(x)", ColumnType.DOUBLE);
+                for (int row = 0; row < size; row++) {
+                    int key = row % expected.length;
+                    double value = switch (row % 3) { case 0 -> 1.0e16; case 1 -> -1.0e16; default -> 1.0; };
+                    builder.appendLong(key).appendDouble(value);
+                    expected[key] += value;
+                }
+                accumulator.accept(builder.build());
+            }
+            ResultFrame actual = accumulator.finish();
+            assertThat(actual.rowCount()).isEqualTo(expected.length);
+            for (int key = 0; key < expected.length; key++) {
+                assertThat(actual.longAt(key, 0)).isEqualTo(key);
+                assertThat(Double.doubleToRawLongBits(actual.doubleAt(key, 1)))
+                        .isEqualTo(Double.doubleToRawLongBits(expected[key]));
+            }
+        }
+    }
+
+    @Test
+    void parallelFusedAverageOutputMatchesSingleWorkerForNullsAndDecimals() {
+        String doubleAlias = "davg", decimalAlias = "money_avg";
+        ResultFrameBuilder input = ResultFrame.builder().expectedRows(70_003)
+                .column("device", ColumnType.LONG)
+                .column(AverageIngredients.sumColumn(doubleAlias), ColumnType.DOUBLE)
+                .column(AverageIngredients.countColumn(doubleAlias), ColumnType.LONG)
+                .column(AverageIngredients.typeColumn(doubleAlias), ColumnType.STRING)
+                .column(AverageIngredients.sumColumn(decimalAlias), ColumnType.DECIMAL)
+                .column(AverageIngredients.countColumn(decimalAlias), ColumnType.LONG)
+                .column(AverageIngredients.typeColumn(decimalAlias), ColumnType.STRING);
+        for (int row = 0; row < 70_003; row++) {
+            long count = row % 7 == 0 ? 0 : 2;
+            input.row((long) row, count == 0 ? null : (row + 0.5) * count, count, "DOUBLE",
+                    count == 0 ? null : BigDecimal.valueOf(row, 2).multiply(BigDecimal.valueOf(count)),
+                    count, "decimal(10,2)");
+        }
+        ResultFrame frame = input.build();
+        Map<String, AggregateFunction> functions = Map.of(
+                ColumnNames.identity(AverageIngredients.typeColumn(doubleAlias)), AggregateFunction.MINIMUM,
+                ColumnNames.identity(AverageIngredients.typeColumn(decimalAlias)), AggregateFunction.MINIMUM);
+        TypedFrameAccumulator single = new TypedFrameAccumulator(frame, List.of("device"), functions, "ts", 300);
+        single.accept(frame);
+        single.accept(frame);
+        ResultFrame expected = single.finishWithAverages(List.of(doubleAlias, decimalAlias));
+        try (ExecutorService executor = Executors.newFixedThreadPool(10)) {
+            TypedFrameAccumulator parallel = new TypedFrameAccumulator(frame, List.of("device"), functions,
+                    "ts", 300, 10, executor);
+            parallel.accept(frame);
+            parallel.accept(frame);
+            ResultFrame actual = parallel.finishWithAverages(List.of(doubleAlias, decimalAlias));
+            assertThat(actual.columnNames()).isEqualTo(expected.columnNames());
+            assertThat(actual.columnTypes()).isEqualTo(expected.columnTypes());
+            assertThat(actual.rowCount()).isEqualTo(expected.rowCount());
+            for (int row = 0; row < actual.rowCount(); row++) {
+                for (int column = 0; column < actual.columnNames().size(); column++) {
+                    assertThat(actual.valueAt(row, column)).isEqualTo(expected.valueAt(row, column));
+                }
+            }
+        }
+    }
+
+    @Test
+    void largeFrameAcceptanceDoesNotBlockAWorkerAwaitingItsOwnRoutingTasks() throws Exception {
+        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(270_000)
+                .column("key", ColumnType.LONG).column("SUM(x)", ColumnType.LONG);
+        for (int row = 0; row < 270_000; row++) builder.appendLong(row % 3).appendLong(1);
+        ResultFrame frame = builder.build();
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            TypedFrameAccumulator accumulator = new TypedFrameAccumulator(frame, List.of("key"),
+                    Map.of("SUM(x)", AggregateFunction.SUM), "ts", 300, 10, executor);
+            executor.submit(() -> accumulator.accept(frame)).get(5, TimeUnit.SECONDS);
+            ResultFrame result = accumulator.finish();
+            assertThat(result.rowCount()).isEqualTo(3);
+            for (int row = 0; row < 3; row++) {
+                assertThat(result.longAt(row, 0)).isEqualTo(row);
+                assertThat(result.longAt(row, 1)).isEqualTo(90_000);
             }
         }
     }

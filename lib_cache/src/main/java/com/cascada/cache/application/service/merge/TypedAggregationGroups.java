@@ -1,6 +1,7 @@
 package com.cascada.cache.application.service.merge;
 
 import com.cascada.cache.application.execution.QueryCancellation;
+import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -12,6 +13,8 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 /**
  * Open-addressing group table with row-major, paged group state.
@@ -23,8 +26,8 @@ import java.util.Map;
  * fixed-size pages, so adding groups never copies existing state or over-allocates it by doubling.
  *
  * <p>A slot stores {@code hashTag << 32 | groupId + 1}; a probe rejects a different group by its tag
- * without reading that group's state. A frame is merged column-at-a-time: one hashing pass, one
- * probing pass, then one tight loop per measure column with the type resolved once per column.
+ * without reading that group's state. A frame is hashed once. Each owned row probes its group and updates all measures
+ * before moving on, preserving locality across the row-major state.
  */
 final class TypedAggregationGroups {
     private static final int GROUPS_PER_PAGE_SHIFT = 14;
@@ -38,7 +41,6 @@ final class TypedAggregationGroups {
     private static final long HASH_FINAL_MULTIPLIER = 0xC4CEB9FE1A85EC53L;
     private static final long NULL_KEY_HASH = 0x5BD1E995L;
     private static final int NOT_STORED = -1;
-    private static final int NOT_OWNED = -1;
     private static final int PARTITION_HASH_SHIFT = 40;
     private static final int PARTITION_FRACTION_BITS = Long.SIZE - PARTITION_HASH_SHIFT;
 
@@ -73,9 +75,6 @@ final class TypedAggregationGroups {
     private long[] slots = new long[INITIAL_SLOT_COUNT];
     private int slotMask = INITIAL_SLOT_COUNT - 1;
     private long[] rowHashes = new long[0];
-    private int[] rowGroups = new int[0];
-    /** Reused by this table; same-partition frame work is chained, so only one task uses it at a time. */
-    private int[] partitionGroupScratch = new int[0];
     int groupCount;
 
 
@@ -137,26 +136,26 @@ final class TypedAggregationGroups {
     void accumulateFrame(FrameColumnReader[] input, int rowCount) {
         if (rowHashes.length < rowCount) {
             rowHashes = new long[rowCount];
-            rowGroups = new int[rowCount];
         }
         computeRowHashes(input, rowCount, rowHashes);
         for (int row = 0; row < rowCount; row++) {
             if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
-            rowGroups[row] = ownsHash(rowHashes[row]) ? findOrCreate(input, row, rowHashes[row]) : NOT_OWNED;
-        }
-        for (int measure = 0; measure < measureColumns.length; measure++) {
-            FrameColumnReader column = input[measureColumns[measure]];
-            accumulateColumn(measure, column, rowCount, null, null, 0);
+            if (ownsHash(rowHashes[row])) {
+                int group = findOrCreate(input, row, rowHashes[row]);
+                accumulateRow(input, row, group);
+            }
         }
     }
 
     /** Computes hashes once, then groups row indices by partition without changing their order. */
-    PartitionedFrame partitionFrame(FrameColumnReader[] input, int rowCount, PartitionedFrame reusable) {
-        PartitionedFrame frame = reusable == null ? new PartitionedFrame(partitionCount) : reusable;
+    CompletableFuture<Void> partitionFrame(FrameColumnReader[] input, int rowCount, PartitionedFrame frame, Executor executor) {
         frame.columns = input;
         if (frame.hashes.length < rowCount) {
             frame.hashes = new long[rowCount];
             frame.rows = new int[rowCount];
+        }
+        if (rowCount >= 262_144 && partitionCount > 1) {
+            return partitionInParallel(frame, rowCount, executor);
         }
         computeRowHashes(input, rowCount, frame.hashes);
         Arrays.fill(frame.offsets, 0);
@@ -173,46 +172,92 @@ final class TypedAggregationGroups {
             int partition = partitionForHash(frame.hashes[row], partitionCount);
             frame.rows[cursors[partition]++] = row;
         }
-        return frame;
+        return CompletableFuture.completedFuture(null);
+    }
+
+    /** Stable parallel count/prefix/scatter: each chunk owns disjoint input and output ranges. */
+    private CompletableFuture<Void> partitionInParallel(PartitionedFrame frame, int rowCount, Executor executor) {
+        int chunks = (int) Math.min(partitionCount, ((long) rowCount + 65_535) / 65_536);
+        int[][] cursors = new int[chunks][partitionCount];
+        CompletableFuture<?>[] work = new CompletableFuture<?>[chunks];
+        for (int chunk = 0; chunk < chunks; chunk++) {
+            int start = (int) ((long) rowCount * chunk / chunks);
+            int end = (int) ((long) rowCount * (chunk + 1) / chunks);
+            int[] counts = cursors[chunk];
+            work[chunk] = CompletableFuture.runAsync(QueryExecutionScope.propagate(() -> {
+                computeRowHashes(frame.columns, start, end, frame.hashes);
+                for (int row = start; row < end; row++) {
+                    if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+                    counts[partitionForHash(frame.hashes[row], partitionCount)]++;
+                }
+            }), executor);
+        }
+        // No executor worker blocks awaiting its children. The last count task schedules the
+        // scatters through a continuation, which in turn releases the partition consumers.
+        java.util.function.Supplier<CompletableFuture<Void>> scatter = QueryExecutionScope.propagate(() -> {
+            int offset = 0;
+            for (int partition = 0; partition < partitionCount; partition++) {
+                frame.offsets[partition] = offset;
+                for (int chunk = 0; chunk < chunks; chunk++) {
+                    int count = cursors[chunk][partition];
+                    cursors[chunk][partition] = offset;
+                    offset += count;
+                }
+            }
+            frame.offsets[partitionCount] = offset;
+            CompletableFuture<?>[] scattered = new CompletableFuture<?>[chunks];
+            for (int chunk = 0; chunk < chunks; chunk++) {
+                int start = (int) ((long) rowCount * chunk / chunks);
+                int end = (int) ((long) rowCount * (chunk + 1) / chunks);
+                int[] positions = cursors[chunk];
+                scattered[chunk] = CompletableFuture.runAsync(QueryExecutionScope.propagate(() -> {
+                    for (int row = start; row < end; row++) {
+                        if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+                        int partition = partitionForHash(frame.hashes[row], partitionCount);
+                        frame.rows[positions[partition]++] = row;
+                    }
+                }), executor);
+            }
+            return CompletableFuture.allOf(scattered);
+        });
+        return CompletableFuture.allOf(work).thenCompose(ignored -> scatter.get());
     }
 
     void accumulateFrame(PartitionedFrame frame) {
         int start = frame.offsets[partitionIndex];
         int count = frame.offsets[partitionIndex + 1] - start;
-        if (partitionGroupScratch.length < count) {
-            partitionGroupScratch = new int[count];
-        }
-        int[] groups = partitionGroupScratch;
         for (int position = 0; position < count; position++) {
             if ((position & 1023) == 0) QueryCancellation.requireCurrentActive();
             int row = frame.rows[start + position];
-            groups[position] = findOrCreate(frame.columns, row, frame.hashes[row]);
-        }
-        for (int measure = 0; measure < measureColumns.length; measure++) {
-            accumulateColumn(measure, frame.columns[measureColumns[measure]], count, frame.rows, groups, start);
+            int group = findOrCreate(frame.columns, row, frame.hashes[row]);
+            accumulateRow(frame.columns, row, group);
         }
     }
 
     private void computeRowHashes(FrameColumnReader[] input, int rowCount, long[] hashes) {
-        Arrays.fill(hashes, 0, rowCount, HASH_SEED);
+        computeRowHashes(input, 0, rowCount, hashes);
+    }
+
+    private void computeRowHashes(FrameColumnReader[] input, int start, int end, long[] hashes) {
+        Arrays.fill(hashes, start, end, HASH_SEED);
         for (int dimension = 0; dimension < dimensionColumns.length; dimension++) {
             QueryCancellation.requireCurrentActive();
             int column = dimensionColumns[dimension];
             if (column < 0) {
-                for (int row = 0; row < rowCount; row++) {
+                for (int row = start; row < end; row++) {
                     if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
                     hashes[row] = mixHash(hashes[row], NULL_KEY_HASH);
                 }
                 continue;
             }
             FrameColumnReader reader = input[column];
-            for (int row = 0; row < rowCount; row++) {
+            for (int row = start; row < end; row++) {
                 if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
                 long keyHash = reader.isNullAt(row) ? NULL_KEY_HASH : keyHash(reader, row, dimension);
                 hashes[row] = mixHash(hashes[row], keyHash);
             }
         }
-        for (int row = 0; row < rowCount; row++) {
+        for (int row = start; row < end; row++) {
             if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
             hashes[row] = finalizeHash(hashes[row]);
         }
@@ -339,96 +384,69 @@ final class TypedAggregationGroups {
         return BucketMath.floor(timestamp, step);
     }
 
-    private void accumulateColumn(int measure, FrameColumnReader column, int rowCount,
-                                  int[] rows, int[] groups, int rowOffset) {
-        switch (measureTypes[measure]) {
-            case LONG -> accumulateLongColumn(measure, column, rowCount, rows, groups, rowOffset);
-            case DOUBLE -> accumulateDoubleColumn(measure, column, rowCount, rows, groups, rowOffset);
-            case STRING -> accumulateStringColumn(measure, column, rowCount, rows, groups, rowOffset);
-            case DECIMAL -> accumulateDecimalColumn(measure, column, rowCount, rows, groups, rowOffset);
-        }
-    }
-
-    private void accumulateLongColumn(int measure, FrameColumnReader column, int rowCount,
-                                      int[] rows, int[] groups, int rowOffset) {
-        int valueOffset = measureWordOffsets[measure];
-        int flag = measureFlag(measure);
-        AggregateOperation function = measureFunctions[measure];
-        for (int row = 0; row < rowCount; row++) {
-            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
-            int inputRow = rows == null ? row : rows[rowOffset + row];
-            int group = rows == null ? rowGroups[row] : groups[row];
-            if (group == NOT_OWNED || column.isNullAt(inputRow)) continue;
-            long[] words = wordPage(group);
-            int wordBase = wordBase(group);
-            long incoming = column.longValue(inputRow);
-            if (!hasFlag(words, wordBase, flag)) {
-                words[wordBase + valueOffset] = incoming;
-                setFlag(words, wordBase, flag);
-                continue;
+    /** Update every measure while the probed group's contiguous state is hot in cache. */
+    private void accumulateRow(FrameColumnReader[] input, int row, int group) {
+        long[] words = wordPage(group);
+        int base = wordBase(group);
+        for (int measure = 0; measure < measureColumns.length; measure++) {
+            FrameColumnReader column = input[measureColumns[measure]];
+            if (column.isNullAt(row)) continue;
+            int flag = measureFlag(measure);
+            boolean initialized = hasFlag(words, base, flag);
+            int slot = base + measureWordOffsets[measure];
+            AggregateOperation function = measureFunctions[measure];
+            switch (measureTypes[measure]) {
+                case LONG -> {
+                    long incoming = column.longValue(row);
+                    long previous = initialized ? words[slot] : incoming;
+                    words[slot] = !initialized ? incoming : switch (function) {
+                        case SUM, COUNT -> Math.addExact(previous, incoming);
+                        case MINIMUM -> Math.min(previous, incoming);
+                        case MAXIMUM -> Math.max(previous, incoming);
+                    };
+                }
+                case DOUBLE -> {
+                    double incoming = column.doubleValue(row);
+                    double value = initialized
+                            ? function.combine(Double.longBitsToDouble(words[slot]), incoming) : incoming;
+                    words[slot] = Double.doubleToRawLongBits(value);
+                }
+                case STRING -> {
+                    int incoming = dictionaryId(measure, column.stringValue(row));
+                    if (!initialized) {
+                        words[slot] = incoming;
+                    } else {
+                        int previous = (int) words[slot];
+                        List<String> dictionary = stringMeasureDictionaries.get(measure);
+                        words[slot] = switch (function) {
+                            case MINIMUM -> previous == incoming || SparkValues.compareStrings(
+                                    dictionary.get(previous), dictionary.get(incoming)) <= 0 ? previous : incoming;
+                            case MAXIMUM -> previous == incoming || SparkValues.compareStrings(
+                                    dictionary.get(previous), dictionary.get(incoming)) >= 0 ? previous : incoming;
+                            case SUM, COUNT -> throw new IllegalArgumentException(
+                                    "STRING aggregate column requires MIN or MAX, got " + function);
+                        };
+                    }
+                }
+                case DECIMAL -> {
+                    Object[] objects = objectPage(group);
+                    int objectSlot = objectBase(group) + measureObjectOffsets[measure];
+                    String name = schema.columnNames().get(measureColumns[measure]);
+                    BigDecimal incoming = column.decimalValue(row);
+                    SparkValues.requireDecimal(incoming, name);
+                    if (!initialized) {
+                        objects[objectSlot] = incoming;
+                    } else {
+                        BigDecimal previous = (BigDecimal) objects[objectSlot];
+                        objects[objectSlot] = switch (function) {
+                            case SUM, COUNT -> SparkValues.decimalSum(previous, incoming, name);
+                            case MINIMUM -> previous.min(incoming);
+                            case MAXIMUM -> previous.max(incoming);
+                        };
+                    }
+                }
             }
-            long previous = words[wordBase + valueOffset];
-            words[wordBase + valueOffset] = switch (function) {
-                case SUM, COUNT -> Math.addExact(previous, incoming);
-                case MINIMUM -> Math.min(previous, incoming);
-                case MAXIMUM -> Math.max(previous, incoming);
-            };
-        }
-    }
-
-    private void accumulateDoubleColumn(int measure, FrameColumnReader column, int rowCount,
-                                        int[] rows, int[] groups, int rowOffset) {
-        int valueOffset = measureWordOffsets[measure];
-        int flag = measureFlag(measure);
-        AggregateOperation function = measureFunctions[measure];
-        for (int row = 0; row < rowCount; row++) {
-            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
-            int inputRow = rows == null ? row : rows[rowOffset + row];
-            int group = rows == null ? rowGroups[row] : groups[row];
-            if (group == NOT_OWNED || column.isNullAt(inputRow)) continue;
-            long[] words = wordPage(group);
-            int wordBase = wordBase(group);
-            double incoming = column.doubleValue(inputRow);
-            if (!hasFlag(words, wordBase, flag)) {
-                words[wordBase + valueOffset] = Double.doubleToRawLongBits(incoming);
-                setFlag(words, wordBase, flag);
-                continue;
-            }
-            double previous = Double.longBitsToDouble(words[wordBase + valueOffset]);
-            words[wordBase + valueOffset] = Double.doubleToRawLongBits(function.combine(previous, incoming));
-        }
-    }
-
-    private void accumulateStringColumn(int measure, FrameColumnReader column, int rowCount,
-                                        int[] rows, int[] groups, int rowOffset) {
-        int valueOffset = measureWordOffsets[measure];
-        int flag = measureFlag(measure);
-        AggregateOperation function = measureFunctions[measure];
-        List<String> dictionary = stringMeasureDictionaries.get(measure);
-        for (int row = 0; row < rowCount; row++) {
-            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
-            int inputRow = rows == null ? row : rows[rowOffset + row];
-            int group = rows == null ? rowGroups[row] : groups[row];
-            if (group == NOT_OWNED || column.isNullAt(inputRow)) continue;
-            long[] words = wordPage(group);
-            int wordBase = wordBase(group);
-            int incomingId = dictionaryId(measure, column.stringValue(inputRow));
-            if (!hasFlag(words, wordBase, flag)) {
-                words[wordBase + valueOffset] = incomingId;
-                setFlag(words, wordBase, flag);
-                continue;
-            }
-            int previousId = (int) words[wordBase + valueOffset];
-            words[wordBase + valueOffset] = switch (function) {
-                case MINIMUM -> previousId == incomingId
-                        || SparkValues.compareStrings(dictionary.get(previousId), dictionary.get(incomingId)) <= 0
-                        ? previousId : incomingId;
-                case MAXIMUM -> previousId == incomingId
-                        || SparkValues.compareStrings(dictionary.get(previousId), dictionary.get(incomingId)) >= 0
-                        ? previousId : incomingId;
-                case SUM, COUNT -> throw new IllegalArgumentException(
-                        "STRING aggregate column requires MIN or MAX, got " + function);
-            };
+            if (!initialized) setFlag(words, base, flag);
         }
     }
 
@@ -443,37 +461,6 @@ final class TypedAggregationGroups {
         lastDictionaryValues[measure] = value;
         lastDictionaryIds[measure] = id;
         return id;
-    }
-
-    private void accumulateDecimalColumn(int measure, FrameColumnReader column, int rowCount,
-                                         int[] rows, int[] groups, int rowOffset) {
-        int valueOffset = measureObjectOffsets[measure];
-        int flag = measureFlag(measure);
-        AggregateOperation function = measureFunctions[measure];
-        String columnName = schema.columnNames().get(measureColumns[measure]);
-        for (int row = 0; row < rowCount; row++) {
-            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
-            int inputRow = rows == null ? row : rows[rowOffset + row];
-            int group = rows == null ? rowGroups[row] : groups[row];
-            if (group == NOT_OWNED || column.isNullAt(inputRow)) continue;
-            long[] words = wordPage(group);
-            int wordBase = wordBase(group);
-            Object[] objects = objectPage(group);
-            int objectSlot = objectBase(group) + valueOffset;
-            BigDecimal incoming = column.decimalValue(inputRow);
-            SparkValues.requireDecimal(incoming, columnName);
-            if (!hasFlag(words, wordBase, flag)) {
-                objects[objectSlot] = incoming;
-                setFlag(words, wordBase, flag);
-                continue;
-            }
-            BigDecimal previous = (BigDecimal) objects[objectSlot];
-            objects[objectSlot] = switch (function) {
-                case SUM, COUNT -> SparkValues.decimalSum(previous, incoming, columnName);
-                case MINIMUM -> previous.min(incoming);
-                case MAXIMUM -> previous.max(incoming);
-            };
-        }
     }
 
     private void growSlots() {

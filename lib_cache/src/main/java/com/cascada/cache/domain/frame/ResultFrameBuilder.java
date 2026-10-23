@@ -16,6 +16,26 @@ public final class ResultFrameBuilder {
     private int expectedRows = 16;
     private ColumnType[] indexedTypes;
     private boolean sharedSnapshot;
+    private boolean fixedRange;
+    private boolean sealed;
+
+    public ResultFrameBuilder() { }
+
+    ResultFrameBuilder(List<String> names, Map<String, ColumnType> types, Object[] columns,
+                       long[][] present, int start, int end) {
+        this.names.addAll(names);
+        this.types.putAll(types);
+        this.columns = columns;
+        this.present = present;
+        indexedTypes = names.stream().map(types::get).toArray(ColumnType[]::new);
+        rowCount = start;
+        capacity = end;
+        fixedRange = true;
+    }
+
+    boolean rangeComplete() { return rowCount == capacity && nextColumn == 0; }
+    void sealRange() { sealed = true; }
+
 
     /** Allocation hint; does not change the number of rows or limit subsequent growth. */
     public ResultFrameBuilder expectedRows(int rows) {
@@ -108,6 +128,7 @@ public final class ResultFrameBuilder {
     }
 
     public ResultFrame build() {
+        if (fixedRange) throw new IllegalStateException("build the complete parallel frame, not a row range");
         if (nextColumn != 0) {
             throw new IllegalStateException("a partial row is pending");
         }
@@ -152,6 +173,11 @@ public final class ResultFrameBuilder {
 
     void ensureCapacityForCell() {
         initialize();
+        if (fixedRange) {
+            if (sealed) throw new IllegalStateException("parallel frame has been built");
+            if (rowCount >= capacity) throw new IllegalStateException("row range is full");
+            return;
+        }
         if (rowCount < capacity && !sharedSnapshot) {
             return;
         }

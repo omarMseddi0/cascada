@@ -3,6 +3,7 @@ package com.cascada.cache.application.service.merge;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.domain.frame.ColumnType;
+import com.cascada.cache.domain.frame.ParallelFrameBuilder;
 import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
@@ -129,10 +130,11 @@ public final class TypedFrameAccumulator {
         }
         FrameColumnReader[] columns = new FrameColumnReader[input.columnNames().size()];
         Arrays.setAll(columns, input::columnReader);
-        PartitionedFrame routedFrame = partitions.get(0).partitionFrame(columns, input.rowCount(), reusable);
+        PartitionedFrame routedFrame = reusable == null ? new PartitionedFrame(partitions.size()) : reusable;
+        CompletableFuture<Void> routed = partitions.get(0).partitionFrame(columns, input.rowCount(), routedFrame, partitionExecutor);
         for (int partition = 0; partition < partitions.size(); partition++) {
             TypedAggregationGroups groups = partitions.get(partition);
-            partitionTails.set(partition, partitionTails.get(partition)
+            partitionTails.set(partition, CompletableFuture.allOf(partitionTails.get(partition), routed)
                     .thenRunAsync(QueryExecutionScope.propagate(() -> groups.accumulateFrame(routedFrame)),
                             partitionExecutor));
         }
@@ -174,16 +176,40 @@ public final class TypedFrameAccumulator {
     }
 
     private ResultFrame buildMergedFrame(long[] orderedGroups) {
-        ResultFrameBuilder result = ResultFrame.builder().expectedRows(orderedGroups.length);
-        schema.columnNames().forEach(name -> result.column(name, schema.columnType(name)));
-        for (long entry : orderedGroups) {
-            TypedAggregationGroups groups = partitionOf(entry);
-            int group = groupOf(entry);
+        return emitFrame(schema, orderedGroups, (output, groups, group) -> {
             for (int column = 0; column < columnDimensions.length; column++) {
-                appendColumn(result, groups, group, column);
+                appendColumn(output, groups, group, column);
             }
+        });
+    }
+
+    /** Final output uses disjoint, word-aligned ranges of one allocation, without chunk copies. */
+    private ResultFrame emitFrame(ResultFrame outputSchema, long[] orderedGroups, GroupRowAppender appender) {
+        if (partitions.size() == 1 || orderedGroups.length < 65_536) {
+            ResultFrameBuilder output = ResultFrame.builder().expectedRows(orderedGroups.length);
+            outputSchema.columnNames().forEach(name -> output.column(name, outputSchema.columnType(name)));
+            for (int row = 0; row < orderedGroups.length; row++) {
+                if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+                long entry = orderedGroups[row];
+                appender.append(output, partitionOf(entry), groupOf(entry));
+            }
+            return output.build();
         }
-        return result.build();
+        ParallelFrameBuilder output = new ParallelFrameBuilder(outputSchema, orderedGroups.length, partitions.size());
+        CompletableFuture<?>[] work = new CompletableFuture<?>[output.writerCount()];
+        for (int index = 0; index < work.length; index++) {
+            ResultFrameBuilder writer = output.writer(index);
+            int start = output.startRow(index), end = output.endRow(index);
+            work[index] = CompletableFuture.runAsync(QueryExecutionScope.propagate(() -> {
+                for (int row = start; row < end; row++) {
+                    if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+                    long entry = orderedGroups[row];
+                    appender.append(writer, partitionOf(entry), groupOf(entry));
+                }
+            }), partitionExecutor);
+        }
+        awaitCompletion(CompletableFuture.allOf(work));
+        return output.build();
     }
 
     private ResultFrame buildAveragedFrame(long[] orderedGroups, List<String> averageAliases) {
@@ -208,17 +234,15 @@ public final class TypedFrameAccumulator {
         }
 
         int[] outputColumns = IntStream.range(0, columnCount).filter(column -> !droppedColumns[column]).toArray();
-        ResultFrameBuilder result = ResultFrame.builder().expectedRows(orderedGroups.length);
+        ResultFrameBuilder descriptor = ResultFrame.builder();
         for (int column : outputColumns) {
             if (averageAliasesBySumColumn[column] == null) {
-                result.column(schema.columnNames().get(column), schema.columnTypeAt(column));
+                descriptor.column(schema.columnNames().get(column), schema.columnTypeAt(column));
             } else {
-                result.column(averageAliasesBySumColumn[column], averageResultTypes[column]);
+                descriptor.column(averageAliasesBySumColumn[column], averageResultTypes[column]);
             }
         }
-        for (long entry : orderedGroups) {
-            TypedAggregationGroups groups = partitionOf(entry);
-            int group = groupOf(entry);
+        return emitFrame(descriptor.build(), orderedGroups, (result, groups, group) -> {
             for (int column : outputColumns) {
                 if (averageAliasesBySumColumn[column] == null) {
                     appendColumn(result, groups, group, column);
@@ -227,8 +251,7 @@ public final class TypedFrameAccumulator {
                             averageResultTypes[column], averageInputTypes[column]);
                 }
             }
-        }
-        return result.build();
+        });
     }
 
     /** {@code typeof(x)} of the first merged group that has one, as {@code SparkAverage} reads it. */
@@ -272,7 +295,85 @@ public final class TypedFrameAccumulator {
     }
 
     private long[] mergeSortedPartitions(List<int[]> sortedPartitions) {
-        long[] merged = new long[sortedPartitions.stream().mapToInt(groupIds -> groupIds.length).sum()];
+        int[] bounds = new int[sortedPartitions.size() + 1];
+        for (int partition = 0; partition < sortedPartitions.size(); partition++) {
+            bounds[partition + 1] = Math.addExact(bounds[partition], sortedPartitions.get(partition).length);
+        }
+        if (bounds[bounds.length - 1] < 65_536) return mergeSmallPartitions(sortedPartitions, bounds[bounds.length - 1]);
+        long[] source = new long[bounds[bounds.length - 1]];
+        for (int partition = 0; partition < sortedPartitions.size(); partition++) {
+            int[] ids = sortedPartitions.get(partition);
+            for (int row = 0; row < ids.length; row++) {
+                source[bounds[partition] + row] = (long) partition << Integer.SIZE | ids[row];
+            }
+        }
+        long[] target = new long[source.length];
+        // Every level has disjoint output ranges. Co-ranks split even the final two-way merge,
+        // preventing one serial final merge from limiting the speedup at high worker counts.
+        for (long width = 1; width < sortedPartitions.size(); width *= 2) {
+            long[] input = source, output = target;
+            List<CompletableFuture<Void>> work = new ArrayList<>();
+            for (long first = 0; first < sortedPartitions.size(); first += width * 2) {
+                int start = bounds[(int) first];
+                int middle = bounds[(int) Math.min(first + width, sortedPartitions.size())];
+                int end = bounds[(int) Math.min(first + width * 2, sortedPartitions.size())];
+                int length = end - start;
+                if (length == 0) continue;
+                int chunks = Math.max(1, (int) Math.min(partitions.size(),
+                        ((long) length * partitions.size() + source.length - 1) / source.length));
+                for (int chunk = 0; chunk < chunks; chunk++) {
+                    int from = (int) ((long) length * chunk / chunks);
+                    int to = (int) ((long) length * (chunk + 1) / chunks);
+                    work.add(CompletableFuture.runAsync(QueryExecutionScope.propagate(
+                            () -> mergeRange(input, output, start, middle, end, from, to)), partitionExecutor));
+                }
+            }
+            awaitCompletion(CompletableFuture.allOf(work.toArray(CompletableFuture[]::new)));
+            source = target;
+            target = input;
+        }
+        return source;
+    }
+
+    /** The left-run contribution to the first k items of a stable two-way merge. */
+    private int coRank(long[] input, int start, int middle, int end, int k) {
+        int leftLength = middle - start, rightLength = end - middle;
+        int low = Math.max(0, k - rightLength), high = Math.min(k, leftLength);
+        while (low <= high) {
+            int left = (low + high) >>> 1;
+            int right = k - left;
+            if (left > 0 && right < rightLength
+                    && compareEntries(input[start + left - 1], input[middle + right]) > 0) {
+                high = left - 1;
+            } else if (right > 0 && left < leftLength
+                    && compareEntries(input[middle + right - 1], input[start + left]) >= 0) {
+                low = left + 1;
+            } else {
+                return left;
+            }
+        }
+        throw new IllegalStateException("sorted group runs have no merge co-rank");
+    }
+
+    private void mergeRange(long[] input, long[] output, int start, int middle, int end, int from, int to) {
+        QueryCancellation.requireCurrentActive();
+        int firstLeft = coRank(input, start, middle, end, from);
+        int lastLeft = coRank(input, start, middle, end, to);
+        int left = start + firstLeft, leftEnd = start + lastLeft;
+        int right = middle + from - firstLeft, rightEnd = middle + to - lastLeft;
+        for (int row = start + from; row < start + to; row++) {
+            if ((row & 1023) == 0) QueryCancellation.requireCurrentActive();
+            output[row] = right == rightEnd || (left < leftEnd && compareEntries(input[left], input[right]) <= 0)
+                    ? input[left++] : input[right++];
+        }
+    }
+
+    private int compareEntries(long left, long right) {
+        return partitionOf(left).compareWithGroupOf(groupOf(left), partitionOf(right), groupOf(right), dimensions.size());
+    }
+
+    private long[] mergeSmallPartitions(List<int[]> sortedPartitions, int groupCount) {
+        long[] merged = new long[groupCount];
         int[] cursors = new int[sortedPartitions.size()];
         for (int output = 0; output < merged.length; output++) {
             int nextPartition = NOT_PRESENT;

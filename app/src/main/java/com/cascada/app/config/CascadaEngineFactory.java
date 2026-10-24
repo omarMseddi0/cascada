@@ -149,7 +149,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
         return settings.cacheBackend() == CacheBackend.MEMORY
                 ? new InMemoryBlobCacheBackendAdapter(serializer)
                 : new ValkeyCacheBackendAdapter(settings.redisUri(), serializer, decodeTasks,
-                        Math.min(2, mergeTasks.getCorePoolSize()), 64L * 1024 * 1024, settings.fetchChunkKeys());
+                        Math.min(2, mergeTasks.getCorePoolSize()), 64L * 1024 * 1024);
     }
 
     /**

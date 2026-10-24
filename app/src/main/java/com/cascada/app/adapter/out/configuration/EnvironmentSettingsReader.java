@@ -40,8 +40,7 @@ public final class EnvironmentSettingsReader {
                 setting("CASCADA_MAIN_TABLE_PATH", SettingValues.jsonText(engine, "mainTablePath", defaults.mainTablePath())),
                 localSpark,
                 intSetting("CASCADA_WARMING_TOP_N", SettingValues.jsonInt(warming, "topNQueries", defaults.warmingTopNQueries())),
-                CacheBackend.parse(setting("CASCADA_CACHE_BACKEND", SettingValues.jsonText(cache, "backend", localSpark ? "memory" : "valkey"))),
-                SettingValues.jsonInt(cache, "fetchChunkKeys", defaults.fetchChunkKeys()));
+                CacheBackend.parse(setting("CASCADA_CACHE_BACKEND", SettingValues.jsonText(cache, "backend", localSpark ? "memory" : "valkey"))));
     }
 
     private String setting(String name, String fallback) {

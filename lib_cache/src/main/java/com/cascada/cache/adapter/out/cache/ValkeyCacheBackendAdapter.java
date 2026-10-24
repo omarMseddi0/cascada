@@ -69,10 +69,9 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     private final Duration commandTimeout;
     private final Executor decodeExecutor;
     private final OrderedFrameDecodePipeline decodePipeline;
-    private final int fetchChunkSize;
 
     public ValkeyCacheBackendAdapter(String redisUniformResourceIdentifier, CacheValueSerializerPort serializer) {
-        this(redisUniformResourceIdentifier, serializer, Runnable::run, 1, Long.MAX_VALUE, MGET_CHUNK_SIZE);
+        this(redisUniformResourceIdentifier, serializer, Runnable::run, 1, Long.MAX_VALUE);
     }
 
     /**
@@ -80,24 +79,12 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
      * is borrowed and remains owned by its caller. Use a bounded platform-thread executor; this adapter
      * limits each visit by both decoded-frame count and the envelope's estimated IPC byte size. The byte
      * estimate does not bound heap expansion for strings, decimals, Arrow vectors, or {@link ResultFrame}.
-     * Fetch batching stays compatible with the legacy constructor; use the explicit fetch-size overload
-     * to reduce compressed-reply retention for large buckets. Small chunks trade network latency for memory.
      */
     public ValkeyCacheBackendAdapter(String redisUniformResourceIdentifier, CacheValueSerializerPort serializer,
                                      Executor decodeExecutor, int maximumInflightDecodedFrames,
                                      long maximumInflightDecodedIpcBytes) {
-        this(redisUniformResourceIdentifier, serializer, decodeExecutor, maximumInflightDecodedFrames,
-                maximumInflightDecodedIpcBytes, MGET_CHUNK_SIZE);
-    }
-
-    /** Explicit fetch batching permits latency/memory tuning without changing cached data or delivery order. */
-    public ValkeyCacheBackendAdapter(String redisUniformResourceIdentifier, CacheValueSerializerPort serializer,
-                                      Executor decodeExecutor, int maximumInflightDecodedFrames,
-                                      long maximumInflightDecodedIpcBytes, int fetchChunkSize) {
         java.util.Objects.requireNonNull(serializer, "serializer");
         java.util.Objects.requireNonNull(decodeExecutor, "decodeExecutor");
-        if (fetchChunkSize < 1 || fetchChunkSize > MGET_CHUNK_SIZE)
-            throw new IllegalArgumentException("fetchChunkSize must be between 1 and " + MGET_CHUNK_SIZE);
         if (maximumInflightDecodedFrames < 1) {
             throw new IllegalArgumentException("maximumInflightDecodedFrames must be positive");
         }
@@ -121,7 +108,6 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         this.serializer = java.util.Objects.requireNonNull(serializer, "serializer");
         this.commandTimeout = connection.getTimeout();
         this.decodeExecutor = decodeExecutor;
-        this.fetchChunkSize = fetchChunkSize;
         this.decodePipeline = new OrderedFrameDecodePipeline(decodeExecutor,
                 maximumInflightDecodedFrames, maximumInflightDecodedIpcBytes);
     }
@@ -132,32 +118,23 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
      */
     ValkeyCacheBackendAdapter(StatefulRedisConnection<byte[], byte[]> connection,
                               CacheValueSerializerPort serializer) {
-        this(connection, serializer, COMMAND_TIMEOUT, Runnable::run, 1, Long.MAX_VALUE, MGET_CHUNK_SIZE);
+        this(connection, serializer, COMMAND_TIMEOUT, Runnable::run, 1, Long.MAX_VALUE);
     }
 
     ValkeyCacheBackendAdapter(StatefulRedisConnection<byte[], byte[]> connection,
                               CacheValueSerializerPort serializer, Duration commandTimeout) {
-        this(connection, serializer, commandTimeout, Runnable::run, 1, Long.MAX_VALUE, MGET_CHUNK_SIZE);
+        this(connection, serializer, commandTimeout, Runnable::run, 1, Long.MAX_VALUE);
     }
 
     ValkeyCacheBackendAdapter(StatefulRedisConnection<byte[], byte[]> connection,
                               CacheValueSerializerPort serializer, Duration commandTimeout,
                               Executor decodeExecutor, int maximumInflightDecodedFrames,
                               long maximumInflightDecodedIpcBytes) {
-        this(connection, serializer, commandTimeout, decodeExecutor, maximumInflightDecodedFrames,
-                maximumInflightDecodedIpcBytes, MGET_CHUNK_SIZE);
-    }
-
-    ValkeyCacheBackendAdapter(StatefulRedisConnection<byte[], byte[]> connection,
-                                      CacheValueSerializerPort serializer, Duration commandTimeout,
-                                      Executor decodeExecutor, int maximumInflightDecodedFrames,
-                                      long maximumInflightDecodedIpcBytes, int fetchChunkSize) {
         this.redisClient = null;
         this.connection = java.util.Objects.requireNonNull(connection, "connection");
         this.serializer = java.util.Objects.requireNonNull(serializer, "serializer");
         this.commandTimeout = java.util.Objects.requireNonNull(commandTimeout, "commandTimeout");
         this.decodeExecutor = java.util.Objects.requireNonNull(decodeExecutor, "decodeExecutor");
-        this.fetchChunkSize = fetchChunkSize;
         this.decodePipeline = new OrderedFrameDecodePipeline(decodeExecutor,
                 maximumInflightDecodedFrames, maximumInflightDecodedIpcBytes);
     }
@@ -227,7 +204,7 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
                         synchronized (pendingLock) {
                             QueryCancellation.requireCurrentActive();
                             if (pending.size() >= MAX_MGET_IN_FLIGHT) break;
-                            int chunkSize = Math.min(fetchChunkSize, keys.size() - nextStart);
+                            int chunkSize = Math.min(MGET_CHUNK_SIZE, keys.size() - nextStart);
                             byte[][] chunkKeys = new byte[chunkSize][];
                             for (int index = 0; index < chunkSize; index++) {
                                 chunkKeys[index] = toBytes(keys.get(nextStart + index));

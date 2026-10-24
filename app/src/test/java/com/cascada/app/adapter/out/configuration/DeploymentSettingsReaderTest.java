@@ -20,7 +20,7 @@ class DeploymentSettingsReaderTest {
         Files.writeString(file, """
                 {"engine":{"runMode":"cluster","mainTableName":"events","mainTablePath":"/lake/events"},
                  "cache":{"backend":"valkey","redisUri":"redis://cache:6379","bucketSeconds":3600,
-                          "fixedStepSeconds":60,"timeColumnName":"event_time","mergeWorkers":8,"fetchChunkKeys":16},
+                          "fixedStepSeconds":60,"timeColumnName":"event_time","mergeWorkers":8},
                  "server":{"httpPort":8100,"grpcPort":9100},
                  "warming":{"enabled":false,"topNQueries":12},
                  "spark":{"common":{"spark.executor.memory":"6g"},"jvm":{"spark.executor.cores":"4"}}}
@@ -41,7 +41,6 @@ class DeploymentSettingsReaderTest {
         assertThat(settings.engine().cacheExecution().fixedStepSeconds()).isEqualTo(60);
         assertThat(settings.engine().cacheExecution().timeColumnName()).isEqualTo("event_time");
         assertThat(settings.engine().cacheExecution().mergeWorkerCount()).isEqualTo(8);
-        assertThat(settings.engine().fetchChunkKeys()).isEqualTo(16);
         assertThat(settings.engine().warmingTopNQueries()).isEqualTo(12);
         assertThat(settings.application().server().httpPort()).isEqualTo(8100);
         assertThat(settings.application().warming().enabled()).isFalse();
@@ -54,11 +53,10 @@ class DeploymentSettingsReaderTest {
     @Test
     void existingEnvironmentOverridesRemainExplicitAndCompatible() throws Exception {
         Path file = directory.resolve("override.json");
-        Files.writeString(file, "{\"cache\":{\"mergeWorkers\":8,\"fetchChunkKeys\":2},\"server\":{\"httpPort\":8100}}");
+        Files.writeString(file, "{\"cache\":{\"mergeWorkers\":8},\"server\":{\"httpPort\":8100}}");
         var settings = new DeploymentSettingsReader().read(Map.of("CASCADA_CONFIG_PATH", file.toString(),
                 "CASCADA_MERGE_WORKERS", "12", "CASCADA_HTTP_PORT", "8200")::get);
         assertThat(settings.engine().cacheExecution().mergeWorkerCount()).isEqualTo(12);
-        assertThat(settings.engine().fetchChunkKeys()).isEqualTo(2);
         assertThat(settings.application().server().httpPort()).isEqualTo(8200);
     }
 
@@ -69,7 +67,6 @@ class DeploymentSettingsReaderTest {
         var settings = new DeploymentSettingsReader().read(Map.of("SPARK_CONFIG_PATH", spark.toString())::get);
         assertThat(settings.sparkProperties()).containsExactlyEntriesOf(Map.of("spark.executor.memory", "5g"));
         assertThat(settings.engine()).isEqualTo(EngineSettings.localDefaults());
-        assertThat(settings.engine().fetchChunkKeys()).isEqualTo(128);
     }
 
     @Test
@@ -77,8 +74,7 @@ class DeploymentSettingsReaderTest {
         Path file = directory.resolve("bad.json");
         for (String content : java.util.List.of("{\"cache\":false}",
                 "{\"cache\":{\"mergeWorkers\":0}}", "{\"cache\":{\"mergeWorkers\":\"eight\"}}",
-                "{\"cache\":{\"fetchChunkKeys\":0}}", "{\"cache\":{\"fetchChunkKeys\":129}}",
-                "{\"cache\":{\"fetchChunkKeys\":1.5}}", "{\"cache\":{\"fixedStepSeconds\":4294967297}}")) {
+                "{\"cache\":{\"fixedStepSeconds\":4294967297}}")) {
             Files.writeString(file, content);
             assertThatThrownBy(() -> new DeploymentSettingsReader().read(Map.of("CASCADA_CONFIG_PATH", file.toString())::get))
                     .as(content).isInstanceOf(ConfigurationException.class);

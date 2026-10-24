@@ -11,9 +11,7 @@ public record EngineSettings(CacheExecutionConfiguration cacheExecution,
                              String mainTablePath,
                              boolean useLocalSpark,
                              int warmingTopNQueries,
-                             CacheBackend cacheBackend, int fetchChunkKeys) {
-
-    public static final int DEFAULT_FETCH_CHUNK_KEYS = 128;
+                             CacheBackend cacheBackend) {
 
     public EngineSettings {
         Objects.requireNonNull(cacheExecution, "cacheExecution");
@@ -21,17 +19,9 @@ public record EngineSettings(CacheExecutionConfiguration cacheExecution,
         Objects.requireNonNull(mainTableName, "mainTableName");
         Objects.requireNonNull(mainTablePath, "mainTablePath");
         Objects.requireNonNull(cacheBackend, "cacheBackend");
-        if (fetchChunkKeys < 1 || fetchChunkKeys > 128)
-            throw new IllegalArgumentException("fetchChunkKeys must be between 1 and 128");
         if (warmingTopNQueries < 0) {
             throw new IllegalArgumentException("warmingTopNQueries must be >= 0, but was: " + warmingTopNQueries);
         }
-    }
-
-    public EngineSettings(CacheExecutionConfiguration cacheExecution, String redisUri, String mainTableName,
-                          String mainTablePath, boolean useLocalSpark, int warmingTopNQueries, CacheBackend cacheBackend) {
-        this(cacheExecution, redisUri, mainTableName, mainTablePath, useLocalSpark, warmingTopNQueries,
-                cacheBackend, DEFAULT_FETCH_CHUNK_KEYS);
     }
 
     /** Preserves the original default backend selection for existing callers. */

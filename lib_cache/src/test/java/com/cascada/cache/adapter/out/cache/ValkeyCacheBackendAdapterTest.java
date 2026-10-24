@@ -384,26 +384,7 @@ class ValkeyCacheBackendAdapterTest {
     }
 
 
-    @Test
-    void parallelPathBoundsCompressedRepliesToTwoKeysPerChunk() {
-        List<Integer> sizes = new ArrayList<>();
-        RedisAsyncCommands<byte[], byte[]> async = proxy(RedisAsyncCommands.class, (proxy, method, args) -> {
-            if (!method.getName().equals("mget")) throw new AssertionError(method.getName());
-            byte[][] keys = (byte[][]) args[0];
-            sizes.add(keys.length);
-            var values = Arrays.stream(keys).map(key -> KeyValue.just(key, key)).toList();
-            return redisFuture(CompletableFuture.completedFuture(values));
-        });
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try (ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(connection(async, unused -> null),
-                serializer(), Duration.ofSeconds(5), pool, 2, 1024, 2)) {
-            List<String> keys = java.util.stream.IntStream.range(0, 9).mapToObj(i -> "k" + i).toList();
-            var frames = adapter.multiGet(keys);
-            assertEquals(List.of(2, 2, 2, 2, 1), sizes);
-            assertEquals(9, frames.size());
-            for (int i = 0; i < frames.size(); i++) assertEquals(i, frames.get(i).orElseThrow().longAt(0, 0));
-        } finally { pool.shutdownNow(); }
-    }
+
 
     private static void completeWithMgetResults(
             CompletableFuture<List<KeyValue<byte[], byte[]>>> response, byte[][] request, String missingKey) {

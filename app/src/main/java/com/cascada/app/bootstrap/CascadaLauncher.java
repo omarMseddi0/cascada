@@ -1,8 +1,6 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.app.adapter.out.configuration.ApplicationSettingsReader;
-import com.cascada.app.adapter.out.configuration.EnvironmentSettingsReader;
-import com.cascada.app.adapter.out.configuration.SparkConfigurationFileReader;
+import com.cascada.app.adapter.out.configuration.DeploymentSettingsReader;
 import com.cascada.app.model.config.EngineSettings;
 import com.cascada.spark.adapter.out.environment.SystemEnvironmentAdapter;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
@@ -20,11 +18,12 @@ public final class CascadaLauncher {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 0) throw new IllegalArgumentException("Cascada is an API server; configure it through environment variables");
+        if (args.length != 0) throw new IllegalArgumentException("Cascada is an API server; configure it through CASCADA_CONFIG_PATH");
         var environment = SystemEnvironmentAdapter.INSTANCE;
-        EngineSettings settings = new EnvironmentSettingsReader(environment::get).read();
-        var applicationSettings = new ApplicationSettingsReader().read(environment::get);
-        SparkSessionConfig sparkConfiguration = sparkConfiguration(settings);
+        var deployment = new DeploymentSettingsReader().read(environment::get);
+        EngineSettings settings = deployment.engine();
+        var applicationSettings = deployment.application();
+        SparkSessionConfig sparkConfiguration = sparkConfiguration(settings, deployment.sparkProperties());
         try (CascadaRuntime runtime = new CascadaRuntime(settings,
                 () -> new SparkDeltaQueryExecutor(sparkConfiguration), applicationSettings, null)) {
             Thread shutdown = new Thread(() -> {
@@ -45,13 +44,12 @@ public final class CascadaLauncher {
 
 
     /** Builds Spark with deployment properties followed by explicit environment overrides. */
-    private static SparkSessionConfig sparkConfiguration(EngineSettings settings) {
+    private static SparkSessionConfig sparkConfiguration(EngineSettings settings, java.util.Map<String, String> properties) {
         SparkSessionConfig config = (settings.useLocalSpark()
                 ? SparkSessionConfigBuilder.forLocal()
                 : SparkSessionConfigBuilder.forKubernetes())
                 .appName("CascadaDeltaQueryExecutor")
-                .withGroup(new SparkConfigurationFileReader().read(
-                        SystemEnvironmentAdapter.INSTANCE.get("SPARK_CONFIG_PATH")))
+                .withGroup(properties)
                 // Reading the OS is opt-in and happens only here, via the adapter.
                 .withEnvironment(SystemEnvironmentAdapter.INSTANCE)
                 .withEnvOverride("spark.driver.maxResultSize", "SPARK_DRIVER_MAX_RESULT_SIZE")

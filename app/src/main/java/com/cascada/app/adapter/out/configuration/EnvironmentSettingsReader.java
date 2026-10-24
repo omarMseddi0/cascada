@@ -6,7 +6,7 @@ import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import java.util.Objects;
 import java.util.function.Function;
 
-/** Parses app deployment settings from an injected environment lookup. */
+/** Reads the central engine/cache JSON with explicit, injected environment overrides. */
 public final class EnvironmentSettingsReader {
 
     private final Function<String, String> environment;
@@ -17,23 +17,31 @@ public final class EnvironmentSettingsReader {
 
     /** Read every setting, falling back to the local defaults for anything unset. */
     public EngineSettings read() {
-        EngineSettings defaults = EngineSettings.localDefaults();
-        CacheExecutionConfiguration cacheExecution = new CacheExecutionConfiguration(
-                longSetting("CASCADA_BUCKET_SECONDS", defaults.cacheExecution().bucketSeconds()),
-                intSetting("CASCADA_FIXED_STEP_SECONDS", defaults.cacheExecution().fixedStepSeconds()),
-                setting("CASCADA_TIME_COLUMN", defaults.cacheExecution().timeColumnName()),
-                positiveIntSetting("CASCADA_MERGE_WORKERS", defaults.cacheExecution().mergeWorkerCount()));
+        return read(SettingValues.applicationConfiguration(environment));
+    }
 
-        boolean localSpark = localSparkMode(setting("CASCADA_RUN_MODE", "local"));
+    EngineSettings read(com.fasterxml.jackson.databind.JsonNode configuration) {
+        EngineSettings defaults = EngineSettings.localDefaults();
+        var cache = SettingValues.section(configuration, "cache");
+        var engine = SettingValues.section(configuration, "engine");
+        var warming = SettingValues.section(configuration, "warming");
+        CacheExecutionConfiguration cacheExecution = new CacheExecutionConfiguration(
+                longSetting("CASCADA_BUCKET_SECONDS", SettingValues.jsonLong(cache, "bucketSeconds", defaults.cacheExecution().bucketSeconds())),
+                intSetting("CASCADA_FIXED_STEP_SECONDS", SettingValues.jsonInt(cache, "fixedStepSeconds", defaults.cacheExecution().fixedStepSeconds())),
+                setting("CASCADA_TIME_COLUMN", SettingValues.jsonText(cache, "timeColumnName", defaults.cacheExecution().timeColumnName())),
+                positiveIntSetting("CASCADA_MERGE_WORKERS", SettingValues.jsonInt(cache, "mergeWorkers", defaults.cacheExecution().mergeWorkerCount())));
+
+        boolean localSpark = localSparkMode(setting("CASCADA_RUN_MODE", SettingValues.jsonText(engine, "runMode", "local")));
 
         return new EngineSettings(
                 cacheExecution,
-                setting("REDIS_URL", defaults.redisUri()),
-                setting("CASCADA_MAIN_TABLE_NAME", defaults.mainTableName()),
-                setting("CASCADA_MAIN_TABLE_PATH", defaults.mainTablePath()),
+                setting("REDIS_URL", SettingValues.jsonText(cache, "redisUri", defaults.redisUri())),
+                setting("CASCADA_MAIN_TABLE_NAME", SettingValues.jsonText(engine, "mainTableName", defaults.mainTableName())),
+                setting("CASCADA_MAIN_TABLE_PATH", SettingValues.jsonText(engine, "mainTablePath", defaults.mainTablePath())),
                 localSpark,
-                intSetting("CASCADA_WARMING_TOP_N", defaults.warmingTopNQueries()),
-                CacheBackend.parse(setting("CASCADA_CACHE_BACKEND", localSpark ? "memory" : "valkey")));
+                intSetting("CASCADA_WARMING_TOP_N", SettingValues.jsonInt(warming, "topNQueries", defaults.warmingTopNQueries())),
+                CacheBackend.parse(setting("CASCADA_CACHE_BACKEND", SettingValues.jsonText(cache, "backend", localSpark ? "memory" : "valkey"))),
+                SettingValues.jsonInt(cache, "fetchChunkKeys", defaults.fetchChunkKeys()));
     }
 
     private String setting(String name, String fallback) {

@@ -8,9 +8,6 @@ import com.cascada.app.model.config.WarmingSettings;
 import com.cascada.app.exception.ConfigurationException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
@@ -22,12 +19,12 @@ import java.util.stream.StreamSupport;
 public final class ApplicationSettingsReader {
     private static final ObjectMapper JSON = SettingValues.JSON;
     public ApplicationSettings read(Function<String, String> environment) {
+        return read(environment, SettingValues.applicationConfiguration(environment));
+    }
+
+    ApplicationSettings read(Function<String, String> environment, JsonNode configuration) {
         ApplicationSettings defaults = ApplicationSettings.defaults();
-        String path = environment.apply("CASCADA_CONFIG_PATH");
         try {
-            JsonNode configuration = path == null || path.isBlank() ? JSON.createObjectNode()
-                    : JSON.readTree(Files.readString(Path.of(path)));
-            if (configuration == null || !configuration.isObject()) throw new IllegalArgumentException("Application configuration must be an object");
             JsonNode server = configuration.path("server");
             validateSection(server, "server");
             validateSection(configuration.path("warming"), "warming");
@@ -54,7 +51,7 @@ public final class ApplicationSettingsReader {
                     ? JSON.convertValue(configuration.get("tables"), JSON.getTypeFactory().constructCollectionType(List.class, TableSettings.class))
                     : List.of();
             return new ApplicationSettings(ports, warm, tables, safety);
-        } catch (IOException | IllegalArgumentException | java.time.DateTimeException failure) {
+        } catch (IllegalArgumentException | java.time.DateTimeException failure) {
             throw new ConfigurationException("Invalid application configuration", failure);
         }
     }

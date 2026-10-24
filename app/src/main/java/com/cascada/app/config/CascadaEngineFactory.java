@@ -135,17 +135,6 @@ public final class CascadaEngineFactory implements AutoCloseable {
         if (settings.cacheBackend() != CacheBackend.MEMORY) decodeTasks.prestartAllCoreThreads();
     }
 
-    private static int maximumFetchChunkKeys() {
-        String value = System.getProperty("cascada.cache.fetchChunkKeys", "128");
-        try {
-            int keys = Integer.parseInt(value);
-            if (keys >= 1 && keys <= 128) return keys;
-        } catch (NumberFormatException invalid) {
-            throw new IllegalArgumentException("cascada.cache.fetchChunkKeys must be between 1 and 128", invalid);
-        }
-        throw new IllegalArgumentException("cascada.cache.fetchChunkKeys must be between 1 and 128");
-    }
-
     // ---------------------------------------------------------------------------------------------
     // 1. Outbound adapters — the only place a concrete adapter class is named.
     // ---------------------------------------------------------------------------------------------
@@ -160,7 +149,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
         return settings.cacheBackend() == CacheBackend.MEMORY
                 ? new InMemoryBlobCacheBackendAdapter(serializer)
                 : new ValkeyCacheBackendAdapter(settings.redisUri(), serializer, decodeTasks,
-                        Math.min(2, mergeTasks.getCorePoolSize()), 64L * 1024 * 1024, maximumFetchChunkKeys());
+                        Math.min(2, mergeTasks.getCorePoolSize()), 64L * 1024 * 1024, settings.fetchChunkKeys());
     }
 
     /**

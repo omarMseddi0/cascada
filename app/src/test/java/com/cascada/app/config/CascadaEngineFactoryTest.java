@@ -137,13 +137,64 @@ class CascadaEngineFactoryTest {
         var ioField = CascadaEngineFactory.class.getDeclaredField("cacheTasks");
         ioField.setAccessible(true);
         var io = (java.util.concurrent.ExecutorService) ioField.get(factory);
+        var decodeField = CascadaEngineFactory.class.getDeclaredField("decodeTasks");
+        decodeField.setAccessible(true);
+        var decode = (java.util.concurrent.ThreadPoolExecutor) decodeField.get(factory);
+        assertThat(decode).isNotSameAs(cpu);
+        assertThat(decode.getCorePoolSize()).isEqualTo(Math.max(1, Math.min(4, cpu.getCorePoolSize())));
+        assertThat(decode.submit(() -> Thread.currentThread().isVirtual()).get()).isFalse();
         assertThat(cpu.submit(() -> Thread.currentThread().isVirtual()).get()).isFalse();
         assertThat(cpu.submit(() -> Thread.currentThread().getName()).get()).startsWith("cache-merge-");
         assertThat(io.submit(() -> Thread.currentThread().isVirtual()).get()).isTrue();
         assertThat(cpu.getMaximumPoolSize()).isLessThanOrEqualTo(Runtime.getRuntime().availableProcessors());
         factory.close();
         assertThat(cpu.isTerminated()).isTrue();
+        assertThat(decode.isTerminated()).isTrue();
         assertThat(io.isTerminated()).isTrue();
     }
 
+
+    @Test
+    void sharesAnActiveQueryBudgetWithTheExecutionEngine() throws Exception {
+        var budgetField = CascadaEngineFactory.class.getDeclaredField("queryAdmissionBudget");
+        budgetField.setAccessible(true);
+        var budget = (com.cascada.cache.application.execution.QueryAdmissionBudget) budgetField.get(factory);
+        var cpuField = CascadaEngineFactory.class.getDeclaredField("mergeTasks");
+        cpuField.setAccessible(true);
+        var cpu = (java.util.concurrent.ThreadPoolExecutor) cpuField.get(factory);
+        assertThat(budget.maximumConcurrentQueries()).isEqualTo(Math.max(1, Math.min(4, cpu.getCorePoolSize())));
+        var engineField = com.cascada.cache.application.service.ExecuteCachedQueryService.class
+                .getDeclaredField("cacheExecutionEngine");
+        engineField.setAccessible(true);
+        Object engine = engineField.get(factory.executeCachedQueryUseCase());
+        var engineBudget = com.cascada.cache.application.service.CacheExecutionEngine.class
+                .getDeclaredField("queryAdmissionBudget");
+        engineBudget.setAccessible(true);
+        assertThat(engineBudget.get(engine)).isSameAs(budget);
+    }
+
+    @Test
+    void explicitAdmissionLimitIsIndependentOfTheMergeWorkerCount() throws Exception {
+        try (CascadaEngineFactory configured = new CascadaEngineFactory(EngineSettings.localDefaults(), executor,
+                com.cascada.app.model.config.ApplicationSettings.defaults(), 2)) {
+            var field = CascadaEngineFactory.class.getDeclaredField("queryAdmissionBudget");
+            field.setAccessible(true);
+            assertThat(((com.cascada.cache.application.execution.QueryAdmissionBudget) field.get(configured))
+                    .maximumConcurrentQueries()).isEqualTo(2);
+        }
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> new CascadaEngineFactory(EngineSettings.localDefaults(), executor,
+                        com.cascada.app.model.config.ApplicationSettings.defaults(), 0));
+    }
+
+    @Test
+    void remoteCacheAdmissionDefaultAccountsForItsSeparateDecodeStage() throws Exception {
+        EngineSettings remote = new EngineSettings(
+                new com.cascada.cache.application.model.config.CacheExecutionConfiguration(86400, 300, "ts", 4),
+                "redis://unused:6379", "traffic", "/tmp/traffic", false, 10);
+        var defaults = CascadaEngineFactory.class.getDeclaredMethod("defaultMaximumConcurrentQueries", EngineSettings.class);
+        defaults.setAccessible(true);
+        int workers = Math.min(4, Runtime.getRuntime().availableProcessors());
+        assertThat((Integer) defaults.invoke(null, remote)).isEqualTo(Math.min(8, workers * 2));
+    }
 }

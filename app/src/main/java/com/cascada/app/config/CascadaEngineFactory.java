@@ -68,6 +68,8 @@ public final class CascadaEngineFactory implements AutoCloseable {
     private final CacheAdministrationService administrationService;
     private final java.util.concurrent.ExecutorService cacheTasks;
     private final java.util.concurrent.ThreadPoolExecutor mergeTasks;
+    private final java.util.concurrent.ThreadPoolExecutor decodeTasks;
+    private final com.cascada.cache.application.execution.QueryAdmissionBudget queryAdmissionBudget;
 
     /**
      * @param queryExecutor the execution tier. Passed in rather than built here because it is the one
@@ -78,17 +80,21 @@ public final class CascadaEngineFactory implements AutoCloseable {
         this(settings, queryExecutor, ApplicationSettings.defaults());
     }
 
+    /** Admission is a resource setting; -Dcascada.cache.maxConcurrentQueries overrides its default. */
     public CascadaEngineFactory(EngineSettings settings, QueryExecutorPort queryExecutor, ApplicationSettings applicationSettings) {
+        this(settings, queryExecutor, applicationSettings, defaultMaximumConcurrentQueries(settings));
+    }
+
+    public CascadaEngineFactory(EngineSettings settings, QueryExecutorPort queryExecutor,
+                                ApplicationSettings applicationSettings, int maximumConcurrentQueries) {
+        if (maximumConcurrentQueries <= 0)
+            throw new IllegalArgumentException("maximumConcurrentQueries must be positive");
         this.applicationSettings = Objects.requireNonNull(applicationSettings);
         this.settings = Objects.requireNonNull(settings, "settings");
         this.queryExecutor = Objects.requireNonNull(queryExecutor, "queryExecutor");
         // Validate configuration before opening the backend's network resources.
         CacheConfiguration validatedConfiguration = cacheConfiguration();
         this.tableCatalog = tableCatalog();
-        this.cacheBackend = cacheBackend();
-        this.coverageIndex = coverageIndex();
-        this.popularityTracker = popularityTracker();
-        this.cubeCatalog = new CubeShapeCatalog();
         this.cacheTasks = java.util.concurrent.Executors.newThreadPerTaskExecutor(
                 Thread.ofVirtual().name("cache-gap-", 0).factory());
         int mergeThreads = Math.min(settings.cacheExecution().mergeWorkerCount(),
@@ -96,6 +102,31 @@ public final class CascadaEngineFactory implements AutoCloseable {
         this.mergeTasks = new java.util.concurrent.ThreadPoolExecutor(mergeThreads, mergeThreads, 0L,
                 TimeUnit.MILLISECONDS, new java.util.concurrent.LinkedBlockingQueue<>(),
                 Thread.ofPlatform().name("cache-merge-", 0).factory());
+        int decodeThreads = Math.max(1, Math.min(4, mergeThreads));
+        this.decodeTasks = new java.util.concurrent.ThreadPoolExecutor(decodeThreads, decodeThreads, 0L,
+                TimeUnit.MILLISECONDS, new java.util.concurrent.LinkedBlockingQueue<>(),
+                Thread.ofPlatform().name("cache-decode-", 0).factory());
+        // Keep query-local grouping state bounded while the admitted queries share CPU workers.
+        // This limits active queries, not their unknown data-dependent heap sizes.
+        this.queryAdmissionBudget = new com.cascada.cache.application.execution.QueryAdmissionBudget(
+                maximumConcurrentQueries);
+        CacheBackendPort openedBackend = null;
+        try {
+            openedBackend = cacheBackend();
+            this.cacheBackend = openedBackend;
+            this.coverageIndex = coverageIndex();
+            this.popularityTracker = popularityTracker();
+        } catch (RuntimeException | Error failure) {
+            cacheTasks.shutdownNow();
+            decodeTasks.shutdownNow();
+            mergeTasks.shutdownNow();
+            if (openedBackend instanceof AutoCloseable closeable) {
+                try { closeable.close(); }
+                catch (Exception cleanupFailure) { failure.addSuppressed(cleanupFailure); }
+            }
+            throw failure;
+        }
+        this.cubeCatalog = new CubeShapeCatalog();
         GapQueryRewriterPort gapQueryRewriter = gapQueryRewriter();
         WarmingSettings warming = applicationSettings.warming();
         this.warmingOrchestrator = new WarmingOrchestrator(cacheBackend, queryExecutor, gapQueryRewriter,
@@ -107,13 +138,45 @@ public final class CascadaEngineFactory implements AutoCloseable {
                 Clock.systemUTC(), validatedConfiguration);
         CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
                 gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks,
-                Clock.systemUTC(), mergeTasks);
+                Clock.systemUTC(), mergeTasks, queryAdmissionBudget);
         this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
                 validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor, applicationSettings.warming().enabled() ? warmingOrchestrator : null);
         this.logicalQueryUseCase = new ExecuteLogicalQueryService(translator(), canonicalizer(),
                 cachedQueryUseCase, queryExecutor);
         this.administrationService = new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
         mergeTasks.prestartAllCoreThreads();
+        if (settings.cacheBackend() != CacheBackend.MEMORY) decodeTasks.prestartAllCoreThreads();
+    }
+
+    private static int defaultMaximumConcurrentQueries(EngineSettings settings) {
+        Objects.requireNonNull(settings, "settings");
+        String override = System.getProperty("cascada.cache.maxConcurrentQueries");
+        if (override != null) {
+            try {
+                int value = Integer.parseInt(override);
+                if (value > 0) return value;
+            } catch (NumberFormatException invalid) {
+                throw new IllegalArgumentException("cascada.cache.maxConcurrentQueries must be a positive integer", invalid);
+            }
+            throw new IllegalArgumentException("cascada.cache.maxConcurrentQueries must be a positive integer");
+        }
+        int mergeThreads = Math.min(settings.cacheExecution().mergeWorkerCount(),
+                Runtime.getRuntime().availableProcessors());
+        if (settings.cacheBackend() == CacheBackend.MEMORY) return Math.max(1, Math.min(4, mergeThreads));
+        // A remote cache has separate bounded decode and merge stages; admit enough queries
+        // to overlap both, while keeping their data-dependent grouping state count bounded.
+        return Math.max(1, Math.min(8, mergeThreads + Math.min(4, mergeThreads)));
+    }
+
+    private static int maximumFetchChunkKeys() {
+        String value = System.getProperty("cascada.cache.fetchChunkKeys", "128");
+        try {
+            int keys = Integer.parseInt(value);
+            if (keys >= 1 && keys <= 128) return keys;
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException("cascada.cache.fetchChunkKeys must be between 1 and 128", invalid);
+        }
+        throw new IllegalArgumentException("cascada.cache.fetchChunkKeys must be between 1 and 128");
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -129,7 +192,8 @@ public final class CascadaEngineFactory implements AutoCloseable {
         ArrowResultFrameSerializer serializer = new ArrowResultFrameSerializer();
         return settings.cacheBackend() == CacheBackend.MEMORY
                 ? new InMemoryBlobCacheBackendAdapter(serializer)
-                : new ValkeyCacheBackendAdapter(settings.redisUri(), serializer);
+                : new ValkeyCacheBackendAdapter(settings.redisUri(), serializer, decodeTasks,
+                        Math.min(2, mergeTasks.getCorePoolSize()), 64L * 1024 * 1024, maximumFetchChunkKeys());
     }
 
     /**
@@ -275,6 +339,12 @@ public final class CascadaEngineFactory implements AutoCloseable {
             closeTasks(cacheTasks, "cache");
         } catch (RuntimeException failure) {
             shutdownFailure = failure;
+        }
+        try {
+            closeTasks(decodeTasks, "decode");
+        } catch (RuntimeException failure) {
+            if (shutdownFailure == null) shutdownFailure = failure;
+            else shutdownFailure.addSuppressed(failure);
         }
         try {
             closeTasks(mergeTasks, "merge");

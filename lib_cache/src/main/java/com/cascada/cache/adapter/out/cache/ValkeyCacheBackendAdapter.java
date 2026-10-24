@@ -1,6 +1,9 @@
 package com.cascada.cache.adapter.out.cache;
 
 import com.cascada.cache.adapter.out.cache.model.PendingMget;
+import com.cascada.cache.application.execution.QueryCancellation;
+import com.cascada.cache.application.execution.QueryExecutionScope;
+import com.cascada.cache.application.model.CancellationRegistration;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.admin.CacheScope;
@@ -9,7 +12,6 @@ import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyConstants;
 import com.cascada.cache.domain.model.time.TimeRange;
 import com.cascada.cache.domain.model.validation.ValidationBaseline;
-import com.cascada.cache.exception.CacheSerializationException;
 import io.lettuce.core.KeyScanCursor;
 import io.lettuce.core.KeyValue;
 import io.lettuce.core.RedisClient;
@@ -29,6 +31,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -64,8 +67,43 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     private final StatefulRedisConnection<byte[], byte[]> connection;
     private final CacheValueSerializerPort serializer;
     private final Duration commandTimeout;
+    private final Executor decodeExecutor;
+    private final OrderedFrameDecodePipeline decodePipeline;
+    private final int fetchChunkSize;
 
     public ValkeyCacheBackendAdapter(String redisUniformResourceIdentifier, CacheValueSerializerPort serializer) {
+        this(redisUniformResourceIdentifier, serializer, Runnable::run, 1, Long.MAX_VALUE, MGET_CHUNK_SIZE);
+    }
+
+    /**
+     * Creates a Valkey backend that decodes bucket replies on the supplied shared executor. The executor
+     * is borrowed and remains owned by its caller. Use a bounded platform-thread executor; this adapter
+     * limits each visit by both decoded-frame count and the envelope's estimated IPC byte size. The byte
+     * estimate does not bound heap expansion for strings, decimals, Arrow vectors, or {@link ResultFrame}.
+     * Fetch batching stays compatible with the legacy constructor; use the explicit fetch-size overload
+     * to reduce compressed-reply retention for large buckets. Small chunks trade network latency for memory.
+     */
+    public ValkeyCacheBackendAdapter(String redisUniformResourceIdentifier, CacheValueSerializerPort serializer,
+                                     Executor decodeExecutor, int maximumInflightDecodedFrames,
+                                     long maximumInflightDecodedIpcBytes) {
+        this(redisUniformResourceIdentifier, serializer, decodeExecutor, maximumInflightDecodedFrames,
+                maximumInflightDecodedIpcBytes, MGET_CHUNK_SIZE);
+    }
+
+    /** Explicit fetch batching permits latency/memory tuning without changing cached data or delivery order. */
+    public ValkeyCacheBackendAdapter(String redisUniformResourceIdentifier, CacheValueSerializerPort serializer,
+                                      Executor decodeExecutor, int maximumInflightDecodedFrames,
+                                      long maximumInflightDecodedIpcBytes, int fetchChunkSize) {
+        java.util.Objects.requireNonNull(serializer, "serializer");
+        java.util.Objects.requireNonNull(decodeExecutor, "decodeExecutor");
+        if (fetchChunkSize < 1 || fetchChunkSize > MGET_CHUNK_SIZE)
+            throw new IllegalArgumentException("fetchChunkSize must be between 1 and " + MGET_CHUNK_SIZE);
+        if (maximumInflightDecodedFrames < 1) {
+            throw new IllegalArgumentException("maximumInflightDecodedFrames must be positive");
+        }
+        if (maximumInflightDecodedIpcBytes < 1) {
+            throw new IllegalArgumentException("maximumInflightDecodedIpcBytes must be positive");
+        }
         RedisClient client = RedisClient.create(redisUniformResourceIdentifier);
         StatefulRedisConnection<byte[], byte[]> connected;
         try {
@@ -80,8 +118,12 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         }
         this.redisClient = client;
         this.connection = connected;
-        this.serializer = serializer;
-        this.commandTimeout = connected.getTimeout();
+        this.serializer = java.util.Objects.requireNonNull(serializer, "serializer");
+        this.commandTimeout = connection.getTimeout();
+        this.decodeExecutor = decodeExecutor;
+        this.fetchChunkSize = fetchChunkSize;
+        this.decodePipeline = new OrderedFrameDecodePipeline(decodeExecutor,
+                maximumInflightDecodedFrames, maximumInflightDecodedIpcBytes);
     }
 
     /**
@@ -90,15 +132,34 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
      */
     ValkeyCacheBackendAdapter(StatefulRedisConnection<byte[], byte[]> connection,
                               CacheValueSerializerPort serializer) {
-        this(connection, serializer, COMMAND_TIMEOUT);
+        this(connection, serializer, COMMAND_TIMEOUT, Runnable::run, 1, Long.MAX_VALUE, MGET_CHUNK_SIZE);
     }
 
     ValkeyCacheBackendAdapter(StatefulRedisConnection<byte[], byte[]> connection,
                               CacheValueSerializerPort serializer, Duration commandTimeout) {
+        this(connection, serializer, commandTimeout, Runnable::run, 1, Long.MAX_VALUE, MGET_CHUNK_SIZE);
+    }
+
+    ValkeyCacheBackendAdapter(StatefulRedisConnection<byte[], byte[]> connection,
+                              CacheValueSerializerPort serializer, Duration commandTimeout,
+                              Executor decodeExecutor, int maximumInflightDecodedFrames,
+                              long maximumInflightDecodedIpcBytes) {
+        this(connection, serializer, commandTimeout, decodeExecutor, maximumInflightDecodedFrames,
+                maximumInflightDecodedIpcBytes, MGET_CHUNK_SIZE);
+    }
+
+    ValkeyCacheBackendAdapter(StatefulRedisConnection<byte[], byte[]> connection,
+                                      CacheValueSerializerPort serializer, Duration commandTimeout,
+                                      Executor decodeExecutor, int maximumInflightDecodedFrames,
+                                      long maximumInflightDecodedIpcBytes, int fetchChunkSize) {
         this.redisClient = null;
-        this.connection = connection;
-        this.serializer = serializer;
-        this.commandTimeout = commandTimeout;
+        this.connection = java.util.Objects.requireNonNull(connection, "connection");
+        this.serializer = java.util.Objects.requireNonNull(serializer, "serializer");
+        this.commandTimeout = java.util.Objects.requireNonNull(commandTimeout, "commandTimeout");
+        this.decodeExecutor = java.util.Objects.requireNonNull(decodeExecutor, "decodeExecutor");
+        this.fetchChunkSize = fetchChunkSize;
+        this.decodePipeline = new OrderedFrameDecodePipeline(decodeExecutor,
+                maximumInflightDecodedFrames, maximumInflightDecodedIpcBytes);
     }
 
     @Override
@@ -145,57 +206,80 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         long started = monitor ? System.nanoTime() : 0L;
         long[] nanos = new long[2]; // reply wait, decode and consume
         Deque<PendingMget> pending = new ArrayDeque<>(MAX_MGET_IN_FLIGHT);
-
-        awaiting("bounded MGET", () -> cancelPending(pending), () -> {
-            int nextStart = 0;
-            while (nextStart < keys.size() || !pending.isEmpty()) {
-                while (nextStart < keys.size() && pending.size() < MAX_MGET_IN_FLIGHT) {
-                    int chunkSize = Math.min(MGET_CHUNK_SIZE, keys.size() - nextStart);
-                    byte[][] chunkKeys = new byte[chunkSize][];
-                    for (int index = 0; index < chunkSize; index++) {
-                        chunkKeys[index] = toBytes(keys.get(nextStart + index));
-                    }
-                    RedisFuture<List<KeyValue<byte[], byte[]>>> future = async.mget(chunkKeys);
-                    pending.addLast(new PendingMget(nextStart, chunkSize, future));
-                    nextStart += chunkSize;
-                }
-
-                PendingMget chunk = pending.peekFirst();
-                long waiting = monitor ? System.nanoTime() : 0L;
-                List<KeyValue<byte[], byte[]>> values = await(chunk.future());
-                long decoding = monitor ? System.nanoTime() : 0L;
-                if (monitor) nanos[0] += decoding - waiting;
-                if (values == null || values.size() != chunk.keyCount()) {
-                    throw new IllegalStateException("Valkey MGET returned an unexpected value count");
-                }
-                for (int index = 0; index < values.size(); index++) {
-                    KeyValue<byte[], byte[]> keyValue = values.get(index);
-                    visitor.accept(chunk.startIndex() + index, keyValue.hasValue()
-                            ? decodeOrEvict(keys.get(chunk.startIndex() + index), keyValue.getValue())
-                            : Optional.empty());
-                }
-                if (monitor) nanos[1] += System.nanoTime() - decoding;
-                pending.removeFirst();
+        Object pendingLock = new Object();
+        DecodeTaskRegistry decodeTasks = new DecodeTaskRegistry(decodeExecutor);
+        Runnable cancelVisit = () -> {
+            synchronized (pendingLock) {
+                cancelPending(pending);
             }
-            return null;
-        });
+            decodeTasks.cancel();
+        };
+        CancellationRegistration cancellationRegistration = QueryExecutionScope.current()
+                .map(cancellation -> cancellation.onCancel(cancelVisit)).orElse(null);
+
+        try {
+            QueryCancellation.requireCurrentActive();
+            awaiting("bounded MGET", cancelVisit, () -> {
+                int nextStart = 0;
+                while (nextStart < keys.size() || !pending.isEmpty()) {
+                    QueryCancellation.requireCurrentActive();
+                    while (nextStart < keys.size()) {
+                        synchronized (pendingLock) {
+                            QueryCancellation.requireCurrentActive();
+                            if (pending.size() >= MAX_MGET_IN_FLIGHT) break;
+                            int chunkSize = Math.min(fetchChunkSize, keys.size() - nextStart);
+                            byte[][] chunkKeys = new byte[chunkSize][];
+                            for (int index = 0; index < chunkSize; index++) {
+                                chunkKeys[index] = toBytes(keys.get(nextStart + index));
+                            }
+                            RedisFuture<List<KeyValue<byte[], byte[]>>> future = async.mget(chunkKeys);
+                            pending.addLast(new PendingMget(nextStart, chunkSize, future));
+                            // Cancellation can run reentrantly during command submission; never await
+                            // a future added after its listener had already inspected the queue.
+                            QueryCancellation.requireCurrentActive();
+                            nextStart += chunkSize;
+                        }
+                    }
+
+                    PendingMget chunk;
+                    synchronized (pendingLock) {
+                        chunk = pending.peekFirst();
+                    }
+                    long waiting = monitor ? System.nanoTime() : 0L;
+                    List<KeyValue<byte[], byte[]>> values = await(chunk.future());
+                    long decoding = monitor ? System.nanoTime() : 0L;
+                    if (monitor) nanos[0] += decoding - waiting;
+                    if (values == null || values.size() != chunk.keyCount()) {
+                        throw new IllegalStateException("Valkey MGET returned an unexpected value count");
+                    }
+                    decodePipeline.visit(chunk.startIndex(), values.size(), index -> {
+                        KeyValue<byte[], byte[]> keyValue = values.get(index);
+                        return keyValue.hasValue() ? keyValue.getValue() : null;
+                    }, serializer::deserialize, (index, outcome) -> {
+                        if (outcome.corruption() != null) {
+                            String key = keys.get(index);
+                            LOGGER.warning("evicting undecodable cache bucket " + key);
+                            evict(key);
+                        }
+                        visitor.accept(index, outcome.frame());
+                    }, decodeTasks);
+                    if (monitor) nanos[1] += System.nanoTime() - decoding;
+                    synchronized (pendingLock) {
+                        pending.removeFirst();
+                    }
+                }
+                return null;
+            });
+        } finally {
+            if (cancellationRegistration != null) cancellationRegistration.close();
+            decodeTasks.cancel();
+            synchronized (pendingLock) {
+                cancelPending(pending);
+            }
+        }
         if (monitor) {
             LOGGER.fine("Valkey fetch: keys=" + keys.size() + " elapsed_ms=" + (System.nanoTime() - started) / 1_000_000.0
                     + " reply_wait_ms=" + nanos[0] / 1_000_000.0 + " decode_and_consume_ms=" + nanos[1] / 1_000_000.0);
-        }
-    }
-
-    /**
-     * A corrupt blob is reported as absent: the engine's vanished-bucket guard recomputes only that bucket,
-     * and the delete lets the warmer rewrite it instead of skipping a key that merely exists.
-     */
-    private Optional<ResultFrame> decodeOrEvict(String key, byte[] blob) {
-        try {
-            return Optional.of(serializer.deserialize(blob));
-        } catch (CacheSerializationException corrupt) {
-            LOGGER.warning("evicting undecodable cache bucket " + key);
-            evict(key);
-            return Optional.empty();
         }
     }
 

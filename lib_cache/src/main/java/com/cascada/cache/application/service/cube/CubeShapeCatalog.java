@@ -42,6 +42,7 @@ public final class CubeShapeCatalog {
     private final int maxWindows;
     private final int maxShapesPerWindow;
     private final Map<TimeRange, CubeWindowShapes> windows;
+    private long clearGeneration;
 
     public CubeShapeCatalog() {
         this(DEFAULT_MAX_WINDOWS, DEFAULT_MAX_SHAPES_PER_WINDOW);
@@ -92,37 +93,65 @@ public final class CubeShapeCatalog {
      * no roll-up information; re-registering an already-catalogued shape for the same window is a
      * no-op (the lattice index treats dedup as the caller's concern).
      */
-    public synchronized void register(TimeRange timeRange, QueryShape shape, ResultFrame frame) {
+    public void register(TimeRange timeRange, QueryShape shape, ResultFrame frame) {
         register(timeRange, shape, frame, "standalone", java.util.Optional.empty());
     }
 
-    public synchronized void register(TimeRange timeRange, QueryShape shape, ResultFrame frame,
-                                      String revision, java.util.Optional<java.time.Duration> dependencyTtl) {
+    public void register(TimeRange timeRange, QueryShape shape, ResultFrame frame,
+                         String revision, java.util.Optional<java.time.Duration> dependencyTtl) {
         if (frame.isEmpty()) return;
-        java.time.Instant now = clock.instant();
-        expire(now);
-        CubeWindowShapes window = windows.get(timeRange);
-        if (window != null && window.revision().equals(revision) && window.shapes().contains(shape)) return;
+
+        long registrationGeneration;
+        java.time.Instant registrationStarted;
+        CubeWindowShapes observedWindow;
+        synchronized (this) {
+            registrationStarted = clock.instant();
+            expire(registrationStarted);
+            CubeWindowShapes window = windows.get(timeRange);
+            observedWindow = window;
+            if (hasShape(window, shape, revision)) return;
+            registrationGeneration = clearGeneration;
+        }
+
+        // Frames are immutable, so the full content scan can run without blocking lookups,
+        // invalidation, or registrations for unrelated windows.
         long bytes = estimateBytes(frame);
-        if (bytes > MAX_RETAINED_BYTES) return;
-        if (window != null && !window.revision().equals(revision)) {
-            // Answers computed under an older backend revision may describe data that has since changed.
-            windows.remove(timeRange);
-            window = null;
+        synchronized (this) {
+            java.time.Instant now = clock.instant();
+            expire(now);
+            if (clearGeneration != registrationGeneration) return;
+            CubeWindowShapes window = windows.get(timeRange);
+            // An older scan must not overwrite a different revision published while it was unlocked.
+            if (window != observedWindow && window != null && !window.revision().equals(revision)) return;
+            if (hasShape(window, shape, revision)) return;
+            // Estimation time cannot extend source lifetimes or the catalog's original TTL.
+            if (!registrationStarted.plus(timeToLive).isAfter(now)
+                    || dependencyTtl.filter(ttl -> !registrationStarted.plus(ttl).isAfter(now)).isPresent()) return;
+            if (bytes > MAX_RETAINED_BYTES) return;
+
+            if (window != null && !window.revision().equals(revision)) {
+                // Answers computed under an older backend revision may describe data that has since changed.
+                windows.remove(timeRange);
+                window = null;
+            }
+            while (!windows.isEmpty() && retainedBytes() + bytes > MAX_RETAINED_BYTES) {
+                windows.remove(windows.keySet().iterator().next());
+            }
+            if (window == null || !windows.containsKey(timeRange)) {
+                window = new CubeWindowShapes(revision, registrationStarted.plus(timeToLive));
+                windows.put(timeRange, window);
+            }
+            CubeWindowShapes target = window;
+            dependencyTtl.ifPresent(ttl -> target.expireNoLaterThan(registrationStarted.plus(ttl)));
+            if (target.shapes().size() < maxShapesPerWindow && target.shapes().add(shape)) {
+                target.index().register(new CachedShapeEntry(shape, frame));
+                target.retain(bytes);
+            }
         }
-        while (!windows.isEmpty() && retainedBytes() + bytes > MAX_RETAINED_BYTES) {
-            windows.remove(windows.keySet().iterator().next());
-        }
-        if (window == null || !windows.containsKey(timeRange)) {
-            window = new CubeWindowShapes(revision, now.plus(timeToLive));
-            windows.put(timeRange, window);
-        }
-        CubeWindowShapes target = window;
-        dependencyTtl.ifPresent(ttl -> target.expireNoLaterThan(now.plus(ttl)));
-        if (target.shapes().size() < maxShapesPerWindow && target.shapes().add(shape)) {
-            target.index().register(new CachedShapeEntry(shape, frame));
-            target.retain(bytes);
-        }
+    }
+
+    private boolean hasShape(CubeWindowShapes window, QueryShape shape, String revision) {
+        return window != null && window.revision().equals(revision) && window.shapes().contains(shape);
     }
 
     /**
@@ -171,6 +200,7 @@ public final class CubeShapeCatalog {
     /** Drop every catalogued window — the flush hook for invalidation / admin cache-flush (§8.17). */
     public synchronized void clear() {
         windows.clear();
+        clearGeneration++;
     }
 
     /** Conservative admission accounting, stopping as soon as the budget is exceeded. */

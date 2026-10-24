@@ -2,8 +2,6 @@ package com.cascada.cache.application.service;
 
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.execution.QueryCancellation;
-import com.cascada.cache.application.execution.QueryAdmissionBudget;
-import com.cascada.cache.application.execution.QueryAdmissionPermit;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
@@ -56,7 +54,6 @@ public final class CacheExecutionEngine {
     private final CacheExecutionConfiguration configuration;
     private final Executor executor;
     private final Clock clock;
-    private final QueryAdmissionBudget queryAdmissionBudget;
 
     public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration) {
@@ -113,19 +110,6 @@ public final class CacheExecutionEngine {
                                 GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
                                 CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor,
                                 Clock clock, Executor mergeExecutor) {
-        this(cacheBackend, sparkExecutor, gapQueryRewriter, configuration, coverageIndex, cubeCatalog,
-                executor, clock, mergeExecutor, null);
-    }
-
-    /**
-     * Uses a composition-root-owned query admission budget to bound simultaneous query-local cache
-     * and merge state. The budget is count-based because frame sizes and accumulator growth are not
-     * known before execution; it does not promise a hard byte limit.
-     */
-    public CacheExecutionEngine(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
-                                GapQueryRewriterPort gapQueryRewriter, CacheExecutionConfiguration configuration,
-                                CoverageIndexPort coverageIndex, CubeShapeCatalog cubeCatalog, Executor executor,
-                                Clock clock, Executor mergeExecutor, QueryAdmissionBudget queryAdmissionBudget) {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.cacheBackend = Objects.requireNonNull(cacheBackend, "cacheBackend");
         this.sparkExecutor = Objects.requireNonNull(sparkExecutor, "sparkExecutor");
@@ -138,20 +122,9 @@ public final class CacheExecutionEngine {
         this.frameMergeService = new FrameMergeService(configuration.fixedStepSeconds(),
                 configuration.timeColumnName(), configuration.mergeWorkerCount(),
                 Objects.requireNonNull(mergeExecutor, "mergeExecutor"));
-        this.queryAdmissionBudget = queryAdmissionBudget;
     }
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
-        QueryAdmissionPermit admission = queryAdmissionBudget == null
-                ? null : queryAdmissionBudget.acquire();
-        try {
-            return executeAdmitted(canonicalObject, queryHash);
-        } finally {
-            if (admission != null) admission.close();
-        }
-    }
-
-    private ResultFrame executeAdmitted(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
         requireActive();
         // Cube path (plan §8.12): only global aggregates with no deferred ORDER BY/LIMIT — a LIMIT
         // would register a truncated frame and a roll-up would not reapply the ordering. The lookup

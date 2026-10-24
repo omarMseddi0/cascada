@@ -69,7 +69,6 @@ public final class CascadaEngineFactory implements AutoCloseable {
     private final java.util.concurrent.ExecutorService cacheTasks;
     private final java.util.concurrent.ThreadPoolExecutor mergeTasks;
     private final java.util.concurrent.ThreadPoolExecutor decodeTasks;
-    private final com.cascada.cache.application.execution.QueryAdmissionBudget queryAdmissionBudget;
 
     /**
      * @param queryExecutor the execution tier. Passed in rather than built here because it is the one
@@ -80,15 +79,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
         this(settings, queryExecutor, ApplicationSettings.defaults());
     }
 
-    /** Admission is a resource setting; -Dcascada.cache.maxConcurrentQueries overrides its default. */
     public CascadaEngineFactory(EngineSettings settings, QueryExecutorPort queryExecutor, ApplicationSettings applicationSettings) {
-        this(settings, queryExecutor, applicationSettings, defaultMaximumConcurrentQueries(settings));
-    }
-
-    public CascadaEngineFactory(EngineSettings settings, QueryExecutorPort queryExecutor,
-                                ApplicationSettings applicationSettings, int maximumConcurrentQueries) {
-        if (maximumConcurrentQueries <= 0)
-            throw new IllegalArgumentException("maximumConcurrentQueries must be positive");
         this.applicationSettings = Objects.requireNonNull(applicationSettings);
         this.settings = Objects.requireNonNull(settings, "settings");
         this.queryExecutor = Objects.requireNonNull(queryExecutor, "queryExecutor");
@@ -106,10 +97,6 @@ public final class CascadaEngineFactory implements AutoCloseable {
         this.decodeTasks = new java.util.concurrent.ThreadPoolExecutor(decodeThreads, decodeThreads, 0L,
                 TimeUnit.MILLISECONDS, new java.util.concurrent.LinkedBlockingQueue<>(),
                 Thread.ofPlatform().name("cache-decode-", 0).factory());
-        // Keep query-local grouping state bounded while the admitted queries share CPU workers.
-        // This limits active queries, not their unknown data-dependent heap sizes.
-        this.queryAdmissionBudget = new com.cascada.cache.application.execution.QueryAdmissionBudget(
-                maximumConcurrentQueries);
         CacheBackendPort openedBackend = null;
         try {
             openedBackend = cacheBackend();
@@ -138,7 +125,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
                 Clock.systemUTC(), validatedConfiguration);
         CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
                 gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks,
-                Clock.systemUTC(), mergeTasks, queryAdmissionBudget);
+                Clock.systemUTC(), mergeTasks);
         this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
                 validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor, applicationSettings.warming().enabled() ? warmingOrchestrator : null);
         this.logicalQueryUseCase = new ExecuteLogicalQueryService(translator(), canonicalizer(),
@@ -146,26 +133,6 @@ public final class CascadaEngineFactory implements AutoCloseable {
         this.administrationService = new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
         mergeTasks.prestartAllCoreThreads();
         if (settings.cacheBackend() != CacheBackend.MEMORY) decodeTasks.prestartAllCoreThreads();
-    }
-
-    private static int defaultMaximumConcurrentQueries(EngineSettings settings) {
-        Objects.requireNonNull(settings, "settings");
-        String override = System.getProperty("cascada.cache.maxConcurrentQueries");
-        if (override != null) {
-            try {
-                int value = Integer.parseInt(override);
-                if (value > 0) return value;
-            } catch (NumberFormatException invalid) {
-                throw new IllegalArgumentException("cascada.cache.maxConcurrentQueries must be a positive integer", invalid);
-            }
-            throw new IllegalArgumentException("cascada.cache.maxConcurrentQueries must be a positive integer");
-        }
-        int mergeThreads = Math.min(settings.cacheExecution().mergeWorkerCount(),
-                Runtime.getRuntime().availableProcessors());
-        if (settings.cacheBackend() == CacheBackend.MEMORY) return Math.max(1, Math.min(4, mergeThreads));
-        // A remote cache has separate bounded decode and merge stages; admit enough queries
-        // to overlap both, while keeping their data-dependent grouping state count bounded.
-        return Math.max(1, Math.min(8, mergeThreads + Math.min(4, mergeThreads)));
     }
 
     private static int maximumFetchChunkKeys() {

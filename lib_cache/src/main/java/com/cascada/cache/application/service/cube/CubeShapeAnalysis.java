@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.cube;
 
+import com.cascada.cache.application.model.cube.CubeAverageColumn;
 import com.cascada.cache.application.service.merge.AggregateFunctionResolver;
 import com.cascada.cache.application.service.merge.AggregateOperation;
 import com.cascada.cache.application.service.merge.SparkValues;

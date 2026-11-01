@@ -8,7 +8,7 @@ import com.cascada.cache.application.model.WarmingReport;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.fabric.application.port.in.ManageClusterLifecycleUseCase;
 import com.cascada.fabric.application.port.in.PrepareClusterSettingsUseCase;
-import com.cascada.fabric.domain.ClusterValues;
+import com.cascada.fabric.domain.model.ClusterValues;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;

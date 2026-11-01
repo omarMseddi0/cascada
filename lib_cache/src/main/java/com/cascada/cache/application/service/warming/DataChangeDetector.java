@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.warming;
 
+import com.cascada.cache.application.model.warming.ValidationCheck;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;

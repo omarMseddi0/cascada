@@ -1,5 +1,9 @@
 package com.cascada.sql.adapter.out.calcite;
 
+import com.cascada.sql.adapter.out.calcite.model.ParsedSqlQuery;
+import com.cascada.sql.adapter.out.calcite.model.NormalizedAggregates;
+import com.cascada.sql.adapter.out.calcite.model.CanonicalTimeSeriesShape;
+import com.cascada.sql.adapter.out.calcite.model.CanonicalTimeRangeExtraction;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.merge.AggregateFunction;

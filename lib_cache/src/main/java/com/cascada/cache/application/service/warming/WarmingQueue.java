@@ -19,18 +19,12 @@ public final class WarmingQueue {
 
     private final LinkedHashSet<QueryHash> votedQueries = new LinkedHashSet<>();
     private final int maximumQueries;
-    private final ReentrantLock lock = new ReentrantLock();
-
-    public WarmingQueue() {
-        this(10_000);
-    }
-
+    public WarmingQueue() { this(10_000); }
     public WarmingQueue(int maximumQueries) {
-        if (maximumQueries < 1) {
-            throw new IllegalArgumentException("maximumQueries must be positive");
-        }
+        if (maximumQueries < 1) throw new IllegalArgumentException("maximumQueries must be positive");
         this.maximumQueries = maximumQueries;
     }
+    private final ReentrantLock lock = new ReentrantLock();
 
     /** Record a vote to warm this query. A repeat vote for a queued hash is a no-op (dedup). */
     public void vote(QueryHash queryHash) {

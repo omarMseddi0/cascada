@@ -3,7 +3,7 @@ package com.cascada.cache.application.service;
 import com.cascada.cache.domain.frame.ColumnNames;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.model.query.ArithmeticOperator;
+import com.cascada.cache.domain.query.ArithmeticOperator;
 import com.cascada.cache.domain.model.query.CompositeFormula;
 import com.cascada.cache.domain.model.query.FormulaBinary;
 import com.cascada.cache.domain.model.query.FormulaColumn;

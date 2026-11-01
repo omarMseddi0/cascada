@@ -1,6 +1,6 @@
 package com.cascada.app.concurrent;
 
-import com.cascada.app.config.ServerSettings;
+import com.cascada.app.model.config.ServerSettings;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import java.util.Set;

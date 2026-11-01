@@ -1,5 +1,6 @@
 package com.cascada.app.config;
 
+import com.cascada.app.model.config.CacheBackend;
 import com.cascada.app.model.config.WarmingSettings;
 import com.cascada.app.model.config.TableSettings;
 import com.cascada.app.model.config.EngineSettings;
@@ -66,6 +67,8 @@ public final class CascadaEngineFactory implements AutoCloseable {
     private final ExecuteLogicalQueryUseCase logicalQueryUseCase;
     private final CacheAdministrationService administrationService;
     private final java.util.concurrent.ExecutorService cacheTasks;
+    private final java.util.concurrent.ThreadPoolExecutor mergeTasks;
+    private final java.util.concurrent.ThreadPoolExecutor decodeTasks;
 
     /**
      * @param queryExecutor the execution tier. Passed in rather than built here because it is the one
@@ -83,12 +86,34 @@ public final class CascadaEngineFactory implements AutoCloseable {
         // Validate configuration before opening the backend's network resources.
         CacheConfiguration validatedConfiguration = cacheConfiguration();
         this.tableCatalog = tableCatalog();
-        this.cacheBackend = cacheBackend();
-        this.coverageIndex = coverageIndex();
-        this.popularityTracker = popularityTracker();
-        this.cubeCatalog = new CubeShapeCatalog();
         this.cacheTasks = java.util.concurrent.Executors.newThreadPerTaskExecutor(
                 Thread.ofVirtual().name("cache-gap-", 0).factory());
+        int mergeThreads = Math.min(settings.cacheExecution().mergeWorkerCount(),
+                Runtime.getRuntime().availableProcessors());
+        this.mergeTasks = new java.util.concurrent.ThreadPoolExecutor(mergeThreads, mergeThreads, 0L,
+                TimeUnit.MILLISECONDS, new java.util.concurrent.LinkedBlockingQueue<>(),
+                Thread.ofPlatform().name("cache-merge-", 0).factory());
+        int decodeThreads = Math.max(1, Math.min(4, mergeThreads));
+        this.decodeTasks = new java.util.concurrent.ThreadPoolExecutor(decodeThreads, decodeThreads, 0L,
+                TimeUnit.MILLISECONDS, new java.util.concurrent.LinkedBlockingQueue<>(),
+                Thread.ofPlatform().name("cache-decode-", 0).factory());
+        CacheBackendPort openedBackend = null;
+        try {
+            openedBackend = cacheBackend();
+            this.cacheBackend = openedBackend;
+            this.coverageIndex = coverageIndex();
+            this.popularityTracker = popularityTracker();
+        } catch (RuntimeException | Error failure) {
+            cacheTasks.shutdownNow();
+            decodeTasks.shutdownNow();
+            mergeTasks.shutdownNow();
+            if (openedBackend instanceof AutoCloseable closeable) {
+                try { closeable.close(); }
+                catch (Exception cleanupFailure) { failure.addSuppressed(cleanupFailure); }
+            }
+            throw failure;
+        }
+        this.cubeCatalog = new CubeShapeCatalog();
         GapQueryRewriterPort gapQueryRewriter = gapQueryRewriter();
         WarmingSettings warming = applicationSettings.warming();
         this.warmingOrchestrator = new WarmingOrchestrator(cacheBackend, queryExecutor, gapQueryRewriter,
@@ -99,12 +124,15 @@ public final class CascadaEngineFactory implements AutoCloseable {
                         settings.cacheExecution().fixedStepSeconds()),
                 Clock.systemUTC(), validatedConfiguration);
         CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
-                gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks);
+                gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks,
+                Clock.systemUTC(), mergeTasks);
         this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
                 validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor, applicationSettings.warming().enabled() ? warmingOrchestrator : null);
         this.logicalQueryUseCase = new ExecuteLogicalQueryService(translator(), canonicalizer(),
                 cachedQueryUseCase, queryExecutor);
         this.administrationService = new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
+        mergeTasks.prestartAllCoreThreads();
+        if (settings.cacheBackend() != CacheBackend.MEMORY) decodeTasks.prestartAllCoreThreads();
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -120,7 +148,8 @@ public final class CascadaEngineFactory implements AutoCloseable {
         ArrowResultFrameSerializer serializer = new ArrowResultFrameSerializer();
         return settings.cacheBackend() == CacheBackend.MEMORY
                 ? new InMemoryBlobCacheBackendAdapter(serializer)
-                : new ValkeyCacheBackendAdapter(settings.redisUri(), serializer);
+                : new ValkeyCacheBackendAdapter(settings.redisUri(), serializer, decodeTasks,
+                        Math.min(2, mergeTasks.getCorePoolSize()), 64L * 1024 * 1024);
     }
 
     /**
@@ -263,9 +292,21 @@ public final class CascadaEngineFactory implements AutoCloseable {
     public void close() {
         RuntimeException shutdownFailure = null;
         try {
-            closeCacheTasks();
+            closeTasks(cacheTasks, "cache");
         } catch (RuntimeException failure) {
             shutdownFailure = failure;
+        }
+        try {
+            closeTasks(decodeTasks, "decode");
+        } catch (RuntimeException failure) {
+            if (shutdownFailure == null) shutdownFailure = failure;
+            else shutdownFailure.addSuppressed(failure);
+        }
+        try {
+            closeTasks(mergeTasks, "merge");
+        } catch (RuntimeException failure) {
+            if (shutdownFailure == null) shutdownFailure = failure;
+            else shutdownFailure.addSuppressed(failure);
         }
         for (Object connection : List.of(cacheBackend, popularityTracker)) {
             if (connection instanceof AutoCloseable closeable) {
@@ -283,17 +324,17 @@ public final class CascadaEngineFactory implements AutoCloseable {
         if (shutdownFailure != null) throw shutdownFailure;
     }
 
-    private void closeCacheTasks() {
-        cacheTasks.shutdown();
+    private void closeTasks(java.util.concurrent.ExecutorService tasks, String name) {
+        tasks.shutdown();
         try {
-            if (!cacheTasks.awaitTermination(30, TimeUnit.SECONDS)) {
-                cacheTasks.shutdownNow();
-                throw new IllegalStateException("cache tasks did not finish before shutdown");
+            if (!tasks.awaitTermination(30, TimeUnit.SECONDS)) {
+                tasks.shutdownNow();
+                throw new IllegalStateException(name + " tasks did not finish before shutdown");
             }
         } catch (InterruptedException interrupted) {
-            cacheTasks.shutdownNow();
+            tasks.shutdownNow();
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("interrupted while closing cache tasks", interrupted);
+            throw new IllegalStateException("interrupted while closing " + name + " tasks", interrupted);
         }
     }
 }

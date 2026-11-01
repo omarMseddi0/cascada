@@ -10,4 +10,9 @@ import com.cascada.cache.domain.model.time.GapPlan;
 public interface GapQueryRewriterPort {
 
     String buildGapQuery(String physicalSql, GapPlan gapPlan);
+
+    /** The warmer stores reusable fixed-grain ingredients, never display-grain answers. */
+    default String buildStorageQuery(String physicalSql, GapPlan gapPlan, int fixedStepSeconds) {
+        return buildGapQuery(physicalSql, gapPlan);
+    }
 }

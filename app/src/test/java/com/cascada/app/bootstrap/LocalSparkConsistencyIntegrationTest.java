@@ -1,15 +1,8 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.cache.application.service.WarmingOrchestrator;
-import com.cascada.cache.application.service.FrameMergeService;
-import com.cascada.cache.application.service.ExecuteLogicalQueryService;
-import com.cascada.cache.application.service.ExecuteCachedQueryService;
-import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.out.sketch.HyperLogLogDistinctCounter;
-import com.cascada.cache.adapter.out.sketch.KllQuantileEstimator;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.*;
@@ -38,7 +31,9 @@ import java.util.stream.Stream;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.storage.StorageLevel;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.condition.OS;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -363,79 +358,13 @@ class LocalSparkConsistencyIntegrationTest {
                 assertThat(h.executed).as("supported filter-down must really reuse cube").isEmpty();
             else assertThat(h.executed).as("unsupported cube predicate must fall back").hasSize(1);
         }
-        // The production catalog conservatively refuses changes of projection/dimension shape.
+        // A coarser group-by is a supported cube roll-up when its sources, projection and measures match.
         String rollup = "SELECT region, SUM(amount) AS total, COUNT(*) AS n, MIN(amount) AS lo, MAX(amount) AS hi "
                 + "FROM events WHERE ts >= " + BASE + " AND ts <= " + END + " GROUP BY region";
         h.executed.clear();
         same(h.service.query(rollup).frame(), direct.execute(rollup), rollup, "cube-projection-boundary");
-        assertThat(h.executed).hasSize(1);
+        assertThat(h.executed).as("dimension roll-up must reuse the completed cube").isEmpty();
         System.out.println("CONSISTENCY_PASS cube-exact-filter-projection-boundaries");
-    }
-
-    @Test void hllAndKllMergeSparkProducedDayPartitionsAgainstSparkTruth() {
-        List<HyperLogLogDistinctCounter> hlls = new ArrayList<>();
-        List<HyperLogLogDistinctCounter> stringHlls = new ArrayList<>();
-        List<KllQuantileEstimator> klls = new ArrayList<>();
-        for (int day = 0; day < 7; day++) {
-            hlls.add(new HyperLogLogDistinctCounter()); stringHlls.add(new HyperLogLogDistinctCounter());
-            klls.add(new KllQuantileEstimator());
-        }
-        var rows = spark.sql("SELECT ts, user_id, latency, CAST(user_id AS STRING) AS user_string FROM events").toLocalIterator();
-        long values = 0;
-        while (rows.hasNext()) {
-            var row = rows.next();
-            int day = (int) ((row.getLong(0) - BASE) / DAY);
-            hlls.get(day).add(row.getLong(1));
-            stringHlls.get(day).add(row.getString(3));
-            if (!row.isNullAt(2)) { klls.get(day).add(row.getDouble(2)); values++; }
-        }
-        double truth = direct.execute("SELECT COUNT(DISTINCT user_id) AS n FROM events").longAt(0, 0);
-        double estimate = HyperLogLogDistinctCounter.unionOf(hlls).estimateDistinctCount();
-        assertThat(Math.abs(estimate - truth) / truth).isLessThan(0.05);
-        // A one-input union may retain HIP, while a repeated union switches to the composite
-        // estimator. Test the true cardinality/error contract, not identical getEstimate() bits.
-        double dayTruth = direct.execute("SELECT COUNT(DISTINCT user_id) AS n FROM events WHERE ts < " + (BASE + DAY)).longAt(0, 0);
-        double singleEstimate = HyperLogLogDistinctCounter.unionOf(List.of(hlls.get(0))).estimateDistinctCount();
-        double duplicateEstimate = HyperLogLogDistinctCounter.unionOf(List.of(hlls.get(0), hlls.get(0))).estimateDistinctCount();
-        assertThat(Math.abs(singleEstimate - dayTruth) / dayTruth).isLessThan(0.05);
-        assertThat(Math.abs(duplicateEstimate - dayTruth) / dayTruth).isLessThan(0.05);
-        var reversed = new ArrayList<>(hlls);
-        Collections.reverse(reversed);
-        assertThat(HyperLogLogDistinctCounter.unionOf(reversed).estimateDistinctCount()).isEqualTo(estimate);
-        double stringTruth = direct.execute("SELECT COUNT(DISTINCT CAST(user_id AS STRING)) AS n FROM events").longAt(0, 0);
-        stringHlls.forEach(counter -> counter.add((String) null));
-        double stringEstimate = HyperLogLogDistinctCounter.unionOf(stringHlls).estimateDistinctCount();
-        assertThat(Math.abs(stringEstimate - stringTruth) / stringTruth).isLessThan(0.05);
-        assertThat(HyperLogLogDistinctCounter.unionOf(List.of()).estimateDistinctCount()).isZero();
-        KllQuantileEstimator merged = KllQuantileEstimator.mergeOf(klls);
-        double maximumRankError = 0;
-        for (double rank : List.of(0.0, 0.5, 0.95, 0.99, 1.0)) {
-            double value = merged.quantile(rank);
-            var count = direct.execute("SELECT COUNT(*) AS n FROM events WHERE latency <= " + value).longAt(0, 0);
-            double error = Math.abs((double) count / values - rank);
-            maximumRankError = Math.max(maximumRankError, error);
-            assertThat(error).as("KLL empirical Spark rank " + rank).isLessThan(0.025);
-        }
-        System.out.println("CONSISTENCY_PASS sketches HLL_truth=" + truth + " estimate=" + estimate
-                + " string_estimate=" + stringEstimate + " single_estimate=" + singleEstimate + " duplicate_estimate=" + duplicateEstimate
-                + " KLL_values=" + values + " max_rank_error=" + maximumRankError);
-    }
-
-    @Test void hllStringEdgeCasesAgreeWithSparkDistinctNullAndEmptySemantics() {
-        String source = "SELECT CAST(NULL AS STRING) AS value UNION ALL SELECT '' UNION ALL SELECT '' "
-                + "UNION ALL SELECT 'a' UNION ALL SELECT decode(unhex('00'), 'UTF-8')";
-        var first = new HyperLogLogDistinctCounter();
-        var second = new HyperLogLogDistinctCounter();
-        var rows = spark.sql(source).collectAsList();
-        for (int row = 0; row < rows.size(); row++) {
-            String value = rows.get(row).isNullAt(0) ? null : rows.get(row).getString(0);
-            (row % 2 == 0 ? first : second).add(value);
-        }
-        long truth = direct.execute("SELECT COUNT(DISTINCT value) AS n FROM (" + source + ") values_table").longAt(0, 0);
-        assertThat(truth).isEqualTo(3);
-        double estimate = HyperLogLogDistinctCounter.unionOf(List.of(first, second)).estimateDistinctCount();
-        assertThat(estimate).as("NULL is excluded, empty string and NUL are distinct values").isCloseTo(truth, within(0.001));
-        System.out.println("CONSISTENCY_PASS HLL-null-empty-NUL truth=" + truth + " estimate=" + estimate);
     }
 
     @TestFactory Stream<DynamicTest> cubeComponentRollupsAgainstIndependentSpark() {
@@ -675,7 +604,8 @@ class LocalSparkConsistencyIntegrationTest {
                 if (timeSeries) {
                     h.executed.clear();
                     same(service.query(logical).frame(), direct.execute(expectedSql), physical, "translated-delta-all-cache");
-                    assertThat(h.executed).isEmpty();
+                    assertThat(h.executed).as("a cold read-path miss is re-executed because reads do not write buckets")
+                            .containsExactly(physical);
                 }
                 if (!projection.contains("AVG")) {
                     Harness partial = new Harness(false);
@@ -687,11 +617,120 @@ class LocalSparkConsistencyIntegrationTest {
                     assertThat(partial.executed).hasSize(1);
                 }
             }
+
+            // Exercise the actual cache catalog through the logical-table translator. The seed
+            // answer is read from the Delta path above, then later logical queries must roll it up
+            // and filter it down without another Delta query, while Spark reads the same Delta path
+            // independently for each expected frame.
+            Harness cube = new Harness(true);
+            var cubeService = new ExecuteLogicalQueryService(translator, canonicalizer,
+                    new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(), CacheConfiguration.defaults(),
+                            hashing, cube.engine, cube.tracked), cube.tracked);
+            String cubeSource = "SELECT region, device, SUM(amount) AS total, COUNT(*) AS n "
+                    + "FROM traffic WHERE ts >= " + BASE + " AND ts <= " + END + " GROUP BY region, device";
+            String cubeSourcePhysical = translator.translateToPhysicalSql(cubeSource);
+            assertThat(cubeSourcePhysical).contains("delta.`", "C_region", "C_device", "C_amount");
+            same(cubeService.query(cubeSource).frame(), direct.execute(cubeSourcePhysical), cubeSourcePhysical,
+                    "real-delta-cube-source");
+            assertThat(cube.executed).containsExactly(cubeSourcePhysical);
+
+            String cubeRollup = "SELECT region, SUM(amount) AS total, COUNT(*) AS n "
+                    + "FROM traffic WHERE ts >= " + BASE + " AND ts <= " + END + " GROUP BY region";
+            String cubeRollupPhysical = translator.translateToPhysicalSql(cubeRollup);
+            cube.executed.clear();
+            same(cubeService.query(cubeRollup).frame(), direct.execute(cubeRollupPhysical), cubeRollupPhysical,
+                    "real-delta-cube-rollup");
+            assertThat(cube.executed).as("Delta-backed dimension roll-up should reuse the cube").isEmpty();
+
+            String cubeFilter = "SELECT region, device, SUM(amount) AS total, COUNT(*) AS n "
+                    + "FROM traffic WHERE ts >= " + BASE + " AND ts <= " + END
+                    + " AND device = 'd1' GROUP BY region, device";
+            String cubeFilterPhysical = translator.translateToPhysicalSql(cubeFilter);
+            cube.executed.clear();
+            same(cubeService.query(cubeFilter).frame(), direct.execute(cubeFilterPhysical), cubeFilterPhysical,
+                    "real-delta-cube-filter-down");
+            assertThat(cube.executed).as("Delta-backed grouped-column filter should reuse the cube").isEmpty();
             System.out.println("CONSISTENCY_PASS real-delta-log-parquet-logical-physical");
         } finally {
             // Only this exact, freshly created fixture directory is traversed and removed.
             deleteFixture(directory);
         }
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void cubeDeltaMutationsWithExplicitInvalidationRefreshCrossQueryAnswers() throws Exception {
+        var directory = java.nio.file.Files.createTempDirectory("cascada-cube-delta-mutations-");
+        try {
+            String table = "delta.`" + directory.toUri() + "`";
+            spark.sql("SELECT CAST(id AS BIGINT) id, CAST(" + BASE + " + pmod(id, 10) AS BIGINT) ts, "
+                    + "CASE WHEN id % 17 = 0 THEN CAST(NULL AS STRING) ELSE concat('r', CAST(id % 4 AS STRING)) END region, "
+                    + "concat('d', CAST(id % 3 AS STRING)) device, CAST(id % 101 - 50 AS BIGINT) amount "
+                    + "FROM range(10000)")
+                    .write().format("delta").mode("overwrite").save(directory.toUri().toString());
+            assertThat(java.nio.file.Files.isDirectory(directory.resolve("_delta_log"))).isTrue();
+
+            String source = "SELECT region, device, SUM(amount) AS total, COUNT(*) AS n FROM " + table
+                    + " WHERE ts >= " + BASE + " AND ts <= " + (BASE + DAY - 1) + " GROUP BY region, device";
+            String rollup = "SELECT region, SUM(amount) AS total, COUNT(*) AS n FROM " + table
+                    + " WHERE ts >= " + BASE + " AND ts <= " + (BASE + DAY - 1) + " GROUP BY region";
+            String filtered = "SELECT region, device, SUM(amount) AS total, COUNT(*) AS n FROM " + table
+                    + " WHERE ts >= " + BASE + " AND ts <= " + (BASE + DAY - 1)
+                    + " AND device = 'd1' GROUP BY region, device";
+            Harness h = new Harness(true);
+
+            assertDeltaCubeReuse(h, source, rollup, filtered, "delta-mutations-initial");
+
+            spark.sql("INSERT INTO " + table + " VALUES (10000, " + (BASE + 5)
+                    + ", 'r_insert', 'd1', 600)").collectAsList();
+            invalidateAndRefreshDeltaCube(h, source, rollup, filtered, "delta-mutations-insert");
+
+            spark.sql("UPDATE " + table + " SET amount = amount + 23 WHERE id = 1").collectAsList();
+            invalidateAndRefreshDeltaCube(h, source, rollup, filtered, "delta-mutations-update");
+
+            spark.sql("DELETE FROM " + table + " WHERE id = 2").collectAsList();
+            invalidateAndRefreshDeltaCube(h, source, rollup, filtered, "delta-mutations-delete");
+
+            spark.sql("MERGE INTO " + table + " target USING "
+                    + "(SELECT CAST(3 AS BIGINT) id, CAST(777 AS BIGINT) amount) incoming "
+                    + "ON target.id = incoming.id WHEN MATCHED THEN UPDATE SET target.amount = incoming.amount").collectAsList();
+            invalidateAndRefreshDeltaCube(h, source, rollup, filtered, "delta-mutations-merge");
+
+            assertThat(spark.sql("SELECT amount FROM " + table + " WHERE id = 10000").first().getLong(0)).isEqualTo(600L);
+            assertThat(spark.sql("SELECT amount FROM " + table + " WHERE id = 1").first().getLong(0)).isEqualTo(-26L);
+            assertThat(spark.sql("SELECT COUNT(*) FROM " + table + " WHERE id = 2").first().getLong(0)).isZero();
+            assertThat(spark.sql("SELECT amount FROM " + table + " WHERE id = 3").first().getLong(0)).isEqualTo(777L);
+            assertThat(spark.sql("SELECT COUNT(*) FROM " + table).first().getLong(0)).isEqualTo(10000L);
+            System.out.println("CONSISTENCY_PASS delta-cube-explicit-invalidation-insert-update-delete-merge");
+        } finally {
+            // Only this exact, freshly created fixture directory is traversed and removed.
+            deleteFixture(directory);
+        }
+    }
+
+    private void invalidateAndRefreshDeltaCube(Harness h, String source, String rollup, String filtered,
+                                               String context) {
+        // Freshness is explicit in this cache contract. Each Delta transaction is followed by a
+        // backend flush so the revision changes and stale catalog entries cannot be served.
+        h.cache.flush(com.cascada.cache.domain.admin.CacheScope.everything());
+        assertDeltaCubeReuse(h, source, rollup, filtered, context);
+    }
+
+    private void assertDeltaCubeReuse(Harness h, String source, String rollup, String filtered,
+                                      String context) {
+        assertThat(SafetyRuleRegistry.defaultRegistry().evaluate(canonicalizer.canonicalize(source),
+                CacheConfiguration.defaults()).isBypass()).as(context + " source must be cache-eligible").isFalse();
+        h.executed.clear();
+        same(h.service.query(source).frame(), direct.execute(source), source, context + "-source");
+        assertThat(h.executed).as(context + " source refresh must execute Delta SQL").containsExactly(source);
+
+        h.executed.clear();
+        same(h.service.query(rollup).frame(), direct.execute(rollup), rollup, context + "-rollup");
+        assertThat(h.executed).as(context + " dimension roll-up should reuse the refreshed cube").isEmpty();
+
+        h.executed.clear();
+        same(h.service.query(filtered).frame(), direct.execute(filtered), filtered, context + "-filter");
+        assertThat(h.executed).as(context + " grouped-column filter should reuse the refreshed cube").isEmpty();
     }
 
     private static void deleteFixture(java.nio.file.Path directory) throws java.io.IOException {

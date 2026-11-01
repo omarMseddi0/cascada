@@ -25,15 +25,23 @@ import java.util.Optional;
 public record CanonicalQueryObject(HashComponents hashComponents, TimeRange timeRange,
                                    PostProcessing postProcessing, QueryMetadata metadata,
                                    String physicalSql, List<String> sourceSignature,
-                                   List<String> projectionSignature, List<String> logicSignature) {
+                                   List<String> projectionSignature, List<String> logicSignature, List<String> outputColumns) {
 
     public CanonicalQueryObject {
+        outputColumns = List.copyOf(outputColumns);
         sourceSignature = List.copyOf(sourceSignature);
         projectionSignature = List.copyOf(projectionSignature);
         logicSignature = List.copyOf(logicSignature);
         if (physicalSql == null) {
             physicalSql = "";
         }
+    }
+
+    public CanonicalQueryObject(HashComponents hashComponents, TimeRange timeRange,
+                                PostProcessing postProcessing, QueryMetadata metadata, String physicalSql,
+                                List<String> sourceSignature, List<String> projectionSignature, List<String> logicSignature) {
+        this(hashComponents, timeRange, postProcessing, metadata, physicalSql, sourceSignature,
+                projectionSignature, logicSignature, List.of());
     }
 
     /**

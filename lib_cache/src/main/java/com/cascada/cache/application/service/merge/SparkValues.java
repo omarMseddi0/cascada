@@ -16,6 +16,8 @@ public final class SparkValues {
 
     /** Spark's binary UTF-8 ordering is code-point order for valid Unicode strings. */
     public static int compareStrings(String leftString, String rightString) {
+        // String.equals is a vectorized intrinsic; equal values skip the code-point walk entirely.
+        if (leftString.equals(rightString)) return 0;
         int leftOffset = 0;
         int rightOffset = 0;
         while (leftOffset < leftString.length() && rightOffset < rightString.length()) {

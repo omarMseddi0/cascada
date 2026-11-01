@@ -1,9 +1,9 @@
 package com.cascada.app.adapter.in.api;
 
 import com.cascada.app.concurrent.RequestExecutor;
-import com.cascada.app.config.ServerSettings;
+import com.cascada.app.model.config.ServerSettings;
 import com.cascada.cache.application.execution.QueryCancellation;
-import com.cascada.app.exception.ApiFailure;
+import com.cascada.app.model.api.ApiFailure;
 import io.grpc.*;
 import java.util.concurrent.*;
 

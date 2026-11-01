@@ -30,6 +30,10 @@ public final class CacheScope {
 
     public static CacheScope forKeyPrefix(String keyPrefix) {
         Objects.requireNonNull(keyPrefix, "keyPrefix");
+        if (!keyPrefix.startsWith(CacheKeyConstants.CACHE_KEY_PREFIX + ":")) {
+            throw new IllegalArgumentException("Cache prefix must start with "
+                    + CacheKeyConstants.CACHE_KEY_PREFIX + ":");
+        }
         return new CacheScope(keyPrefix, "prefix '" + keyPrefix + "'", false);
     }
 
@@ -43,7 +47,7 @@ public final class CacheScope {
         if (everything) {
             return CacheKeyConstants.isBucketKey(key);
         }
-        return key.startsWith(keyPrefix);
+        return CacheKeyConstants.isBucketKey(key) && key.startsWith(keyPrefix);
     }
 
     public String keyPrefix() {

@@ -29,4 +29,18 @@ public interface BucketCachePort {
 
     /** Remove a bucket whose stored value can no longer be trusted, so the warmer recomputes it. */
     void evict(String key);
+
+    /** Shared mutation token. Absence disables whole-window reuse for this backend. */
+    default Optional<String> revision() { return Optional.empty(); }
+
+    /** Minimum remaining lifetime of all dependencies; absent if a key vanished or has no expiry. */
+    default Optional<Duration> remainingTimeToLive(List<String> keys) { return Optional.empty(); }
+
+    /** Changes on invalidation, so an older in-flight Spark warm cannot restore invalidated data. */
+    default Optional<String> warmingGeneration() { return Optional.empty(); }
+
+    default boolean storeForGeneration(String key, ResultFrame frame, Duration ttl, String generation) {
+        store(key, frame, ttl);
+        return true;
+    }
 }

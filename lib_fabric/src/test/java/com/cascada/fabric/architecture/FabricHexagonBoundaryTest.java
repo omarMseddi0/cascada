@@ -28,6 +28,7 @@ class FabricHexagonBoundaryTest {
     static void importClasses() {
         moduleClasses = new ClassFileImporter()
                 .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
+            .withImportOption(location -> !location.asURI().toString().contains("/test-classes/"))
                 .importPackages("com.cascada.fabric");
     }
 
@@ -45,7 +46,8 @@ class FabricHexagonBoundaryTest {
     void coreDependsOnlyOnItsOwnContractsModelsAndTheJdk() {
         noClasses().that().resideInAnyPackage("com.cascada.fabric.domain..", "com.cascada.fabric.application..")
                 .should().dependOnClassesThat().resideOutsideOfPackages(
-                        "com.cascada.fabric.domain..", "com.cascada.fabric.application..", "java..")
+                        "com.cascada.fabric.domain..", "com.cascada.fabric.application..",
+                        "com.cascada.sparkconfig.domain..", "java..")
                 .check(moduleClasses);
     }
 

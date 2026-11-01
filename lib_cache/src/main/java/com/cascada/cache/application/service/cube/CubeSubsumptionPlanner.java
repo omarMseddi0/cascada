@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service.cube;
 
+import com.cascada.cache.application.model.cube.CubePlannerGroup;
+import com.cascada.cache.application.model.cube.CubeAverageColumn;
 import com.cascada.cache.application.service.merge.SparkAverage;
 import com.cascada.cache.domain.model.cube.CachedShapeEntry;
 import com.cascada.cache.domain.model.cube.QueryShape;
@@ -121,6 +123,7 @@ public final class CubeSubsumptionPlanner {
         AggregateFunction[] measureFunctions = CubeShapeAnalysis.measureFunctions(measureColumns, declared);
 
         Set<String> extraFilters = filterEvaluator.extraFilters(candidate.shape(), query);
+        CompiledFilters compiledFilters = filterEvaluator.compile(extraFilters);
         int[] dimensionIndexes = new int[dimensionColumns.size()];
         ColumnType[] dimensionTypes = new ColumnType[dimensionColumns.size()];
         for (int index = 0; index < dimensionColumns.size(); index++) {
@@ -137,7 +140,7 @@ public final class CubeSubsumptionPlanner {
         Map<List<Object>, CubePlannerGroup> groups = new LinkedHashMap<>();
         for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
             if (!extraFilters.isEmpty()
-                    && !filterEvaluator.matchesAll(frame, frame.rows().get(rowIndex), extraFilters)) {
+                    && !filterEvaluator.matchesAll(frame, rowIndex, compiledFilters)) {
                 continue;
             }
             List<Object> keyValues = new ArrayList<>(dimensionColumns.size());

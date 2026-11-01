@@ -50,6 +50,10 @@ public final class BucketCoverageBitmap {
         return coveredOrdinals.toByteArray();
     }
 
+    public BucketCoverageBitmap copy() {
+        return new BucketCoverageBitmap(bucketSeconds, (BitSet) coveredOrdinals.clone());
+    }
+
     public long bucketSeconds() {
         return bucketSeconds;
     }

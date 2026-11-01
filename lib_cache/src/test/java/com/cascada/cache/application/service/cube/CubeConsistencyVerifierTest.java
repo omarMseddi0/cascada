@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service.cube;
 
+import com.cascada.cache.application.model.cube.CubeVerificationResult;
 import com.cascada.cache.domain.model.cube.CachedShapeEntry;
 import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;

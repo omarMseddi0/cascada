@@ -18,6 +18,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.Executor;
 import java.util.function.IntBinaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,10 +32,19 @@ public final class FrameMergeService {
 
     private final int fixedStepSeconds;
     private final String timeColumnName;
+    private final int mergeWorkerCount;
+    private final Executor mergeExecutor;
 
     public FrameMergeService(int fixedStepSeconds, String timeColumnName) {
+        this(fixedStepSeconds, timeColumnName, 1, Runnable::run);
+    }
+
+    /** Incremental merges split their groups across {@code mergeWorkerCount} partitions run on {@code mergeExecutor}. */
+    public FrameMergeService(int fixedStepSeconds, String timeColumnName, int mergeWorkerCount, Executor mergeExecutor) {
         this.fixedStepSeconds = fixedStepSeconds;
         this.timeColumnName = timeColumnName;
+        this.mergeWorkerCount = mergeWorkerCount;
+        this.mergeExecutor = Objects.requireNonNull(mergeExecutor, "mergeExecutor");
     }
 
     /** Same ordered merge and final reconstruction, without retaining each completed input frame. */
@@ -60,7 +71,8 @@ public final class FrameMergeService {
         if (timeSeries) dimensions.add(timeColumnName);
         dimensions.addAll(dimensionColumns(schema, canonicalObject, timeSeries));
         int step = timeSeries ? timeSeriesStep(canonicalObject) : fixedStepSeconds;
-        return new TypedFrameAccumulator(schema, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step);
+        return new TypedFrameAccumulator(schema, dimensions, resolvedFunctions(canonicalObject), timeColumnName, step,
+                mergeWorkerCount, mergeExecutor);
     }
 
     ResultFrame finishMergedFrame(ResultFrame merged, CanonicalQueryObject canonicalObject) {
@@ -70,8 +82,21 @@ public final class FrameMergeService {
         ResultFrame reconstructed = averages.isEmpty()
                 ? reconstructAverages(merged, canonicalObject)
                 : SparkAverage.finish(merged, averages);
+        return finishReconstructedFrame(reconstructed, canonicalObject);
+    }
+
+    /** Same answer as {@link #finishMergedFrame} over {@code accumulator.finish()}, without the ingredient frame. */
+    ResultFrame finishAccumulatedFrame(TypedFrameAccumulator accumulator, CanonicalQueryObject canonicalObject) {
+        List<String> averages = averageAliases(canonicalObject);
+        ResultFrame reconstructed = averages.isEmpty()
+                ? reconstructAverages(accumulator.finish(), canonicalObject)
+                : accumulator.finishWithAverages(averages);
+        return finishReconstructedFrame(reconstructed, canonicalObject);
+    }
+
+    private ResultFrame finishReconstructedFrame(ResultFrame reconstructed, CanonicalQueryObject canonicalObject) {
         ResultFrame composites = reconstructCompositeAliases(reconstructed, canonicalObject);
-        return projectOutput(applyPostProcessing(composites, canonicalObject), canonicalObject);
+        return applyPostProcessing(composites, canonicalObject);
     }
 
     // --- composite aliases (e.g. SUM(a) + SUM(b) AS total_bytes) ---------------------------------
@@ -99,21 +124,6 @@ public final class FrameMergeService {
                 builder.appendValue(formula.value(frame, row));
             }
         }
-        return builder.build();
-    }
-
-    private ResultFrame projectOutput(ResultFrame frame, CanonicalQueryObject canonical) {
-        if (canonical.outputColumns().isEmpty() || canonical.outputColumns().equals(frame.columnNames())) return frame;
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(frame.rowCount());
-        int[] columns = canonical.outputColumns().stream().mapToInt(name -> {
-            String resolved = resolveColumn(name, frame.columnNames());
-            if (resolved == null) throw new IllegalArgumentException("missing output column " + name);
-            return frame.columnIndex(resolved);
-        }).toArray();
-        for (int index = 0; index < columns.length; index++)
-            builder.column(canonical.outputColumns().get(index), frame.columnTypeAt(columns[index]));
-        for (int row = 0; row < frame.rowCount(); row++)
-            for (int column : columns) builder.appendCell(frame, row, column);
         return builder.build();
     }
 
@@ -217,14 +227,21 @@ public final class FrameMergeService {
     // --- deferred ORDER BY / LIMIT ---------------------------------------------------------------
 
     private ResultFrame applyPostProcessing(ResultFrame frame, CanonicalQueryObject canonicalObject) {
+        boolean hasProjection = !canonicalObject.outputColumns().isEmpty()
+                && !canonicalObject.outputColumns().equals(frame.columnNames());
         if (frame.isEmpty()) {
-            return frame;
+            // The old post-processing path deliberately skipped ORDER BY validation for empty
+            // frames, then applied projection. Keep that fallback behavior while fusing the copy.
+            return hasProjection ? selectAndProject(frame, null, 0, canonicalObject, true) : frame;
         }
         List<OrderByClause> orderBy = canonicalObject.postProcessing().orderBy();
         if (orderBy.isEmpty() && canonicalObject.postProcessing().limit().isEmpty()) {
             // The merge already emits its deterministic group order. Rebuilding every row here when
-            // there is no deferred SQL clause only adds map allocations and a second frame copy.
-            return frame;
+            // there is no deferred SQL clause only adds map allocations. If projection is requested,
+            // write those requested columns directly into the result frame.
+            return hasProjection
+                    ? selectAndProject(frame, null, frame.rowCount(), canonicalObject, true)
+                    : frame;
         }
         int limit = Math.min(frame.rowCount(), canonicalObject.postProcessing().limit().orElse(frame.rowCount()));
         int[] sortColumns = new int[orderBy.size()];
@@ -296,12 +313,37 @@ public final class FrameMergeService {
             if (!orderBy.isEmpty()) IntStableSort.sort(rows, comparator);
         }
 
-        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(limit);
-        for (String column : frame.columnNames()) {
-            builder.column(column, frame.columnType(column));
+        return selectAndProject(frame, rows, limit, canonicalObject, hasProjection);
+    }
+
+    /** Writes selected rows and projected columns in one pass after sorting has used the full frame. */
+    private ResultFrame selectAndProject(ResultFrame frame, int[] rows, int rowCount,
+                                         CanonicalQueryObject canonicalObject, boolean hasProjection) {
+        List<String> frameColumns = frame.columnNames();
+        List<String> outputColumns = canonicalObject.outputColumns();
+        int[] sourceColumns = null;
+        int outputColumnCount = frameColumns.size();
+        if (hasProjection) {
+            sourceColumns = outputColumns.stream().mapToInt(name -> {
+                String resolved = resolveColumn(name, frameColumns);
+                if (resolved == null) throw new IllegalArgumentException("missing output column " + name);
+                return frame.columnIndex(resolved);
+            }).toArray();
+            outputColumnCount = sourceColumns.length;
         }
-        for (int row : rows) {
-            for (int column = 0; column < frame.columnNames().size(); column++) builder.appendCell(frame, row, column);
+
+        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(rowCount);
+        for (int outputColumn = 0; outputColumn < outputColumnCount; outputColumn++) {
+            int sourceColumn = sourceColumns == null ? outputColumn : sourceColumns[outputColumn];
+            String name = hasProjection ? outputColumns.get(outputColumn) : frameColumns.get(sourceColumn);
+            builder.column(name, frame.columnTypeAt(sourceColumn));
+        }
+        for (int outputRow = 0; outputRow < rowCount; outputRow++) {
+            int sourceRow = rows == null ? outputRow : rows[outputRow];
+            for (int outputColumn = 0; outputColumn < outputColumnCount; outputColumn++) {
+                int sourceColumn = sourceColumns == null ? outputColumn : sourceColumns[outputColumn];
+                builder.appendCell(frame, sourceRow, sourceColumn);
+            }
         }
         return builder.build();
     }

@@ -1,5 +1,6 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.model.ResolvedWarmingQuery;
 import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
@@ -186,7 +187,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         long validationStart = wholeDays ? todayStart - lookbackSeconds + SECONDS_PER_DAY
                 : BucketMath.floor(warmStart, bucketSeconds) + bucketSeconds;
         long validationEnd = wholeDays ? todayStart - SECONDS_PER_DAY - 1 : currentBucketStart - bucketSeconds - 1;
-        com.cascada.cache.application.service.warming.ValidationCheck check = dataChangeDetector != null && validationEnd >= validationStart
+        com.cascada.cache.application.model.warming.ValidationCheck check = dataChangeDetector != null && validationEnd >= validationStart
                 ? dataChangeDetector.check(new TimeRange(validationStart, validationEnd)) : null;
         WarmingReport report = warmCycle(warmStart, currentBucketStart - 1, check != null && check.changed());
         if (check != null && lastCycleSucceeded) dataChangeDetector.acknowledge(check);
@@ -270,7 +271,9 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             return Optional.of(parser.canonicalize(popularQuery.physicalSql()));
         } catch (RuntimeException unsupported) {
             QueryCancellation.rethrowIfCancelled(unsupported);
-            LOGGER.fine("popular query " + popularQuery.queryHash() + " can no longer be canonicalised; skipping");
+            if (LOGGER.isLoggable(java.util.logging.Level.FINE)) {
+                LOGGER.fine("popular query " + popularQuery.queryHash() + " can no longer be canonicalised; skipping");
+            }
             return Optional.empty();
         }
     }
@@ -374,7 +377,11 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         if (decimalComposite || frame.rowCount() > configuration.maximumCachedRows()) {
             cacheBackend.evict(key);
             if (coverageIndex != null) coverageIndex.markEvicted(queryHash, configuration.bucketSeconds(), bucketStart);
-            LOGGER.fine("bucket " + key + " has " + frame.rowCount() + " rows, above the cache row cap; not stored");
+            if (LOGGER.isLoggable(java.util.logging.Level.FINE)) {
+                LOGGER.fine("bucket " + key + " not stored: " + (decimalComposite
+                        ? "decimal composite aggregates are not cacheable"
+                        : frame.rowCount() + " rows, above the cache row cap"));
+            }
             return false;
         }
         if (generation.isPresent()) {

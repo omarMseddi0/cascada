@@ -1,7 +1,7 @@
 package com.cascada.app.adapter.in.api;
 
 import com.cascada.app.adapter.in.grpc.protocol.*;
-import com.cascada.app.exception.ApiFailure;
+import com.cascada.app.model.api.ApiFailure;
 import com.cascada.cache.application.port.in.*;
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
 import com.cascada.cache.application.port.in.MeasureCacheSizeUseCase;

@@ -1,6 +1,8 @@
 package com.cascada.cache.adapter.out.cache;
 
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
+import com.cascada.cache.application.execution.QueryCancellation;
+import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -27,12 +29,17 @@ import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -220,11 +227,12 @@ class ValkeyCacheBackendAdapterTest {
     void storeWritesTheValueWithItsTimeToLive() {
         AtomicReference<String> sentArguments = new AtomicReference<>();
         RedisCommands<byte[], byte[]> sync = proxy(RedisCommands.class, (proxy, method, args) -> {
-            assertEquals("set", method.getName());
-            CommandArgs<byte[], byte[]> commandArguments = new CommandArgs<>(ByteArrayCodec.INSTANCE);
-            ((SetArgs) args[2]).build(commandArguments);
-            sentArguments.set(commandArguments.toCommandString());
-            return "OK";
+            assertEquals("eval", method.getName());
+            assertTrue(((String) args[0]).contains("'PX'"));
+            byte[][] keys = (byte[][]) args[2];
+            assertEquals("QC:V4:revision", text(keys[1]));
+            sentArguments.set(text(((byte[][]) args[3])[1]));
+            return 1L;
         });
         CacheValueSerializerPort serializer = new CacheValueSerializerPort() {
             @Override public byte[] serialize(ResultFrame frame) { return bytes("frame"); }
@@ -235,7 +243,7 @@ class ValkeyCacheBackendAdapterTest {
         adapter.store("QC:V4:B86400:abc:0", ResultFrame.builder().column("n", ColumnType.LONG).row(1L).build(),
                 Duration.ofDays(7));
 
-        assertEquals("EX 604800", sentArguments.get());
+        assertEquals("604800000", sentArguments.get());
     }
 
     @Test
@@ -250,23 +258,133 @@ class ValkeyCacheBackendAdapterTest {
             completeWithMgetResults(response, (byte[][]) args[0], "none");
             return redisFuture(response);
         });
+        CountDownLatch badDecoded = new CountDownLatch(1);
         CacheValueSerializerPort corruptForBad = new CacheValueSerializerPort() {
             @Override public byte[] serialize(ResultFrame frame) { throw new UnsupportedOperationException(); }
             @Override public ResultFrame deserialize(byte[] blob) {
                 if (text(blob).equals("kbad")) {
+                    badDecoded.countDown();
                     throw new CacheSerializationException("corrupt", new IllegalStateException());
+                }
+                try {
+                    assertTrue(badDecoded.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("parallel decode was interrupted", interrupted);
                 }
                 return ResultFrame.builder().column("value", ColumnType.LONG).row(1L).build();
             }
         };
-        ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(connection(async, unused -> null), corruptForBad);
+        RedisCommands<byte[], byte[]> sync = proxy(RedisCommands.class, (proxy, method, args) -> {
+            assertEquals("eval", method.getName());
+            deletedKeys.add(text(((byte[][]) args[2])[0]));
+            assertEquals("QC:V4:revision", text(((byte[][]) args[2])[1]));
+            return 1L;
+        });
+        ExecutorService decodeExecutor = Executors.newFixedThreadPool(2);
+        ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(
+                connection(async, unused -> sync), corruptForBad, Duration.ofSeconds(60), decodeExecutor,
+                2, Long.MAX_VALUE);
+        try {
+            List<Integer> visitedIndexes = new ArrayList<>();
+            List<java.util.Optional<ResultFrame>> frames = new ArrayList<>();
+            adapter.visitKeys(List.of("kgood", "kbad"), (index, frame) -> {
+                visitedIndexes.add(index);
+                frames.add(frame);
+            });
 
-        List<java.util.Optional<ResultFrame>> frames = adapter.multiGet(List.of("kgood", "kbad"));
-
-        assertTrue(frames.get(0).isPresent());
-        assertTrue(frames.get(1).isEmpty());
-        assertEquals(List.of("kbad"), deletedKeys);
+            assertEquals(List.of(0, 1), visitedIndexes);
+            assertTrue(frames.get(0).isPresent());
+            assertTrue(frames.get(1).isEmpty());
+            assertEquals(List.of("kbad"), deletedKeys);
+        } finally {
+            adapter.close();
+            assertFalse(decodeExecutor.isShutdown());
+            decodeExecutor.shutdownNow();
+        }
     }
+
+    @Test
+    void cancellingTheCurrentQueryCancelsDecodeTasksAndWakesTheProducer() throws Exception {
+        RedisAsyncCommands<byte[], byte[]> async = proxy(RedisAsyncCommands.class, (proxy, method, args) -> {
+            if (!method.getName().equals("mget")) {
+                throw new AssertionError("unexpected async call: " + method.getName());
+            }
+            CompletableFuture<List<KeyValue<byte[], byte[]>>> response = new CompletableFuture<>();
+            completeWithMgetResults(response, (byte[][]) args[0], "none");
+            return redisFuture(response);
+        });
+        CountDownLatch decodesStarted = new CountDownLatch(2);
+        CountDownLatch decodesInterrupted = new CountDownLatch(2);
+        CacheValueSerializerPort blockingSerializer = new CacheValueSerializerPort() {
+            @Override public byte[] serialize(ResultFrame frame) { throw new UnsupportedOperationException(); }
+            @Override public ResultFrame deserialize(byte[] blob) {
+                decodesStarted.countDown();
+                try {
+                    new CountDownLatch(1).await();
+                } catch (InterruptedException cancelled) {
+                    decodesInterrupted.countDown();
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("decode cancelled", cancelled);
+                }
+                return ResultFrame.builder().column("value", ColumnType.LONG).row(1L).build();
+            }
+        };
+        ExecutorService decodeExecutor = Executors.newFixedThreadPool(2);
+        ExecutorService producer = Executors.newSingleThreadExecutor();
+        ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(
+                connection(async, unused -> null), blockingSerializer, Duration.ofSeconds(60),
+                decodeExecutor, 2, Long.MAX_VALUE);
+        QueryCancellation cancellation = new QueryCancellation();
+        AtomicInteger callbacks = new AtomicInteger();
+        Future<?> visiting = producer.submit(() -> {
+            try (QueryExecutionScope ignored = new QueryExecutionScope(cancellation)) {
+                adapter.visitKeys(List.of("k0", "k1"), (index, frame) -> callbacks.incrementAndGet());
+            }
+        });
+        try {
+            assertTrue(decodesStarted.await(5, TimeUnit.SECONDS));
+            cancellation.cancel();
+
+            org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> visiting.get(5, TimeUnit.SECONDS));
+            assertTrue(decodesInterrupted.await(5, TimeUnit.SECONDS));
+            assertEquals(0, callbacks.get());
+        } finally {
+            adapter.close();
+            assertFalse(decodeExecutor.isShutdown());
+            decodeExecutor.shutdownNow();
+            producer.shutdownNow();
+        }
+    }
+
+
+    @Test
+    void cancellationDuringMgetSubmissionCancelsTheNewFutureWithoutWaiting() {
+        QueryCancellation cancellation = new QueryCancellation();
+        CompletableFuture<List<KeyValue<byte[], byte[]>>> response = new CompletableFuture<>();
+        AtomicInteger submissions = new AtomicInteger(), callbacks = new AtomicInteger();
+        RedisAsyncCommands<byte[], byte[]> async = proxy(RedisAsyncCommands.class, (proxy, method, args) -> {
+            if (!method.getName().equals("mget")) throw new AssertionError(method.getName());
+            submissions.incrementAndGet();
+            cancellation.cancel();
+            return redisFuture(response, operation -> {
+                if (operation.equals("get")) throw new AssertionError("cancelled query must not wait for this reply");
+            });
+        });
+        try (ValkeyCacheBackendAdapter adapter = new ValkeyCacheBackendAdapter(connection(async, unused -> null),
+                serializer(), Duration.ofSeconds(60));
+             QueryExecutionScope ignored = new QueryExecutionScope(cancellation)) {
+            org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+                    () -> adapter.visitKeys(List.of("k0"), (index, frame) -> callbacks.incrementAndGet()));
+            assertTrue(response.isCancelled());
+            assertEquals(1, submissions.get());
+            assertEquals(0, callbacks.get());
+        }
+    }
+
+
+
 
     private static void completeWithMgetResults(
             CompletableFuture<List<KeyValue<byte[], byte[]>>> response, byte[][] request, String missingKey) {

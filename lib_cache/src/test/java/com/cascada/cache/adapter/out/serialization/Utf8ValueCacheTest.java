@@ -3,16 +3,17 @@ package com.cascada.cache.adapter.out.serialization;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
-import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import org.junit.jupiter.api.Test;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class Utf8ValueCacheTest {
     @Test
     void repeatedUtf8ValuesShareStringsWithoutChangingValuesNullsOrOrder() {
         List<String> values = List.of("", "東京😀", "Aa", "BB", "é", "e\u0301", "abcdefgh-X", "abcdefgh-Y", "\u0000");
-        ResultFrameBuilder builder = new ResultFrameBuilder().column("s", ColumnType.STRING);
+        ResultFrameBuilder builder = ResultFrame.builder().column("s", ColumnType.STRING);
         for (int row = 0; row < 2_000; row++) builder.appendString(row % 31 == 0 ? null : values.get(row % values.size()));
         ResultFrame original = builder.build();
         ArrowResultFrameSerializer codec = new ArrowResultFrameSerializer();
@@ -25,7 +26,7 @@ class Utf8ValueCacheTest {
 
     @Test
     void highCardinalityAndOversizeValuesRemainLosslessAfterTheCacheFallsBack() {
-        ResultFrameBuilder builder = new ResultFrameBuilder().expectedRows(5_002).column("s", ColumnType.STRING);
+        ResultFrameBuilder builder = ResultFrame.builder().expectedRows(5_002).column("s", ColumnType.STRING);
         for (int row = 0; row < 5_000; row++) builder.appendString("distinct-東京-" + row);
         builder.appendString("x".repeat(1_100_000));
         builder.appendString("distinct-東京-0");

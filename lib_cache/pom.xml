@@ -31,7 +31,7 @@
             <artifactId>cascada-lib-identity</artifactId>
         </dependency>
 
-        <!-- adapter-only: cache value serialization (Arrow IPC + zstd) and sketches -->
+        <!-- adapter-only: cache value serialization (Arrow IPC + zstd) -->
         <dependency>
             <groupId>com.github.luben</groupId>
             <artifactId>zstd-jni</artifactId>
@@ -44,14 +44,6 @@
             <groupId>org.apache.arrow</groupId>
             <artifactId>arrow-memory-unsafe</artifactId>
             <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.datasketches</groupId>
-            <artifactId>datasketches-java</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.datasketches</groupId>
-            <artifactId>datasketches-memory</artifactId>
         </dependency>
         <dependency>
             <groupId>io.lettuce</groupId>
@@ -68,47 +60,13 @@
         </dependency>
     </dependencies>
 
-    <profiles>
-        <profile>
-            <id>benchmarks</id>
-            <dependencies>
-                <dependency>
-                    <groupId>org.openjdk.jmh</groupId>
-                    <artifactId>jmh-core</artifactId>
-                    <version>1.37</version>
-                    <scope>test</scope>
-                </dependency>
-                <dependency>
-                    <groupId>org.openjdk.jmh</groupId>
-                    <artifactId>jmh-generator-annprocess</artifactId>
-                    <version>1.37</version>
-                    <scope>test</scope>
-                </dependency>
-            </dependencies>
-            <build><plugins><plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration><proc>full</proc></configuration>
-            </plugin><plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>build-helper-maven-plugin</artifactId>
-                <version>3.5.0</version>
-                <executions><execution>
-                    <id>benchmark-sources</id><phase>generate-test-sources</phase>
-                    <goals><goal>add-test-source</goal></goals>
-                    <configuration><sources><source>src/benchmark/java</source></sources></configuration>
-                </execution></executions>
-            </plugin></plugins></build>
-        </profile>
-    </profiles>
-
     <build>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!-- Agrona, Arrow and DataSketches require access to these JDK modules. -->
+                    <!-- Agrona and Arrow require access to these JDK modules. -->
                     <argLine>${agrona.jvm.args}</argLine>
                 </configuration>
             </plugin>

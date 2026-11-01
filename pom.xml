@@ -209,12 +209,6 @@
             <id>distribution</id>
             <build><directory>${project.basedir}/target/distribution</directory></build>
         </profile>
-        <profile>
-            <id>benchmarks</id>
-            <!-- Keep reproducible test/benchmark bytecode separate from IDE auto-build output. -->
-            <!-- Keep the standard target/test-classes suffix for ArchUnit test exclusion. -->
-            <build><directory>${project.basedir}/target/benchmarks/target</directory></build>
-        </profile>
     </profiles>
 
     <build>

@@ -60,6 +60,18 @@ class GapQueryBuilderTest {
     }
 
     @Test
+    void keepsTimeBucketProjectionWhileExpandingAggregateArithmetic() {
+        String sql = "SELECT FLOOR(ts/600)*600 AS ts, SUM(a)+SUM(b) AS total "
+                + "FROM traffic WHERE ts >= 0 AND ts <= 999999 GROUP BY FLOOR(ts/600)*600";
+        GapPlan gap = new GapPlan(Optional.empty(), List.of(0L), Optional.empty());
+
+        String result = builder.buildGapQuery(sql, gap);
+
+        assertThat(result).contains("FLOOR(ts / 600) * 600 ts")
+                .contains(CompositeIngredientNames.alias("SUM(a)"), CompositeIngredientNames.alias("SUM(b)"));
+    }
+
+    @Test
     void stripsTimeConditionsButKeepsOtherPredicates() {
         String stripped = builder.stripTimeConditions(
                 "SELECT appName FROM traffic WHERE ts >= 0 AND ts <= 100 AND region = 'eu'");

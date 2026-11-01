@@ -161,7 +161,8 @@ public final class GapQueryBuilder {
         for (SqlNode item : select.getSelectList()) {
             if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall alias
                     && alias.operand(0) instanceof SqlBasicCall expression
-                    && SqlTrees.ARITHMETIC.contains(expression.getKind())) {
+                    && SqlTrees.ARITHMETIC.contains(expression.getKind())
+                    && containsAggregate(expression)) {
                 expandIngredients(expression, expanded, emittedIngredients);
             } else expanded.add(item);
         }
@@ -185,6 +186,16 @@ public final class GapQueryBuilder {
             rewritten.add(aliased("MIN(TYPEOF(" + argument + "))", AverageIngredients.typeColumn(name)));
         }
         select.setSelectList(rewritten);
+    }
+
+    private boolean containsAggregate(SqlNode node) {
+        if (SqlTrees.isAggregateCall(node)) return true;
+        if (node instanceof org.apache.calcite.sql.SqlCall call) {
+            for (SqlNode operand : call.getOperandList()) {
+                if (containsAggregate(operand)) return true;
+            }
+        }
+        return false;
     }
 
     private void expandIngredients(SqlNode node, List<SqlNode> expanded, java.util.Set<String> emitted) {

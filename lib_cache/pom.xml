@@ -60,40 +60,6 @@
         </dependency>
     </dependencies>
 
-    <profiles>
-        <profile>
-            <id>benchmarks</id>
-            <dependencies>
-                <dependency>
-                    <groupId>org.openjdk.jmh</groupId>
-                    <artifactId>jmh-core</artifactId>
-                    <version>1.37</version>
-                    <scope>test</scope>
-                </dependency>
-                <dependency>
-                    <groupId>org.openjdk.jmh</groupId>
-                    <artifactId>jmh-generator-annprocess</artifactId>
-                    <version>1.37</version>
-                    <scope>test</scope>
-                </dependency>
-            </dependencies>
-            <build><plugins><plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration><proc>full</proc></configuration>
-            </plugin><plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>build-helper-maven-plugin</artifactId>
-                <version>3.5.0</version>
-                <executions><execution>
-                    <id>benchmark-sources</id><phase>generate-test-sources</phase>
-                    <goals><goal>add-test-source</goal></goals>
-                    <configuration><sources><source>src/benchmark/java</source></sources></configuration>
-                </execution></executions>
-            </plugin></plugins></build>
-        </profile>
-    </profiles>
-
     <build>
         <plugins>
             <plugin>

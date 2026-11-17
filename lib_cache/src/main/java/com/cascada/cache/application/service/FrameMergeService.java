@@ -261,11 +261,12 @@ public final class FrameMergeService {
             for (int index = 0; index < orderBy.size(); index++) {
                 OrderByClause clause = orderBy.get(index);
                 int column = sortColumns[index];
-                boolean aNull = column < 0 || frame.isNullAt(left, column);
-                boolean bNull = column < 0 || frame.isNullAt(right, column);
+                boolean leftIsNull = column < 0 || frame.isNullAt(left, column);
+                boolean rightIsNull = column < 0 || frame.isNullAt(right, column);
                 int compared;
-                if (aNull || bNull) {
-                    compared = aNull == bNull ? 0 : (aNull ? -1 : 1) * (clause.nullsFirst() ? 1 : -1);
+                if (leftIsNull || rightIsNull) {
+                    compared = leftIsNull == rightIsNull ? 0
+                            : (leftIsNull ? -1 : 1) * (clause.nullsFirst() ? 1 : -1);
                 } else {
                     compared = switch (frame.columnTypeAt(column)) {
                         case LONG -> Long.compare(frame.longAt(left, column), frame.longAt(right, column));
@@ -281,39 +282,39 @@ public final class FrameMergeService {
             }
             return Integer.compare(left, right); // Stable SQL ties retain merge group order.
         };
-        int[] rows = new int[limit];
+        int[] selectedRows = new int[limit];
         if (limit > 0 && !orderBy.isEmpty() && limit < frame.rowCount()) {
-            // ORDER BY LIMIT needs only the best K rows, rather than sorting the entire result.
-            int size = 0;
+            // Keep a bounded heap with the worst selected row at the root.
+            int heapSize = 0;
             for (int row = 0; row < frame.rowCount(); row++) {
-                if (size < limit) {
-                    int slot = size++;
+                if (heapSize < limit) {
+                    int slot = heapSize++;
                     while (slot > 0) {
                         int parent = (slot - 1) >>> 1;
-                        if (comparator.applyAsInt(row, rows[parent]) <= 0) break;
-                        rows[slot] = rows[parent];
+                        if (comparator.applyAsInt(row, selectedRows[parent]) <= 0) break;
+                        selectedRows[slot] = selectedRows[parent];
                         slot = parent;
                     }
-                    rows[slot] = row;
-                } else if (comparator.applyAsInt(row, rows[0]) < 0) {
+                    selectedRows[slot] = row;
+                } else if (comparator.applyAsInt(row, selectedRows[0]) < 0) {
                     int slot = 0;
-                    while (slot < size / 2) {
+                    while (slot < heapSize / 2) {
                         int child = slot * 2 + 1;
-                        if (child + 1 < size && comparator.applyAsInt(rows[child + 1], rows[child]) > 0) child++;
-                        if (comparator.applyAsInt(row, rows[child]) >= 0) break;
-                        rows[slot] = rows[child];
+                        if (child + 1 < heapSize && comparator.applyAsInt(selectedRows[child + 1], selectedRows[child]) > 0) child++;
+                        if (comparator.applyAsInt(row, selectedRows[child]) >= 0) break;
+                        selectedRows[slot] = selectedRows[child];
                         slot = child;
                     }
-                    rows[slot] = row;
+                    selectedRows[slot] = row;
                 }
             }
-            IntStableSort.sort(rows, comparator);
+            IntStableSort.sort(selectedRows, comparator);
         } else if (limit > 0) {
-            for (int row = 0; row < limit; row++) rows[row] = row;
-            if (!orderBy.isEmpty()) IntStableSort.sort(rows, comparator);
+            for (int row = 0; row < limit; row++) selectedRows[row] = row;
+            if (!orderBy.isEmpty()) IntStableSort.sort(selectedRows, comparator);
         }
 
-        return selectAndProject(frame, rows, limit, canonicalObject, hasProjection);
+        return selectAndProject(frame, selectedRows, limit, canonicalObject, hasProjection);
     }
 
     /** Writes selected rows and projected columns in one pass after sorting has used the full frame. */

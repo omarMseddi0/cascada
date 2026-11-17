@@ -94,8 +94,8 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
     }
 
     public CanonicalQueryObject extractCanonicalObjectFromSql(String sql, TimeDimensionMap timeDimensionMap) {
-        sql = CacheQueryFlattener.flatten(sql);
-        ParsedSqlQuery parsed = parse(sql);
+        String flattenedSql = CacheQueryFlattener.flatten(sql);
+        ParsedSqlQuery parsed = parse(flattenedSql);
         SqlSelect select = parsed.select();
         cacheabilityGuard.validate(parsed.root(), select, timeDimensionMap);
 
@@ -128,23 +128,11 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                     TimeStepNormalizer.bucketOutput(node, timeDimensionMap, storageStepSeconds))).toList();
         }
 
-        groupBy = new ArrayList<>(groupBy);
-        // A grouped output alias is the dimension name carried by Spark's frame.
-        for (int index = 0; index < groupBy.size(); index++) {
-            String group = groupBy.get(index);
-            for (SqlNode item : select.getSelectList()) {
-                SqlNode expression = SqlTrees.unaliased(item);
-                if (expression instanceof SqlIdentifier && CalciteSql.unparse(expression).equals(group)) {
-                    groupBy.set(index, SqlTrees.outputName(item));
-                    break;
-                }
-            }
-        }
-
+        List<String> outputGroupNames = resolveOutputGroupNames(select, groupBy);
         NormalizedAggregates normalized = aggregateNormalizer.normalize(rawAggregateCalls);
 
         HashComponents hashComponents = new HashComponents(
-                new ArrayList<>(new TreeSet<>(groupBy)),
+                new ArrayList<>(new TreeSet<>(outputGroupNames)),
                 normalized.normalizedForHash(),
                 timeExtraction.filters(),
                 0);
@@ -167,48 +155,83 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         PostProcessing postProcessing = new PostProcessing(extractLimit(parsed), extractOrderBy(parsed));
 
         return new CanonicalQueryObject(hashComponents, timeExtraction.timeRange().orElseThrow(), postProcessing,
-                metadata, sql, extractSourceSignature(select), projectionSignature, logicSignature,
+                metadata, flattenedSql, extractSourceSignature(select), projectionSignature, logicSignature,
                 select.getSelectList().stream().map(SqlTrees::outputName).toList());
     }
 
-    private boolean touchesHotBatch(SqlNode source) {
-        if (source instanceof SqlIdentifier id) {
-            return id.names.size() == 2 && id.names.get(0).equalsIgnoreCase("delta")
-                    && hotBatchPaths.contains(id.names.get(1));
+    private List<String> resolveOutputGroupNames(SqlSelect select, List<String> groupBy) {
+        List<String> outputGroupNames = new ArrayList<>(groupBy);
+        // The first matching projection supplies the dimension name carried by Spark's frame.
+        for (int index = 0; index < outputGroupNames.size(); index++) {
+            String group = outputGroupNames.get(index);
+            for (SqlNode item : select.getSelectList()) {
+                SqlNode expression = SqlTrees.unaliased(item);
+                if (expression instanceof SqlIdentifier && CalciteSql.unparse(expression).equals(group)) {
+                    outputGroupNames.set(index, SqlTrees.outputName(item));
+                    break;
+                }
+            }
         }
-        if (source instanceof SqlCall call) return call.getOperandList().stream()
-                .filter(java.util.Objects::nonNull).anyMatch(this::touchesHotBatch);
+        return outputGroupNames;
+    }
+
+    private boolean touchesHotBatch(SqlNode source) {
+        if (source instanceof SqlIdentifier identifier) {
+            return identifier.names.size() == 2 && identifier.names.get(0).equalsIgnoreCase("delta")
+                    && hotBatchPaths.contains(identifier.names.get(1));
+        }
+        if (source instanceof SqlCall call) {
+            return call.getOperandList().stream()
+                    .filter(java.util.Objects::nonNull).anyMatch(this::touchesHotBatch);
+        }
         return false;
     }
 
     private boolean hasMergeableProjection(ParsedSqlQuery parsed, TimeDimensionMap dimensions) {
         SqlSelect select = parsed.select();
-        if ((parsed.orderBy() != null && parsed.orderBy().offset != null) || select.getOffset() != null) return false;
-        if (extractOrderBy(parsed).stream().anyMatch(order -> order.expression().isPresent())) return false;
+        if ((parsed.orderBy() != null && parsed.orderBy().offset != null) || select.getOffset() != null) {
+            return false;
+        }
+        if (extractOrderBy(parsed).stream().anyMatch(order -> order.expression().isPresent())) {
+            return false;
+        }
         List<String> grouped = extractGroupBy(select);
         Set<String> projectedGroups = new java.util.HashSet<>();
         for (SqlNode item : select.getSelectList()) {
             SqlNode expression = SqlTrees.unaliased(item);
             String alias = expression == item ? null : SqlTrees.outputName(item);
-            if (AverageIngredients.isReservedName(SqlTrees.outputName(item))) return false;
+            if (AverageIngredients.isReservedName(SqlTrees.outputName(item))) {
+                return false;
+            }
             if (expression instanceof SqlBasicCall call && SqlTrees.isAggregateCall(call)) {
-                if (call.getFunctionQuantifier() != null) return false;
+                if (call.getFunctionQuantifier() != null) {
+                    return false;
+                }
                 // AVG is rebuilt from renamed SUM/COUNT ingredients; only an explicit alias keeps the
                 // cached and direct result schemas identical.
-                if (GapQueryBuilder.isAverageCall(call) && (alias == null || call.operandCount() != 1)) return false;
+                if (GapQueryBuilder.isAverageCall(call) && (alias == null || call.operandCount() != 1)) {
+                    return false;
+                }
                 continue;
             }
-            if (alias != null && isMergeableMeasureExpression(expression) && !(expression instanceof SqlIdentifier)) continue;
+            if (alias != null && isMergeableMeasureExpression(expression) && !(expression instanceof SqlIdentifier)) {
+                continue;
+            }
             String rendered = CalciteSql.unparse(expression);
-            if (!grouped.contains(rendered)) return false;
-            if (expression instanceof SqlIdentifier) {
-                projectedGroups.add(rendered);
-            } else if (CanonicalTimeSeriesAnalyzer.floorBucketStep(expression, dimensions).isPresent()
-                    && alias != null && dimensions.isTimeColumn(alias)) {
-                projectedGroups.add(rendered);
-            } else return false;
+            if (!grouped.contains(rendered)) {
+                return false;
+            }
+            if (!(expression instanceof SqlIdentifier) && !isAliasedTimeBucket(expression, alias, dimensions)) {
+                return false;
+            }
+            projectedGroups.add(rendered);
         }
         return projectedGroups.containsAll(grouped);
+    }
+
+    private boolean isAliasedTimeBucket(SqlNode expression, String alias, TimeDimensionMap dimensions) {
+        return CanonicalTimeSeriesAnalyzer.floorBucketStep(expression, dimensions).isPresent()
+                && alias != null && dimensions.isTimeColumn(alias);
     }
 
     private boolean isMergeableMeasureExpression(SqlNode expression) {

@@ -18,14 +18,14 @@ The cache stores columnar result frames and supports in-memory and Valkey backen
 
 ## Build and test
 
-Use JDK 21 and Maven. From the repository root:
+Set `JAVA_HOME` to JDK 21 before running Maven. The reactor requires Java 21 to match the deployment runtime. From the repository root:
 
 ```sh
 mvn test
 mvn -Pdistribution -pl app -am package -DskipTests
 ```
 
-The reactor targets Java 21, Spark 4.1.1, Scala 2.13, and Delta Lake 4.1. The distribution expects its Spark runtime dependencies to be supplied by the deployment environment. The [Dockerfile](Dockerfile) describes the required runtime image, including the compatible Gluten/Velox Delta bundle. The `local-spark` Maven profile supplies Spark and Delta dependencies for local development; native execution still requires a compatible runtime.
+The reactor targets Java 21, Spark 4.1.1, Scala 2.13, and Delta Lake 4.1.0. The distribution expects the deployment image to supply Spark and the compatible Gluten/Velox Delta bundle described in the [Dockerfile](Dockerfile). The `local-spark` Maven profile supplies Spark and Delta dependencies for local development.
 
 ## Configuration and API
 

@@ -20,7 +20,7 @@
     </description>
 
     <dependencies>
-        <!-- Latest stable Agrona; Java 17 supported with its required module opens. -->
+        <!-- Agrona requires the module opens configured in the parent POM. -->
         <dependency>
             <groupId>org.agrona</groupId>
             <artifactId>agrona</artifactId>

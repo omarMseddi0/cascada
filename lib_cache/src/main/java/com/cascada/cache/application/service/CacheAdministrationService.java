@@ -43,16 +43,17 @@ public final class CacheAdministrationService implements MeasureCacheSizeUseCase
     /** Purge the entire cache; returns the number of buckets removed. */
     @Override
     public long flushEverything() {
-        long purged = cacheBackend.flush(CacheScope.everything());
-        if (coverageIndex != null) coverageIndex.clear();
-        if (cubeCatalog != null) cubeCatalog.clear();
-        return purged;
+        return flushAndClearDerivedIndexes(CacheScope.everything());
     }
 
     /** Surgical eviction by an explicit key prefix. */
     @Override
     public long flushKeyPrefix(String keyPrefix) {
-        long purged = cacheBackend.flush(CacheScope.forKeyPrefix(keyPrefix));
+        return flushAndClearDerivedIndexes(CacheScope.forKeyPrefix(keyPrefix));
+    }
+
+    private long flushAndClearDerivedIndexes(CacheScope scope) {
+        long purged = cacheBackend.flush(scope);
         if (coverageIndex != null) coverageIndex.clear();
         if (cubeCatalog != null) cubeCatalog.clear();
         return purged;

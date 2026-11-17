@@ -11,23 +11,8 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * The zero-config derivation (plan §6.6, Appendix G; ARCHITECTURE §8). A pure function that turns
- * the three knobs — RAM, CPU, placement — plus an optional workload hint into every Spark/Delta flag,
- * and reproduces the golden {@code data_collector/src/spark.json} for the reference knobs.
- *
- * <p>Being a pure function is the design's leverage: if Gluten changes its memory expectations we edit
- * one method, not ten thousand customer configs, and the golden test re-runs on every image bump.
- *
- * <p>Derivation rules of note:
- * <ul>
- *   <li>{@code spark.kubernetes.executor.limit.cores = executor.cores + 1} (golden: 19 vs 18);</li>
- *   <li>AQE and Arrow are always on (free wins; never exposed as toggles);</li>
- *   <li>the Delta extension/catalog and the advisory partition size track the table profile (golden:
- *       267108864);</li>
- *   <li>min/max executors come from the placement budget;</li>
- *   <li>off-heap is sized only when the workload uses Gluten/Velox, so a misconfiguration cannot OOM
- *       — and the customer never sees {@code offHeap}.</li>
- * </ul>
+ * Derives workload-specific Spark and Delta properties from executor RAM, cores, placement,
+ * and the workload type. Static infrastructure properties are supplied separately.
  */
 public final class SparkConfigurationDeriver implements DeriveSparkConfigurationUseCase {
 
@@ -80,24 +65,7 @@ public final class SparkConfigurationDeriver implements DeriveSparkConfiguration
         int initialExecutors = SparkReference.initialExecutors(minimumExecutors, maximumExecutors);
         entries.put("spark.executor.instances", Integer.toString(initialExecutors));
         entries.put("spark.driver.memory", SparkReference.DRIVER_MEMORY);
-        if (workloadType.isGlutenOffHeapEnabled()) {
-            if (memorySplit.offHeapGigabytes() == 0) {
-                throw new IllegalArgumentException("Gluten requires at least "
-                        + SparkReference.MINIMUM_GLUTEN_EXECUTOR_RAM_GIGABYTES + " GiB executor RAM");
-            }
-            entries.put("spark.plugins", SparkReference.GLUTEN_PLUGIN);
-            entries.put("spark.shuffle.manager", SparkReference.COLUMNAR_SHUFFLE_MANAGER);
-        }
-        if (memorySplit.offHeapGigabytes() > 0) {
-            entries.put("spark.memory.offHeap.enabled", "true");
-            entries.put("spark.memory.offHeap.size", memorySplit.offHeapGigabytes() + "g");
-        }
-        if (memorySplit.overheadGigabytes() > 0) {
-            // The reserved overhead must reach Kubernetes explicitly: without this key Spark adds its
-            // own default (10% of heap) ON TOP of heap + off-heap, and the pod exceeds the RAM knob —
-            // the scheduler then rejects or OOMKills the executor.
-            entries.put("spark.executor.memoryOverhead", memorySplit.overheadGigabytes() + "g");
-        }
+        addExecutorMemorySettings(entries, workloadType, memorySplit);
 
         // --- Delta extension / catalog / file sizing (always on; advisory size tracks the profile) ---
         entries.put("spark.sql.extensions", SparkReference.DELTA_EXTENSION);
@@ -132,5 +100,27 @@ public final class SparkConfigurationDeriver implements DeriveSparkConfiguration
                 executorPlacement.nodeSelectorValue());
 
         return new SparkConfiguration(entries);
+    }
+
+    private static void addExecutorMemorySettings(Map<String, String> entries, WorkloadType workloadType,
+                                                  SparkMemorySplit memorySplit) {
+        if (workloadType.isGlutenOffHeapEnabled()) {
+            if (memorySplit.offHeapGigabytes() == 0) {
+                throw new IllegalArgumentException("Gluten requires at least "
+                        + SparkReference.MINIMUM_GLUTEN_EXECUTOR_RAM_GIGABYTES + " GiB executor RAM");
+            }
+            entries.put("spark.plugins", SparkReference.GLUTEN_PLUGIN);
+            entries.put("spark.shuffle.manager", SparkReference.COLUMNAR_SHUFFLE_MANAGER);
+        }
+        if (memorySplit.offHeapGigabytes() > 0) {
+            entries.put("spark.memory.offHeap.enabled", "true");
+            entries.put("spark.memory.offHeap.size", memorySplit.offHeapGigabytes() + "g");
+        }
+        if (memorySplit.overheadGigabytes() > 0) {
+            // The reserved overhead must reach Kubernetes explicitly: without this key Spark adds its
+            // own default (10% of heap) ON TOP of heap + off-heap, and the pod exceeds the RAM knob —
+            // the scheduler then rejects or OOMKills the executor.
+            entries.put("spark.executor.memoryOverhead", memorySplit.overheadGigabytes() + "g");
+        }
     }
 }

@@ -1,7 +1,6 @@
 package com.cascada.app.adapter.in.api;
 
 import com.cascada.app.adapter.in.grpc.protocol.*;
-import com.cascada.app.model.api.ApiFailure;
 import com.cascada.cache.application.port.in.*;
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
 import com.cascada.cache.application.port.in.MeasureCacheSizeUseCase;
@@ -34,6 +33,6 @@ public final class CacheGrpcService extends CacheServiceGrpc.CacheServiceImplBas
     }
     private static <T> void respond(StreamObserver<T> response, java.util.function.Supplier<T> operation) {
         try { response.onNext(operation.get()); response.onCompleted(); }
-        catch (RuntimeException failure) { response.onError(ApiFailure.from(failure).grpcException()); }
+        catch (RuntimeException failure) { response.onError(GrpcFailures.exception(failure)); }
     }
 }

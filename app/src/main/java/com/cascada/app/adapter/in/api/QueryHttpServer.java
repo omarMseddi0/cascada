@@ -3,11 +3,10 @@ package com.cascada.app.adapter.in.api;
 import com.cascada.app.adapter.in.api.model.ParquetResult;
 import com.cascada.app.concurrent.RequestExecutor;
 import com.cascada.app.model.config.ServerSettings;
-import com.cascada.app.model.api.ApiFailure;
+import com.cascada.app.adapter.in.api.model.ApiFailure;
 import com.cascada.app.exception.InvalidRequestException;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
-import com.cascada.cache.application.port.in.*;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
 import com.cascada.cache.application.port.in.MeasureCacheSizeUseCase;
@@ -109,7 +108,7 @@ public final class QueryHttpServer implements AutoCloseable {
             try { operation.handle(exchange); }
             catch (Throwable failure) {
                 ApiFailure error = ApiFailure.from(failure);
-                if (error.httpStatus() == 500) java.util.logging.Logger.getLogger(getClass().getName())
+                if (httpStatus(error) == 500) java.util.logging.Logger.getLogger(getClass().getName())
                         .log(java.util.logging.Level.WARNING, "API operation failed", failure);
                 if (exchange.getResponseCode() == -1) error(exchange, error);
                 if (failure instanceof Error fatal) throw fatal;
@@ -175,8 +174,17 @@ public final class QueryHttpServer implements AutoCloseable {
     private static void error(HttpExchange exchange, ApiFailure failure) throws IOException {
         byte[] body = JSON.writeValueAsBytes(Map.of("code", failure.code(), "error", failure.message()));
         exchange.getResponseHeaders().set("Content-Type", "application/json");
-        exchange.sendResponseHeaders(failure.httpStatus(), body.length);
+        exchange.sendResponseHeaders(httpStatus(failure), body.length);
         exchange.getResponseBody().write(body);
+    }
+
+    private static int httpStatus(ApiFailure failure) {
+        return switch (failure.code()) {
+            case "INVALID_REQUEST" -> 400;
+            case "UNSUPPORTED_QUERY" -> 422;
+            case "SERVICE_UNAVAILABLE", "QUERY_CANCELLED" -> 503;
+            default -> 500;
+        };
     }
     @Override public void close() {
         if (started) server.stop(1);

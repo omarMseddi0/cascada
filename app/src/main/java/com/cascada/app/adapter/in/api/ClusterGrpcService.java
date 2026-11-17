@@ -1,7 +1,6 @@
 package com.cascada.app.adapter.in.api;
 
 import com.cascada.app.adapter.in.grpc.protocol.*;
-import com.cascada.app.model.api.ApiFailure;
 import com.cascada.app.exception.InvalidRequestException;
 import com.cascada.fabric.application.port.in.ManageClusterLifecycleUseCase;
 import com.cascada.fabric.application.port.in.PrepareClusterSettingsUseCase;
@@ -26,6 +25,6 @@ public final class ClusterGrpcService extends ClusterServiceGrpc.ClusterServiceI
             response.onNext(ClusterResponse.newBuilder().setStatus(result.status())
                     .addAllResources(result.resources()).build());
             response.onCompleted();
-        } catch (RuntimeException failure) { response.onError(ApiFailure.from(failure).grpcException()); }
+        } catch (RuntimeException failure) { response.onError(GrpcFailures.exception(failure)); }
     }
 }

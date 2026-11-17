@@ -4,7 +4,6 @@ import com.cascada.app.adapter.in.grpc.protocol.*;
 import com.cascada.app.adapter.in.api.model.ParquetResult;
 import com.cascada.app.concurrent.RequestExecutor;
 import com.cascada.app.model.config.ServerSettings;
-import com.cascada.app.model.api.ApiFailure;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
@@ -47,7 +46,7 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
             if (stream.isCancelled()) cancel.run();
         }
         catch (RejectedExecutionException busy) {
-            observer.onError(ApiFailure.from(busy).grpcException());
+            observer.onError(GrpcFailures.exception(busy));
         }
     }
 
@@ -86,7 +85,7 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
         } catch (io.grpc.StatusRuntimeException status) {
             if (!stream.isCancelled()) stream.onError(status);
         } catch (Throwable failure) {
-            if (!stream.isCancelled()) stream.onError(ApiFailure.from(failure).grpcException());
+            if (!stream.isCancelled()) stream.onError(GrpcFailures.exception(failure));
             if (failure instanceof Error fatal) throw fatal;
         }
     }

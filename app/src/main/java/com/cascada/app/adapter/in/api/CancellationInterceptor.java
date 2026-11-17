@@ -3,7 +3,6 @@ package com.cascada.app.adapter.in.api;
 import com.cascada.app.concurrent.RequestExecutor;
 import com.cascada.app.model.config.ServerSettings;
 import com.cascada.cache.application.execution.QueryCancellation;
-import com.cascada.app.model.api.ApiFailure;
 import io.grpc.*;
 import java.util.concurrent.*;
 
@@ -21,7 +20,7 @@ public final class CancellationInterceptor implements ServerInterceptor, AutoClo
         Runnable operation = context.wrap(() -> {
             try { delegate.onHalfClose(); }
             catch (Throwable failure) {
-                call.close(ApiFailure.from(failure).grpcException().getStatus(), new Metadata());
+                call.close(GrpcFailures.status(failure), new Metadata());
                 if (failure instanceof Error fatal) throw fatal;
             }
         });
@@ -39,7 +38,7 @@ public final class CancellationInterceptor implements ServerInterceptor, AutoClo
                 }
                 catch (RejectedExecutionException busy) {
                     context.removeListener(listener);
-                    call.close(ApiFailure.from(busy).grpcException().getStatus(), new Metadata());
+                    call.close(GrpcFailures.status(busy), new Metadata());
                 }
             }
             @Override public void onComplete() { context.removeListener(listener); super.onComplete(); }

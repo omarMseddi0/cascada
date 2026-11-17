@@ -35,7 +35,9 @@ class AppArchitectureTest {
                 .should().dependOnClassesThat().resideOutsideOfPackages(
                         "java..", "com.sun.net.httpserver..", "io.grpc..", "com.google.protobuf..",
                         "com.fasterxml.jackson..", "org.apache.parquet..", "org.apache.hadoop..",
-                        "javax.annotation..", "lombok..", "com.google.common.util.concurrent..", "com.cascada.app.adapter.in..", "com.cascada.app.config..", "com.cascada.app.model..", "com.cascada.app.exception..", "com.cascada.app.concurrent..",
+                        "javax.annotation..", "lombok..", "com.google.common.util.concurrent..",
+                        "com.cascada.app.adapter.in..", "com.cascada.app.model..",
+                        "com.cascada.app.exception..", "com.cascada.app.concurrent..", "com.cascada.cache.exception",
                         "com.cascada.cache.application.execution..", "com.cascada.fabric.application.port.in..", "com.cascada.fabric.domain..",
                         "com.cascada.cache.application.port.in..", "com.cascada.cache.application.model..", "com.cascada.cache.domain..")
                 .check(CLASSES);

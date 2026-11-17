@@ -10,22 +10,22 @@ import java.util.Map;
 import java.util.Objects;
 
 public final class ClusterSettingsService implements PrepareClusterSettingsUseCase {
+    private static final int MAX_EXECUTOR_CORE_COUNT = Integer.MAX_VALUE - 1;
+    private static final int MAX_EXECUTOR_COUNT = Integer.MAX_VALUE;
+    private static final int MAX_REPLICA_COUNT = 1;
+    private static final int MAX_PORT_NUMBER = 65_535;
+
     private final ExecutorMemorySizingPort memorySizing;
 
     public ClusterSettingsService(ExecutorMemorySizingPort memorySizing) {
         this.memorySizing = Objects.requireNonNull(memorySizing, "memorySizing");
     }
 
-    private static final int MAX_EXECUTOR_CORE_COUNT = Integer.MAX_VALUE - 1;
-    private static final int MAX_EXECUTOR_COUNT = Integer.MAX_VALUE;
-    private static final int MAX_REPLICA_COUNT = 1;
-    private static final int MAX_PORT_NUMBER = 65_535;
-
     @Override
     public ClusterValues prepareClusterSettings(Map<String, String> settings) {
         Objects.requireNonNull(settings, "settings");
-        String release = settingOrDefault(settings, "CASCADA_RELEASE_NAME", "cascada");
-        String suffix = settingOrDefault(settings, "CASCADA_COPY_SUFFIX", "copy1");
+        String releaseName = settingOrDefault(settings, "CASCADA_RELEASE_NAME", "cascada");
+        String copySuffix = settingOrDefault(settings, "CASCADA_COPY_SUFFIX", "copy1");
         String namespace = settingOrDefault(settings, "CASCADA_NAMESPACE", "default");
         int executorCoreCount = readBoundedIntegerSetting(
                 settings, "CASCADA_EXECUTOR_CORES", 3, 1, MAX_EXECUTOR_CORE_COUNT);
@@ -46,24 +46,23 @@ public final class ClusterSettingsService implements PrepareClusterSettingsUseCa
         int httpPort = readBoundedIntegerSetting(settings, "CASCADA_HTTP_PORT", 8000, 1, MAX_PORT_NUMBER);
         int grpcPort = readBoundedIntegerSetting(settings, "CASCADA_GRPC_PORT", 9090, 1, MAX_PORT_NUMBER);
 
-        String serviceAccountName = release + "-spark-" + suffix;
-        String driverWorkloadName = release + "-driver-" + suffix;
-        String driverServiceName = release + "-spark-driver-" + suffix;
+        String serviceAccountName = releaseName + "-spark-" + copySuffix;
+        String driverWorkloadName = releaseName + "-driver-" + copySuffix;
+        String driverServiceName = releaseName + "-spark-driver-" + copySuffix;
 
         boolean gluten = SparkReference.parseGlutenEnabled(settings.get("CASCADA_GLUTEN_ENABLED"), true);
-        String nativeEnabled = Boolean.toString(gluten);
-        int ram = readBoundedIntegerSetting(settings, "CASCADA_EXECUTOR_RAM_GB", 16,
+        int executorRamGigabytes = readBoundedIntegerSetting(settings, "CASCADA_EXECUTOR_RAM_GB", 16,
                 SparkReference.minimumExecutorRamGigabytes(gluten), Integer.MAX_VALUE);
-        SparkMemorySplit memory = memorySizing.deriveMemorySplit(ram, gluten);
+        SparkMemorySplit memory = memorySizing.deriveMemorySplit(executorRamGigabytes, gluten);
         Map<String, String> values = new LinkedHashMap<>();
         values.put("executorOverhead", memory.overheadGigabytes() + "g");
         values.put("executorOffHeap", memory.offHeapGigabytes() + "g");
-        values.put("glutenEnabled", nativeEnabled);
+        values.put("glutenEnabled", Boolean.toString(gluten));
         values.put("sparkPlugins", gluten ? SparkReference.GLUTEN_PLUGIN : "");
         values.put("shuffleManager", gluten ? SparkReference.COLUMNAR_SHUFFLE_MANAGER : SparkReference.SORT_SHUFFLE_MANAGER);
         // identity / images
-        values.put("releaseName", release);
-        values.put("copySuffix", suffix);
+        values.put("releaseName", releaseName);
+        values.put("copySuffix", copySuffix);
         values.put("namespace", namespace);
         values.put("containerImage", settingOrDefault(settings, "CASCADA_CONTAINER_IMAGE",
                 SparkReference.CONTAINER_IMAGE));
@@ -72,28 +71,24 @@ public final class ClusterSettingsService implements PrepareClusterSettingsUseCa
         values.put("serviceAccountName", serviceAccountName);
         values.put("driverWorkloadName", driverWorkloadName);
         values.put("driverServiceName", driverServiceName);
-        values.put("clusterRoleBindingName", release + "-cluster-edit-binding-" + suffix);
-        values.put("roleName", release + "-namespace-role-" + suffix);
-        values.put("roleBindingName", release + "-namespace-role-binding-" + suffix);
-        values.put("coreSiteConfigMapName", release + "-hadoop-core-site-config-" + suffix);
-        values.put("hdfsSiteConfigMapName", release + "-hadoop-hdfs-site-config-" + suffix);
-        values.put("podTemplateConfigMapName", release + "-spark-executor-pod-template-config-" + suffix);
-        values.put("sparkConfigMapName", release + "-spark-config-" + suffix);
-        values.put("log4jConfigMapName", release + "-spark-log4j-config-" + suffix);
-        values.put("podNamePrefix", release + "-exec-" + suffix);
+        values.put("clusterRoleBindingName", releaseName + "-cluster-edit-binding-" + copySuffix);
+        values.put("roleName", releaseName + "-namespace-role-" + copySuffix);
+        values.put("roleBindingName", releaseName + "-namespace-role-binding-" + copySuffix);
+        values.put("coreSiteConfigMapName", releaseName + "-hadoop-core-site-config-" + copySuffix);
+        values.put("hdfsSiteConfigMapName", releaseName + "-hadoop-hdfs-site-config-" + copySuffix);
+        values.put("podTemplateConfigMapName", releaseName + "-spark-executor-pod-template-config-" + copySuffix);
+        values.put("sparkConfigMapName", releaseName + "-spark-config-" + copySuffix);
+        values.put("log4jConfigMapName", releaseName + "-spark-log4j-config-" + copySuffix);
+        values.put("podNamePrefix", releaseName + "-exec-" + copySuffix);
         // sizing knobs
-        String executorHeap = settingOrDefault(settings, "CASCADA_EXECUTOR_MEMORY", memory.heapAsSparkMemoryString());
-        if (!executorHeap.matches("[1-9][0-9]*g")) throw new IllegalArgumentException("CASCADA_EXECUTOR_MEMORY must use whole GiB");
-        long heapGiB = Long.parseLong(executorHeap.substring(0, executorHeap.length() - 1));
-        if (heapGiB + memory.offHeapGigabytes() + memory.overheadGigabytes() > ram) {
-            throw new IllegalArgumentException("CASCADA_EXECUTOR_MEMORY + native memory + overhead exceeds CASCADA_EXECUTOR_RAM_GB");
-        }
-        values.put("executorMemory", executorHeap);
+        values.put("executorMemory", readExecutorHeapSetting(settings, memory, executorRamGigabytes));
         values.put("executorCores", Integer.toString(executorCoreCount));
         values.put("shufflePartitions", Long.toString(Math.min(Integer.MAX_VALUE, 2L * executorCoreCount * maximumExecutors)));
         values.put("executorLimitCores", Integer.toString(SparkReference.executorLimitCores(executorCoreCount)));
         String driverMemory = settingOrDefault(settings, "CASCADA_DRIVER_MEMORY", SparkReference.DRIVER_MEMORY);
-        if (!driverMemory.matches("[1-9][0-9]*g")) throw new IllegalArgumentException("CASCADA_DRIVER_MEMORY must use whole GiB, e.g. 2g");
+        if (!driverMemory.matches("[1-9][0-9]*g")) {
+            throw new IllegalArgumentException("CASCADA_DRIVER_MEMORY must use whole GiB, e.g. 2g");
+        }
         values.put("driverMemory", driverMemory);
         values.put("driverMaxResultSize", settingOrDefault(settings, "CASCADA_DRIVER_MAX_RESULT_SIZE", "6g"));
         values.put("driverPodMemory", (Long.parseLong(driverMemory.substring(0, driverMemory.length() - 1)) + 1) + "Gi");
@@ -107,7 +102,24 @@ public final class ClusterSettingsService implements PrepareClusterSettingsUseCa
         values.put("httpPort", Integer.toString(httpPort));
         values.put("grpcPort", Integer.toString(grpcPort));
         values.put("driverHost", driverServiceName + "." + namespace + ".svc.cluster.local");
-        // placement (the third knob, expressed as a node-selector label)
+        addPlacementAndStorageValues(settings, values);
+        return new ClusterValues(values);
+    }
+
+    private static String readExecutorHeapSetting(Map<String, String> settings, SparkMemorySplit memory,
+                                                   int executorRamGigabytes) {
+        String executorHeap = settingOrDefault(settings, "CASCADA_EXECUTOR_MEMORY", memory.heapAsSparkMemoryString());
+        if (!executorHeap.matches("[1-9][0-9]*g")) {
+            throw new IllegalArgumentException("CASCADA_EXECUTOR_MEMORY must use whole GiB");
+        }
+        long heapGigabytes = Long.parseLong(executorHeap.substring(0, executorHeap.length() - 1));
+        if (heapGigabytes + memory.offHeapGigabytes() + memory.overheadGigabytes() > executorRamGigabytes) {
+            throw new IllegalArgumentException("CASCADA_EXECUTOR_MEMORY + native memory + overhead exceeds CASCADA_EXECUTOR_RAM_GB");
+        }
+        return executorHeap;
+    }
+
+    private static void addPlacementAndStorageValues(Map<String, String> settings, Map<String, String> values) {
         values.put("placementLabel", settingOrDefault(settings,
                 "CASCADA_PLACEMENT_LABEL", "cascada.io/placement"));
         values.put("placementValue", settingOrDefault(settings, "CASCADA_PLACEMENT_VALUE", "spread"));
@@ -115,7 +127,6 @@ public final class ClusterSettingsService implements PrepareClusterSettingsUseCa
         values.put("mainTableName", settingOrDefault(settings, "CASCADA_MAIN_TABLE_NAME", "main"));
         values.put("mainTablePath", settingOrDefault(settings, "CASCADA_MAIN_TABLE_PATH", "/DATA_ROOT/main"));
         values.put("redisUrl", settingOrDefault(settings, "REDIS_URL", "redis://valkey:6379"));
-        // storage
         values.put("hdfsDefaultFs", settingOrDefault(settings, "CASCADA_HDFS_DEFAULT_FS", "hdfs://namenode:9000"));
         values.put("dataHostPath", settingOrDefault(settings, "CASCADA_DATA_HOST_PATH", "/mnt/data-prod"));
         values.put("dataMountPath", settingOrDefault(settings, "CASCADA_DATA_MOUNT_PATH", "/DATA_ROOT"));
@@ -127,8 +138,6 @@ public final class ClusterSettingsService implements PrepareClusterSettingsUseCa
         values.put("podTemplateMount", "/opt/spark/templates/executor-pod-template.yaml");
         values.put("sparkJsonMount", "/app/spark.json");
         values.put("log4jMount", "/opt/spark/conf/log4j2.properties");
-
-        return new ClusterValues(values);
     }
 
     private static String settingOrDefault(Map<String, String> settings, String key, String fallback) {

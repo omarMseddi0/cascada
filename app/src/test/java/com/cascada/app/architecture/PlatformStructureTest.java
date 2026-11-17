@@ -45,6 +45,17 @@ class PlatformStructureTest {
     }
 
     @Test
+    void coreDoesNotDependOnAdapterTechnologies() {
+        noClasses().that().resideInAnyPackage("..domain..", "..application..")
+                .should().dependOnClassesThat().resideInAnyPackage(
+                        "com.fasterxml.jackson..", "io.grpc..", "io.lettuce..", "io.fabric8..",
+                        "org.apache.arrow..", "org.apache.calcite..", "org.apache.hadoop..",
+                        "org.apache.parquet..", "org.apache.spark..", "io.delta..", "org.agrona..",
+                        "org.springframework..", "jakarta.persistence..", "java.sql..")
+                .check(PLATFORM);
+    }
+
+    @Test
     void fabricUsesItsOwnPortsForExternalConfigurationLogic() {
         noClasses().that().resideInAPackage("com.cascada.fabric..")
                 .should().dependOnClassesThat().resideInAPackage("com.cascada.sparkconfig.application.service..")

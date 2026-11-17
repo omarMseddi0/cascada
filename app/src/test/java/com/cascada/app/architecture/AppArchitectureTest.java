@@ -54,6 +54,17 @@ class AppArchitectureTest {
     }
 
     @Test
+    void onlyCompositionRootWiresConcreteLibraryImplementations() {
+        noClasses().that().resideOutsideOfPackages("com.cascada.app.config..", "com.cascada.app.bootstrap..")
+                .should().dependOnClassesThat().resideInAnyPackage(
+                        "com.cascada.cache.adapter..", "com.cascada.cache.application.service..",
+                        "com.cascada.fabric.adapter..", "com.cascada.fabric.application.service..",
+                        "com.cascada.spark.adapter..", "com.cascada.spark.application.configuration..",
+                        "com.cascada.sparkconfig.application.service..", "com.cascada.sql.adapter..")
+                .check(CLASSES);
+    }
+
+    @Test
     void settingsDoNotDependOnInfrastructure() {
         noClasses().that().resideInAPackage("com.cascada.app.model.config..")
                 .and().haveSimpleNameEndingWith("Settings")

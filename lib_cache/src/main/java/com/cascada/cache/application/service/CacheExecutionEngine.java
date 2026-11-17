@@ -29,8 +29,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 
 /**
- * The workhorse of the cache, ported from {@code cache_execution_engine.py}: gap analysis, a two-phase
- * EXISTS-then-MGET access pattern, a parallel cache-fetch / Spark-gap fetch, and a final merge.
+ * Answers queries using verified cube results, cached buckets, and Spark for missing ranges.
  *
  * <p>The three fast-path short-circuits of the reference engine are preserved exactly:
  * <ol>
@@ -126,31 +125,13 @@ public final class CacheExecutionEngine {
 
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
         requireActive();
-        // Cube path (plan §8.12): only global aggregates with no deferred ORDER BY/LIMIT — a LIMIT
-        // would register a truncated frame and a roll-up would not reapply the ordering. The lookup
-        // is exact-time-window only, and every roll-up is verified before it is served.
-        boolean cubeShapeEligible = cubeCatalog != null
-                && !canonicalObject.metadata().isTimeSeries()
-                && !canonicalObject.postProcessing().hasLimit()
-                && !canonicalObject.postProcessing().hasOrderBy()
-                && !hasDerivedMeasures(canonicalObject)
-                && canonicalObject.metadata().compositeAliases().isEmpty();
-        String revision = null;
-        if (cubeShapeEligible) {
-            try { revision = cacheBackend.revision().orElse(null); }
-            catch (RuntimeException unavailable) { propagateCancellation(unavailable); }
-        }
-        boolean cubeEligible = cubeShapeEligible && revision != null;
-        QueryShape queryShape = cubeEligible
-                ? CubeShapeCatalog.shapeOf(canonicalObject)
-                : null;
-        if (cubeEligible) {
-            try {
-                Optional<ResultFrame> cubeAnswer = cubeCatalog.tryAnswer(canonicalObject.timeRange(), queryShape, revision);
-                if (cubeAnswer.isPresent() && cacheBackend.revision().filter(revision::equals).isPresent()) {
-                    return cubeAnswer.get();
-                }
-            } catch (RuntimeException unavailable) { propagateCancellation(unavailable); }
+        String revision = readCubeRevision(canonicalObject);
+        QueryShape queryShape = revision == null ? null : CubeShapeCatalog.shapeOf(canonicalObject);
+        if (revision != null) {
+            Optional<ResultFrame> cubeAnswer = findCurrentCubeAnswer(canonicalObject, queryShape, revision);
+            if (cubeAnswer.isPresent()) {
+                return cubeAnswer.get();
+            }
         }
 
         long startTimestamp = canonicalObject.timeRange().startTimestampSeconds();
@@ -163,64 +144,53 @@ public final class CacheExecutionEngine {
         } catch (BucketEnumerationLimitExceededException excessiveWindow) {
             // A large query is still valid SQL; bypass the cache plan before any bucket list or keys
             // are allocated and let the authoritative executor handle the requested window.
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
+            return executeAuthoritatively(canonicalObject, queryShape, revision);
         }
-        List<Long> bodyDays = buckets.body();
+        List<Long> completedBucketStarts = buckets.body();
 
-        List<String> requiredKeys = new ArrayList<>(bodyDays.size());
-        for (long dayStart : bodyDays) {
-            requiredKeys.add(CacheKeyFactory.buildBucketKey(queryHash, dayStart, configuration.bucketSeconds()));
+        List<String> requiredKeys = new ArrayList<>(completedBucketStarts.size());
+        for (long bucketStart : completedBucketStarts) {
+            requiredKeys.add(CacheKeyFactory.buildBucketKey(queryHash, bucketStart, configuration.bucketSeconds()));
         }
 
         // Fast path 1: nothing cacheable -> run the physical SQL directly.
         if (requiredKeys.isEmpty()) {
-            return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                    executeDirect(canonicalObject), revision, List.of());
+            return executeAuthoritatively(canonicalObject, queryShape, revision);
         }
 
         List<Boolean> presenceMask;
         try {
-            presenceMask = resolvePresence(queryHash, bodyDays, requiredKeys);
+            presenceMask = resolvePresence(queryHash, completedBucketStarts, requiredKeys);
         } catch (RuntimeException cacheFailure) {
             propagateCancellation(cacheFailure);
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
+            return executeAuthoritatively(canonicalObject, queryShape, revision);
         }
         List<String> cachedKeys = new ArrayList<>();
-        List<Long> cachedDays = new ArrayList<>();
-        List<Long> missingDays = new ArrayList<>();
+        List<Long> cachedBucketStarts = new ArrayList<>();
+        List<Long> missingBucketStarts = new ArrayList<>();
         for (int index = 0; index < requiredKeys.size(); index++) {
             if (Boolean.TRUE.equals(presenceMask.get(index))) {
                 cachedKeys.add(requiredKeys.get(index));
-                cachedDays.add(bodyDays.get(index));
+                cachedBucketStarts.add(completedBucketStarts.get(index));
             } else {
-                missingDays.add(bodyDays.get(index));
+                missingBucketStarts.add(completedBucketStarts.get(index));
             }
         }
 
         // Fast path 2: zero cache hits -> bypass all cache machinery. The read path never writes; the
         // warmer is the only writer, so a miss is answered and voted for warming, never stored here.
         if (cachedKeys.isEmpty()) {
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
+            return executeAuthoritatively(canonicalObject, queryShape, revision);
         }
 
-        GapPlan gapPlan = new GapPlan(buckets.head(), missingDays, buckets.tail());
-
+        GapPlan gapPlan = new GapPlan(buckets.head(), missingBucketStarts, buckets.tail());
         IncrementalFrameMerge merge = frameMergeService.incremental(canonicalObject);
-        List<Long> vanishedDays = new ArrayList<>();
-        CompletableFuture<Void> cacheFuture = CompletableFuture.runAsync(QueryExecutionScope.propagate(() -> {
-                int[] delivered = {0};
-                cacheBackend.visitKeys(cachedKeys, (index, frame) -> {
-                    if (index == null || index != delivered[0] || index >= cachedKeys.size() || frame == null) {
-                        throw new IllegalStateException("cache returned an invalid frame index or null frame entry");
-                    }
-                    delivered[0]++;
-                    if (frame.isPresent()) merge.add(frame.get());
-                    else vanishedDays.add(cachedDays.get(index));
-                });
-                if (delivered[0] != cachedKeys.size()) throw new IllegalStateException("cache returned an invalid number of frames");
-            }), executor);
+        List<Long> vanishedBucketStarts = new ArrayList<>();
+        CompletableFuture<Void> cacheFuture = CompletableFuture.runAsync(
+                QueryExecutionScope.propagate(() -> readCachedFrames(
+                        cachedKeys, cachedBucketStarts, merge, vanishedBucketStarts)), executor);
 
-        CompletableFuture<ResultFrame> sparkFuture = gapPlan.hasGaps()
+        CompletableFuture<ResultFrame> gapFuture = gapPlan.hasGaps()
                 ? CompletableFuture.supplyAsync(
                         QueryExecutionScope.propagate(() -> executeSql(gapQueryRewriter.buildGapQuery(
                                 canonicalObject.physicalSql(), gapPlan))), executor)
@@ -232,51 +202,100 @@ public final class CacheExecutionEngine {
             propagateCancellation(cacheFailure);
             // Prevent a queued gap task from starting after the authoritative fallback begins.
             // A running query is left untouched because the executor port has no cancellation contract.
-            sparkFuture.cancel(false);
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
+            gapFuture.cancel(false);
+            return executeAuthoritatively(canonicalObject, queryShape, revision);
         }
 
-        // EXISTS->MGET race guard: a bucket present at the EXISTS check can be evicted/expired
-        // before the MGET lands, and its day is NOT in the gap plan — silently skipping it
-        // would merge an answer missing that day's data. Buckets are independent mergeable
-        // ingredients, so the recovery is surgical: re-fetch ONLY the vanished days with one
-        // supplemental gap query, never recompute the whole window.
+        // Expired or evicted buckets are absent from the original gap plan. Start their recovery
+        // before joining the original gap so both Spark queries can overlap.
+        CompletableFuture<ResultFrame> recoveryFuture = recoverVanishedBuckets(canonicalObject, vanishedBucketStarts);
 
-        // Submit the vanished-day recovery BEFORE joining the main gap query: it depends only on
-        // the cache fetch, so running it after sparkFuture.join() would serialize two Spark
-        // round-trips where one wall-clock wait suffices.
-        CompletableFuture<ResultFrame> vanishedFuture = vanishedDays.isEmpty()
-                ? CompletableFuture.completedFuture(ResultFrame.empty())
-                : CompletableFuture.supplyAsync(
-                        QueryExecutionScope.propagate(() -> executeSql(gapQueryRewriter.buildGapQuery(
-                                canonicalObject.physicalSql(),
-                                new GapPlan(Optional.empty(), vanishedDays, Optional.empty())))), executor);
-
-        ResultFrame sparkFrame = sparkFuture.join();
+        ResultFrame gapFrame = gapFuture.join();
         if (gapPlan.hasGaps()) {
-            merge.add(sparkFrame);
+            merge.add(gapFrame);
         }
 
-        ResultFrame vanishedFrame = vanishedFuture.join();
-        if (!vanishedDays.isEmpty()) {
-            merge.add(vanishedFrame);
+        ResultFrame recoveredFrame = recoveryFuture.join();
+        if (!vanishedBucketStarts.isEmpty()) {
+            merge.add(recoveredFrame);
         }
 
         try {
-            return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
+            return catalogFullWindowAnswer(canonicalObject, queryShape,
                     merge.finish(), revision, cachedKeys);
         } catch (RuntimeException cacheOrMergeFailure) {
             propagateCancellation(cacheOrMergeFailure);
             // A decoded but corrupt/incompatible cache frame must not make the query unavailable.
             // The full physical query is authoritative and avoids trusting any cache-derived data.
-            return executeAuthoritatively(cubeEligible, canonicalObject, queryShape, revision);
+            return executeAuthoritatively(canonicalObject, queryShape, revision);
         }
     }
 
+    private String readCubeRevision(CanonicalQueryObject query) {
+        // Whole-window roll-up can't safely reuse time series, derived measures, or truncated output.
+        boolean cubeShapeEligible = cubeCatalog != null
+                && !query.metadata().isTimeSeries()
+                && !query.postProcessing().hasLimit()
+                && !query.postProcessing().hasOrderBy()
+                && !hasDerivedMeasures(query)
+                && query.metadata().compositeAliases().isEmpty();
+        if (!cubeShapeEligible) {
+            return null;
+        }
+        try {
+            return cacheBackend.revision().orElse(null);
+        } catch (RuntimeException unavailable) {
+            propagateCancellation(unavailable);
+            return null;
+        }
+    }
+
+    private Optional<ResultFrame> findCurrentCubeAnswer(CanonicalQueryObject query, QueryShape shape, String revision) {
+        try {
+            Optional<ResultFrame> answer = cubeCatalog.tryAnswer(query.timeRange(), shape, revision);
+            if (answer.isPresent() && cacheBackend.revision().filter(revision::equals).isPresent()) {
+                return answer;
+            }
+        } catch (RuntimeException unavailable) {
+            propagateCancellation(unavailable);
+        }
+        return Optional.empty();
+    }
+
+    private void readCachedFrames(List<String> cachedKeys, List<Long> cachedBucketStarts,
+                                  IncrementalFrameMerge merge, List<Long> vanishedBucketStarts) {
+        int[] delivered = {0};
+        cacheBackend.visitKeys(cachedKeys, (index, frame) -> {
+            if (index == null || index != delivered[0] || index >= cachedKeys.size() || frame == null) {
+                throw new IllegalStateException("cache returned an invalid frame index or null frame entry");
+            }
+            delivered[0]++;
+            if (frame.isPresent()) {
+                merge.add(frame.get());
+            } else {
+                vanishedBucketStarts.add(cachedBucketStarts.get(index));
+            }
+        });
+        if (delivered[0] != cachedKeys.size()) {
+            throw new IllegalStateException("cache returned an invalid number of frames");
+        }
+    }
+
+    private CompletableFuture<ResultFrame> recoverVanishedBuckets(CanonicalQueryObject query,
+                                                                  List<Long> vanishedBucketStarts) {
+        if (vanishedBucketStarts.isEmpty()) {
+            return CompletableFuture.completedFuture(ResultFrame.empty());
+        }
+        return CompletableFuture.supplyAsync(
+                QueryExecutionScope.propagate(() -> executeSql(gapQueryRewriter.buildGapQuery(
+                        query.physicalSql(), new GapPlan(Optional.empty(), vanishedBucketStarts, Optional.empty())))),
+                executor);
+    }
+
     /** A complete full-window answer becomes a cube candidate for finer queries over the same window. */
-    private ResultFrame catalogFullWindowAnswer(boolean cubeEligible, CanonicalQueryObject canonicalObject,
+    private ResultFrame catalogFullWindowAnswer(CanonicalQueryObject canonicalObject,
                                                 QueryShape queryShape, ResultFrame answer, String revision, List<String> dependencies) {
-        if (cubeEligible && isCompletedWindow(canonicalObject)) {
+        if (revision != null && isCompletedWindow(canonicalObject)) {
             try {
                 Optional<java.time.Duration> ttl = dependencies.isEmpty() ? Optional.empty()
                         : cacheBackend.remainingTimeToLive(dependencies);
@@ -320,10 +339,10 @@ public final class CacheExecutionEngine {
         return mask;
     }
 
-    private ResultFrame executeAuthoritatively(boolean cubeEligible, CanonicalQueryObject canonicalObject,
+    private ResultFrame executeAuthoritatively(CanonicalQueryObject canonicalObject,
                                                QueryShape queryShape, String revision) {
-        return catalogFullWindowAnswer(cubeEligible, canonicalObject, queryShape,
-                executeDirect(canonicalObject), revision, List.of());
+        return catalogFullWindowAnswer(canonicalObject, queryShape,
+                executeSql(canonicalObject.physicalSql()), revision, List.of());
     }
 
     /** A window touching the live bucket would freeze in-progress data, so only finished windows are catalogued. */
@@ -335,11 +354,6 @@ public final class CacheExecutionEngine {
     /** AVG is fetched as SUM and COUNT ingredients and divided by the merge. */
     private static boolean hasDerivedMeasures(CanonicalQueryObject canonicalObject) {
         return canonicalObject.metadata().measureAggregates().containsValue(AggregateFunction.AVERAGE);
-    }
-
-    /** Zero-hit requests execute the original SQL; only the warmer stores decomposed ingredients. */
-    private ResultFrame executeDirect(CanonicalQueryObject canonicalObject) {
-        return executeSql(canonicalObject.physicalSql());
     }
 
     private ResultFrame executeSql(String sql) {

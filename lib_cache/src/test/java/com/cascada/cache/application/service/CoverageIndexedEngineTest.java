@@ -24,6 +24,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -156,5 +159,57 @@ class CoverageIndexedEngineTest {
         // Exactly one surgical gap fetch for the vanished bucket; the original FULL_SQL never ran.
         assertThat(executedSqls).containsExactly("GAP_SQL");
         assertThat(((Number) result.rows().get(0).get("bytes")).doubleValue()).isEqualTo(60.0);
+    }
+
+    @Test
+    void vanishedBucketRecoveryCanStartWhileTheOriginalGapIsRunning() {
+        CanonicalQueryObject canonical = globalAggregateOverThreeDays();
+        QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
+        var store = new InMemoryBlobCacheBackendAdapter(serializer);
+        store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
+        var coverage = new InMemoryCoverageIndexAdapter();
+        coverage.markCached(hash, DAY, 0L);
+        coverage.markCached(hash, DAY, 2 * DAY);
+
+        var originalGapStarted = new CountDownLatch(1);
+        var recoveryStarted = new CountDownLatch(1);
+        QueryExecutorPort spark = sql -> {
+            switch (sql) {
+                case "original gap" -> {
+                    originalGapStarted.countDown();
+                    await(recoveryStarted);
+                    return appFrame("netflix", 20);
+                }
+                case "recovery gap" -> {
+                    await(originalGapStarted);
+                    recoveryStarted.countDown();
+                    return appFrame("netflix", 30);
+                }
+                default -> throw new AssertionError("Unexpected SQL: " + sql);
+            }
+        };
+        GapQueryRewriterPort rewriter = (sql, gap) -> {
+            if (gap.body().equals(List.of(DAY))) {
+                return "original gap";
+            }
+            assertThat(gap.body()).containsExactly(2 * DAY);
+            return "recovery gap";
+        };
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            CacheExecutionEngine engine = new CacheExecutionEngine(store, spark, rewriter,
+                    CacheExecutionConfiguration.defaults(), coverage, null, executor);
+            ResultFrame result = engine.execute(canonical, hash);
+            assertThat((Number) result.rows().getFirst().get("bytes")).isEqualTo(60.0);
+        }
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            assertThat(latch.await(5, TimeUnit.SECONDS)).as("both gap queries can overlap").isTrue();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while waiting for a gap query", interrupted);
+        }
     }
 }

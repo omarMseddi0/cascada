@@ -12,6 +12,7 @@ import com.cascada.app.model.config.ApplicationSettings;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.key.CacheKeyConstants;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.model.time.GapPlan;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
@@ -36,13 +37,15 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import static org.assertj.core.api.Assertions.*;
 
-/** Real Spark + Delta + Valkey + HTTP/gRPC; every cache answer is compared with plain Spark SQL. */
+/** Real Spark, Delta, HTTP/gRPC and Valkey with an empty, dedicated test database. */
 @EnabledIfEnvironmentVariable(named="CASCADA_TEST_VALKEY_URI", matches=".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ValkeySparkProcessIntegrationTest {
     private static final long DAY=86400, BASE=1759968000L, END=BASE+7*DAY-1;
     private static final ObjectMapper JSON=new ObjectMapper();
+    private static final String CACHE_REVISION_KEY = CacheKeyConstants.CACHE_KEY_PREFIX + ":revision";
+    private static final String WARMING_GENERATION_KEY = CacheKeyConstants.CACHE_KEY_PREFIX + ":warming_generation";
     private final AtomicInteger physicalCalls=new AtomicInteger();
     private final Set<String> jobGroups=ConcurrentHashMap.newKeySet();
     private final List<Map<String,Object>> measurements=new ArrayList<>();
@@ -59,10 +62,16 @@ class ValkeySparkProcessIntegrationTest {
     private LogicalToPhysicalSqlTranslator translator;
     private String redisUri, deltaPath;
     private boolean nativeEnabled;
+    private boolean ownsTestDatabase;
     private final String foreignKey="cascada-validation-foreign-"+UUID.randomUUID();
 
     @BeforeAll void startRealSessionAndData() throws Exception {
         redisUri=System.getenv("CASCADA_TEST_VALKEY_URI");
+        inspector=RedisClient.create(redisUri);
+        inspection=inspector.connect();
+        assertThat(inspection.sync().ping()).isEqualTo("PONG");
+        assertThat(inspection.sync().dbsize()).as("dedicated Valkey test database starts empty").isZero();
+        ownsTestDatabase = true;
         nativeEnabled=Boolean.parseBoolean(System.getenv("CASCADA_GLUTEN_ENABLED"));
         fixture=Files.createTempDirectory("cascada-valkey-integration-");
         var warehouse=Files.createDirectory(fixture.resolve("warehouse"));
@@ -111,9 +120,6 @@ class ValkeySparkProcessIntegrationTest {
                 Map.of("ts","ts","region","C_region","device","C_device","amount","C_amount","latency","C_latency"),"ts"));
         translator=new LogicalToPhysicalSqlTranslator(300,catalog);
         assertThat(direct.execute("SELECT COUNT(*) AS n FROM delta.`"+deltaPath+"`").longAt(0,0)).isEqualTo(rows);
-        inspector=RedisClient.create(redisUri);
-        inspection=inspector.connect();
-        assertThat(inspection.sync().ping()).isEqualTo("PONG");
         System.out.println("VALKEY_RUNTIME spark="+spark.version()+" rows="+rows+" native="+nativeEnabled+" server="
                 +inspection.sync().info("server").replace('\r',' ').replace('\n',' '));
     }
@@ -150,7 +156,17 @@ class ValkeySparkProcessIntegrationTest {
             assertThat(inspection.sync().get(foreignKey)).isEqualTo("preserve-me");
             inspection.sync().del(foreignKey);
             factory.close();factory=null;
+            clearPopularityFixture();
         }
+    }
+
+    private void clearPopularityFixture() {
+        var commands = inspection.sync();
+        var metadataKeys = commands.keys(CacheKeyConstants.QUERY_TRACKER_META_KEY_PREFIX + ":*");
+        if (!metadataKeys.isEmpty()) {
+            commands.del(metadataKeys.toArray(String[]::new));
+        }
+        commands.del(CacheKeyConstants.QUERY_TRACKER_TOP_SORTED_SET_KEY);
     }
 
     @AfterAll void stopAndCleanFixture() throws Exception {
@@ -159,7 +175,14 @@ class ValkeySparkProcessIntegrationTest {
         System.out.println("VALKEY_SUMMARY "+summary);
         String output=System.getenv("CASCADA_TEST_REPORT_PATH");
         if(output!=null) Files.writeString(Path.of(output),summary);
-        if(inspection!=null){assertThat(inspection.sync().dbsize()).isZero();inspection.close();}
+        long remainingKeys = 0;
+        if (inspection != null) {
+            if (ownsTestDatabase) {
+                inspection.sync().del(CACHE_REVISION_KEY, WARMING_GENERATION_KEY);
+                remainingKeys = inspection.sync().dbsize();
+            }
+            inspection.close();
+        }
         if(inspector!=null)inspector.shutdown();
         if(direct!=null)direct.close();
         if(physical!=null)physical.close();
@@ -171,6 +194,7 @@ class ValkeySparkProcessIntegrationTest {
                 throw new IllegalStateException("Unexpected fixture cleanup path");
             try(var files=Files.walk(resolved)){for(var file:files.sorted(Comparator.reverseOrder()).toList())Files.deleteIfExists(file);}
         }
+        assertThat(remainingKeys).as("Valkey fixture keys after cleanup").isZero();
     }
 
     private String global(long start,long end) {
@@ -236,6 +260,8 @@ class ValkeySparkProcessIntegrationTest {
     @Test @Order(2) void warmedTimeSeriesAndMissingBodyHeadTailMatchSpark() throws Exception {
         String sql=series(BASE,END);
         same(factory.executeLogicalQueryUseCase().query(sql).frame(),truth(sql));
+        assertThat(post("/cache/warm", Map.of("start", BASE, "end", END)).get("bucketsWarmed").asInt())
+                .isEqualTo(7);
         int calls=physicalCalls.get();
         same(factory.executeLogicalQueryUseCase().query(sql).frame(),truth(sql));
         assertThat(physicalCalls.get()).isEqualTo(calls);

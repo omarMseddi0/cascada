@@ -5,6 +5,7 @@ import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.BucketCachePort;
+import com.cascada.cache.application.port.out.CacheAdministrationPort;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
@@ -19,6 +20,8 @@ import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.application.service.time.TimeBucketCalculator;
 import com.cascada.cache.application.service.warming.DataChangeDetector;
 import com.cascada.cache.application.service.warming.WarmingQueue;
+import com.cascada.cache.domain.admin.CacheScope;
+import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
@@ -31,6 +34,7 @@ import com.cascada.identity.domain.model.QueryHash;
 import java.math.BigInteger;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ConcurrentModificationException;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -63,6 +67,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     private static final Logger LOGGER = Logger.getLogger(WarmingOrchestrator.class.getName());
 
     private final BucketCachePort cacheBackend;
+    private final CacheAdministrationPort cacheAdministration;
     private final QueryExecutorPort sparkExecutor;
     private final GapQueryRewriterPort gapQueryRewriter;
     private final WarmingQueue warmingQueue;
@@ -128,6 +133,8 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                                CubeShapeCatalog cubeCatalog, WarmingConfiguration configuration, Clock clock,
                                CacheConfiguration cacheConfiguration) {
         this.cacheBackend = cacheBackend;
+        this.cacheAdministration = cacheBackend instanceof CacheAdministrationPort administration
+                ? administration : null;
         this.sparkExecutor = sparkExecutor;
         this.gapQueryRewriter = gapQueryRewriter;
         this.warmingQueue = warmingQueue;
@@ -206,14 +213,8 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         long nowSeconds = clock.instant().getEpochSecond();
         long warmEndTimestampSeconds = Math.min(requestedWarmEndTimestampSeconds,
                 BucketMath.floor(nowSeconds, configuration.bucketSeconds()) - 1);
-        if (forceOverwrite && cubeCatalog != null) {
-            // Catalogued full-window answers were computed from the same history that is being rewritten.
-            cubeCatalog.clear();
-        }
-        if (forceOverwrite && cacheBackend instanceof com.cascada.cache.application.port.out.CacheAdministrationPort administration) {
-            // A canary change applies to cached history, including patterns outside today's top-N.
-            administration.flush(com.cascada.cache.domain.admin.CacheScope.everything());
-            if (coverageIndex != null) coverageIndex.clear();
+        if (forceOverwrite) {
+            invalidateHistoryBeforeWarming();
         }
         // LAYER 1: recent patterns voted by the read path.
         List<QueryHash> layer1 = warmingQueue.consumeAll();
@@ -254,6 +255,19 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             // Failures while constructing the work set happen after consumeAll drained Layer 1.
             layer1.forEach(warmingQueue::vote);
             throw setupFailure;
+        }
+    }
+
+    private void invalidateHistoryBeforeWarming() {
+        if (cubeCatalog != null) {
+            cubeCatalog.clear();
+        }
+        if (cacheAdministration != null) {
+            // A canary change applies to cached history, including patterns outside today's top-N.
+            cacheAdministration.flush(CacheScope.everything());
+            if (coverageIndex != null) {
+                coverageIndex.clear();
+            }
         }
     }
 
@@ -346,7 +360,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             } else {
                 alreadyWarmed = isAlreadyWarmed(key);
             }
-            if (alreadyWarmed || !storeBucket(queryHash, canonicalObject, key, currentBucketStart, bucketEnd)) {
+            if (alreadyWarmed || !computeAndStoreBucket(queryHash, canonicalObject, key, currentBucketStart, bucketEnd)) {
                 bucketsSkipped++;
             } else {
                 bucketsWarmed++;
@@ -365,15 +379,15 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
      * cached empty frame is a valid "no data that day" hit); frames above the row cap are not, so a
      * near-unique GROUP BY keeps being answered by Spark instead of filling the cache tier.
      */
-    private boolean storeBucket(QueryHash queryHash, CanonicalQueryObject canonicalObject, String key,
-                                long bucketStart, long bucketEnd) {
+    private boolean computeAndStoreBucket(QueryHash queryHash, CanonicalQueryObject canonicalObject, String key,
+                                          long bucketStart, long bucketEnd) {
         Optional<String> generation = cacheBackend.warmingGeneration();
         String bucketSql = gapQueryRewriter.buildStorageQuery(canonicalObject.physicalSql(),
                 new GapPlan(Optional.empty(), List.of(), Optional.of(new TimeRange(bucketStart, bucketEnd))),
                 configuration.fixedStepSeconds());
         ResultFrame frame = sparkExecutor.execute(bucketSql);
         boolean decimalComposite = !canonicalObject.metadata().compositeAliases().isEmpty()
-                && frame.columnTypes().containsValue(com.cascada.cache.domain.frame.ColumnType.DECIMAL);
+                && frame.columnTypes().containsValue(ColumnType.DECIMAL);
         if (decimalComposite || frame.rowCount() > configuration.maximumCachedRows()) {
             cacheBackend.evict(key);
             if (coverageIndex != null) coverageIndex.markEvicted(queryHash, configuration.bucketSeconds(), bucketStart);
@@ -385,9 +399,12 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             return false;
         }
         if (generation.isPresent()) {
-            if (!cacheBackend.storeForGeneration(key, frame, configuration.bucketTimeToLive(), generation.get()))
-                throw new java.util.ConcurrentModificationException("cache invalidated while the Spark bucket was being computed");
-        } else cacheBackend.store(key, frame, configuration.bucketTimeToLive());
+            if (!cacheBackend.storeForGeneration(key, frame, configuration.bucketTimeToLive(), generation.get())) {
+                throw new ConcurrentModificationException("cache invalidated while the Spark bucket was being computed");
+            }
+        } else {
+            cacheBackend.store(key, frame, configuration.bucketTimeToLive());
+        }
         if (coverageIndex != null) {
             coverageIndex.markCached(queryHash, configuration.bucketSeconds(), bucketStart);
         }

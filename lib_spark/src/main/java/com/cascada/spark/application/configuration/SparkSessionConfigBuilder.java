@@ -141,35 +141,53 @@ public final class SparkSessionConfigBuilder {
         properties.put("spark.sql.extensions", String.join(",", extensions));
     }
 
-    private void applyVeloxEnvironment() {
+    private void applyGlutenEnvironment() {
         String enabled = environment.get("CASCADA_GLUTEN_ENABLED");
-        if (enabled == null || enabled.isBlank()) return;
+        if (enabled == null || enabled.isBlank()) {
+            return;
+        }
         if (SparkReference.parseGlutenEnabled(enabled, true)) {
-            String bytes = environment.get("CASCADA_GLUTEN_OFFHEAP_BYTES");
-            String configuredMemory = properties.get("spark.memory.offHeap.size");
-            long memory;
-            try { memory = bytes == null || bytes.isBlank() ? DEFAULT_VELOX_OFFHEAP_BYTES : Long.parseLong(bytes.trim()); }
-            catch (NumberFormatException invalid) {
-                throw new IllegalArgumentException("CASCADA_GLUTEN_OFFHEAP_BYTES must be positive integer bytes", invalid);
-            }
-            withVelox(memory);
-            // Enabling the plugin alone must not reset a reviewed spark.json memory budget.
-            if ((bytes == null || bytes.isBlank()) && configuredMemory != null)
-                properties.put("spark.memory.offHeap.size", configuredMemory);
-            String jar = environment.get("CASCADA_GLUTEN_JAR");
-            if (jar != null && !jar.isBlank()) {
-                LinkedHashSet<String> jars = commaList("spark.jars");
-                jars.add(jar);
-                properties.put("spark.jars", String.join(",", jars));
-            }
+            enableGlutenFromEnvironment();
         } else {
-            properties.put("spark.gluten.enabled", "false");
-            LinkedHashSet<String> remaining = commaList("spark.plugins");
-            remaining.remove(GLUTEN_PLUGIN);
-            String plugins = String.join(",", remaining);
-            if (plugins.isEmpty()) properties.remove("spark.plugins");
-            else properties.put("spark.plugins", plugins);
-            if (GLUTEN_SHUFFLE.equals(properties.get("spark.shuffle.manager"))) properties.remove("spark.shuffle.manager");
+            disableGluten();
+        }
+    }
+
+    private void enableGlutenFromEnvironment() {
+        String offHeapOverride = environment.get("CASCADA_GLUTEN_OFFHEAP_BYTES");
+        String configuredMemory = properties.get("spark.memory.offHeap.size");
+        boolean hasOffHeapOverride = offHeapOverride != null && !offHeapOverride.isBlank();
+        long offHeapBytes;
+        try {
+            offHeapBytes = hasOffHeapOverride ? Long.parseLong(offHeapOverride.trim()) : DEFAULT_VELOX_OFFHEAP_BYTES;
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException("CASCADA_GLUTEN_OFFHEAP_BYTES must be positive integer bytes", invalid);
+        }
+        withVelox(offHeapBytes);
+        // Enabling the plugin alone must not reset the spark.json memory budget.
+        if (!hasOffHeapOverride && configuredMemory != null) {
+            properties.put("spark.memory.offHeap.size", configuredMemory);
+        }
+        String jar = environment.get("CASCADA_GLUTEN_JAR");
+        if (jar != null && !jar.isBlank()) {
+            LinkedHashSet<String> jars = commaList("spark.jars");
+            jars.add(jar);
+            properties.put("spark.jars", String.join(",", jars));
+        }
+    }
+
+    private void disableGluten() {
+        properties.put("spark.gluten.enabled", "false");
+        LinkedHashSet<String> remaining = commaList("spark.plugins");
+        remaining.remove(GLUTEN_PLUGIN);
+        String plugins = String.join(",", remaining);
+        if (plugins.isEmpty()) {
+            properties.remove("spark.plugins");
+        } else {
+            properties.put("spark.plugins", plugins);
+        }
+        if (GLUTEN_SHUFFLE.equals(properties.get("spark.shuffle.manager"))) {
+            properties.remove("spark.shuffle.manager");
         }
     }
 
@@ -188,7 +206,7 @@ public final class SparkSessionConfigBuilder {
     }
 
     public SparkSessionConfig build() {
-        applyVeloxEnvironment();
+        applyGlutenEnvironment();
         // In-process Spark builders can override the extension injected by the driver plugin.
         // Reconcile after grouped JSON and environment overrides, preserving Delta and other hooks.
         synchronizeVeloxExtensions();

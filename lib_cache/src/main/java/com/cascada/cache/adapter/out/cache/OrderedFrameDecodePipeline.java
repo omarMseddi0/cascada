@@ -47,7 +47,9 @@ final class OrderedFrameDecodePipeline {
                Function<byte[], ResultFrame> decoder,
                BiConsumer<Integer, DecodeOutcome> visitor,
                DecodeTaskRegistry taskRegistry) throws InterruptedException {
-        if (itemCount < 0) throw new IllegalArgumentException("itemCount must not be negative");
+        if (itemCount < 0) {
+            throw new IllegalArgumentException("itemCount must not be negative");
+        }
         Objects.requireNonNull(blobAtIndex, "blobAtIndex");
         Objects.requireNonNull(decoder, "decoder");
         Objects.requireNonNull(visitor, "visitor");
@@ -59,8 +61,8 @@ final class OrderedFrameDecodePipeline {
         boolean[] missing = new boolean[itemCount];
         int nextToSchedule = 0;
         int nextToVisit = 0;
-        int inflightFrames = 0;
-        long inflightIpcBytes = 0L;
+        int framesInFlight = 0;
+        long reservedIpcBytes = 0L;
         boolean completed = false;
 
         try {
@@ -76,16 +78,21 @@ final class OrderedFrameDecodePipeline {
                         nextToSchedule++;
                         continue;
                     }
-                    if (inflightFrames >= maximumInflightDecodedFrames) break;
+                    if (framesInFlight >= maximumInflightDecodedFrames) {
+                        break;
+                    }
 
                     long estimate = estimateDecodedIpcBytes(blob);
-                    if (inflightFrames > 0 && wouldExceedBudget(inflightIpcBytes, estimate)) break;
+                    // Allow one oversized frame to make progress when no other frame holds a reservation.
+                    if (framesInFlight > 0 && wouldExceedBudget(reservedIpcBytes, estimate)) {
+                        break;
+                    }
 
                     FutureTask<DecodeOutcome> task = new FutureTask<>(() -> decode(blob, decoder));
                     tasks[slot] = task;
                     estimatedBytes[slot] = estimate;
-                    inflightFrames++;
-                    inflightIpcBytes = saturatingAdd(inflightIpcBytes, estimate);
+                    framesInFlight++;
+                    reservedIpcBytes = saturatingAdd(reservedIpcBytes, estimate);
                     // Record the task before execute so rejection also follows the cancellation path.
                     if (!taskRegistry.register(task)) {
                         throw new CancellationException("query was cancelled while scheduling cache decode");
@@ -111,8 +118,6 @@ final class OrderedFrameDecodePipeline {
                     outcome = task.get();
                 } catch (ExecutionException failure) {
                     throw propagate(failure.getCause());
-                } catch (CancellationException cancelled) {
-                    throw cancelled;
                 }
 
                 // The visitor is synchronous and remains on this producer thread. Keep the estimate
@@ -121,8 +126,8 @@ final class OrderedFrameDecodePipeline {
                 visitor.accept(startIndex + slot, outcome);
                 tasks[slot] = null;
                 taskRegistry.remove(task);
-                inflightFrames--;
-                inflightIpcBytes -= estimatedBytes[slot];
+                framesInFlight--;
+                reservedIpcBytes -= estimatedBytes[slot];
                 nextToVisit++;
             }
             completed = true;

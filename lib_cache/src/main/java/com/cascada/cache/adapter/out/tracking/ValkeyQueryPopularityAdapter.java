@@ -1,6 +1,6 @@
 package com.cascada.cache.adapter.out.tracking;
 
-import com.cascada.cache.adapter.out.tracking.model.PopularityObservation;
+import com.cascada.cache.adapter.out.model.tracking.PopularityObservation;
 import com.cascada.cache.application.port.out.QueryPopularityPort;
 import com.cascada.cache.domain.key.CacheKeyConstants;
 import com.cascada.cache.domain.model.query.PopularQuery;

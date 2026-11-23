@@ -1,14 +1,25 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.app.adapter.out.configuration.SparkConfigurationFileReader;
 import com.cascada.spark.application.configuration.SparkSessionConfigBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Set;
+import java.util.IdentityHashMap;
+import java.util.Collections;
+import java.util.ArrayDeque;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.execution.SparkPlan;
+import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec;
+import org.apache.spark.sql.execution.adaptive.QueryStageExec;
+import org.apache.spark.sql.execution.exchange.ReusedExchangeExec;
+import scala.jdk.javaapi.CollectionConverters;
 
 /**
  * The in-process Spark setup shared by the app's Spark tests and benchmarks: no UI and a driver bound
@@ -45,6 +56,38 @@ final class LocalSparkFixtures {
         SparkSessionConfigBuilder builder = SparkSessionConfigBuilder.forLocal();
         LOOPBACK.forEach(builder::withProperty);
         return builder;
+    }
+
+    /** Reads the deployment profile while keeping the vanilla run independent of the native JAR. */
+    static Map<String, String> deploymentProperties(boolean nativeMode) {
+        var reader = new SparkConfigurationFileReader();
+        var properties = new LinkedHashMap<>(reader.read(System.getenv("SPARK_CONFIG_PATH")));
+        if (!nativeMode) {
+            properties.keySet().removeIf(key -> key.startsWith("spark.gluten.")
+                    || key.equals("spark.executor.extraClassPath"));
+        }
+        return properties;
+    }
+
+    /** Walk completed plans, including AQE stages and subqueries hidden from ordinary children. */
+    static List<String> executedPlanClasses(SparkPlan root) {
+        Set<SparkPlan> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        var pending = new ArrayDeque<SparkPlan>();
+        pending.add(root);
+        List<String> classes = new ArrayList<>();
+        while (!pending.isEmpty()) {
+            SparkPlan plan = pending.removeFirst();
+            if (!seen.add(plan)) {
+                continue;
+            }
+            classes.add(plan.getClass().getName());
+            if (plan instanceof AdaptiveSparkPlanExec adaptive) pending.add(adaptive.executedPlan());
+            if (plan instanceof QueryStageExec stage) pending.add(stage.plan());
+            if (plan instanceof ReusedExchangeExec reused) pending.add(reused.child());
+            pending.addAll(CollectionConverters.asJava(plan.children()));
+            pending.addAll(CollectionConverters.asJava(plan.subqueries()));
+        }
+        return classes;
     }
 
     /** Order-sensitive SHA-256 of the rows' JSON cells: equal digests mean identical results. */

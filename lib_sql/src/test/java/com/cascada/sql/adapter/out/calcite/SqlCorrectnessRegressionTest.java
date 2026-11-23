@@ -114,6 +114,50 @@ class SqlCorrectnessRegressionTest {
         assertThat(executed.get()).isEqualTo(sql);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "EXISTS (SELECT 1 FROM t d WHERE d.group_id = e.group_id)",
+            "group_id IN (SELECT group_id FROM t WHERE x > 0)"
+    })
+    void nestedPredicatesUseAuthoritativeSql(String predicate) {
+        String sql = "SELECT SUM(x) AS n FROM t e WHERE ts >= 0 AND ts <= 86399 AND " + predicate;
+        assertThatThrownBy(() -> factory.canonicalize(sql))
+                .isInstanceOf(UnsupportedSqlException.class).hasMessageContaining("nested query scopes");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT SUM(a) AS n FROM (SELECT SUM(x) AS a, SUM(y) AS b FROM t WHERE ts >= 0 AND ts <= 86399) q(b, a)",
+            "SELECT SUM(a) AS n FROM (SELECT SUM(x) AS a, SUM(y) AS a FROM t WHERE ts >= 0 AND ts <= 86399) q"
+    })
+    void derivedAliasesWithAmbiguousOrReorderedBindingsAreNotFlattened(String sql) {
+        assertThat(CacheQueryFlattener.flatten(sql)).isEqualTo(sql);
+        assertThatThrownBy(() -> factory.canonicalize(sql)).isInstanceOf(UnsupportedSqlException.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SUM(x)", "COUNT(*)"})
+    void scalarRollupOverGroupedRowsKeepsTheOriginalQuery(String innerAggregate) {
+        String sql = """
+                SELECT SUM(total) AS total
+                FROM (
+                    SELECT device, %s AS total FROM t WHERE ts >= 0 AND ts <= 86399 GROUP BY device
+                ) AS grouped
+                """.formatted(innerAggregate);
+        assertThat(CacheQueryFlattener.flatten(sql)).isEqualTo(sql);
+        assertThatThrownBy(() -> factory.canonicalize(sql)).isInstanceOf(UnsupportedSqlException.class);
+    }
+
+    @Test void flatteningPreservesAnUnclassifiedOuterAggregateCall() {
+        String sql = """
+                SELECT device, custom.`SUM`(total) AS total
+                FROM (SELECT device, SUM(x) AS total FROM t WHERE ts >= 0 AND ts <= 86399 GROUP BY device) AS q
+                GROUP BY device
+                """;
+        assertThat(CacheQueryFlattener.flatten(sql)).isEqualTo(sql);
+        assertThatThrownBy(() -> factory.canonicalize(sql)).isInstanceOf(UnsupportedSqlException.class);
+    }
+
     @Test void timeBucketingRetainsTheInternalTimeColumnName() {
         var catalog = new TableCatalog().register(RegisteredTable.of("t", "/tmp/t", Map.of("ts", "ts"), "ts"));
         String result = new LogicalToPhysicalSqlTranslator(300, catalog).translateToPhysicalSql(

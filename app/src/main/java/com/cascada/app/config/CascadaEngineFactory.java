@@ -1,16 +1,13 @@
 package com.cascada.app.config;
 
 import com.cascada.app.model.config.ApplicationSettings;
-import com.cascada.app.model.config.CacheBackend;
 import com.cascada.app.model.config.CacheSafetySettings;
 import com.cascada.app.model.config.EngineSettings;
 import com.cascada.app.model.config.TableSettings;
 import com.cascada.app.model.config.WarmingSettings;
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.ArrowResultFrameSerializer;
-import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
 import com.cascada.cache.adapter.out.tracking.ValkeyQueryPopularityAdapter;
 import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
@@ -23,7 +20,6 @@ import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.application.port.out.QueryPopularityPort;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.application.service.CacheAdministrationService;
 import com.cascada.cache.application.service.CacheExecutionEngine;
@@ -64,9 +60,9 @@ public final class CascadaEngineFactory implements AutoCloseable {
 
     // Outbound adapters, created once and shared by every service below.
     private final QueryExecutorPort queryExecutor;
-    private final CacheBackendPort cacheBackend;
+    private final ValkeyCacheBackendAdapter cacheBackend;
     private final CoverageIndexPort coverageIndex;
-    private final QueryPopularityPort popularityTracker;
+    private final ValkeyQueryPopularityAdapter popularityTracker;
     private final TableCatalog tableCatalog;
     private final CubeShapeCatalog cubeCatalog;
     private final WarmingOrchestrator warmingOrchestrator;
@@ -99,7 +95,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
         this.mergeTasks = createCpuPool(mergeThreads, "cache-merge-");
         int decodeThreads = Math.max(1, Math.min(4, mergeThreads));
         this.decodeTasks = createCpuPool(decodeThreads, "cache-decode-");
-        CacheBackendPort openedBackend = null;
+        ValkeyCacheBackendAdapter openedBackend = null;
         try {
             openedBackend = createCacheBackend();
             this.cacheBackend = openedBackend;
@@ -109,8 +105,8 @@ public final class CascadaEngineFactory implements AutoCloseable {
             cacheTasks.shutdownNow();
             decodeTasks.shutdownNow();
             mergeTasks.shutdownNow();
-            if (openedBackend instanceof AutoCloseable closeable) {
-                try { closeable.close(); }
+            if (openedBackend != null) {
+                try { openedBackend.close(); }
                 catch (Exception cleanupFailure) { failure.addSuppressed(cleanupFailure); }
             }
             throw failure;
@@ -128,7 +124,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
                 cachedQueryUseCase, queryExecutor);
         this.administrationService = new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
         mergeTasks.prestartAllCoreThreads();
-        if (settings.cacheBackend() != CacheBackend.MEMORY) decodeTasks.prestartAllCoreThreads();
+        decodeTasks.prestartAllCoreThreads();
     }
 
     private static ThreadPoolExecutor createCpuPool(int workers, String threadNamePrefix) {
@@ -148,27 +144,13 @@ public final class CascadaEngineFactory implements AutoCloseable {
                 Clock.systemUTC(), safetyConfiguration);
     }
 
-    /**
-     * The hot cache tier. Local runs use the in-memory blob backend, which stores the <em>same
-     * serialized bytes</em> Valkey would — that fidelity is why a local run exercises the real
-     * serialization path and not a shortcut.
-     */
-    private CacheBackendPort createCacheBackend() {
-        ArrowResultFrameSerializer serializer = new ArrowResultFrameSerializer();
-        return settings.cacheBackend() == CacheBackend.MEMORY
-                ? new InMemoryBlobCacheBackendAdapter(serializer)
-                : new ValkeyCacheBackendAdapter(settings.redisUri(), serializer, decodeTasks,
-                        Math.min(2, mergeTasks.getCorePoolSize()), 64L * 1024 * 1024);
+    private ValkeyCacheBackendAdapter createCacheBackend() {
+        return new ValkeyCacheBackendAdapter(settings.redisUri(), new ArrowResultFrameSerializer(), decodeTasks,
+                Math.min(2, mergeTasks.getCorePoolSize()), 64L * 1024 * 1024);
     }
 
-    /**
-     * Layer-2 popularity lives next to the buckets: in Valkey it survives restarts and idle weeks, so the
-     * warmer keeps popular queries warm after a deploy. Local runs keep it in memory, like the buckets.
-     */
-    private QueryPopularityPort createPopularityTracker() {
-        return settings.cacheBackend() == CacheBackend.MEMORY
-                ? new QueryPopularityTracker(applicationSettings.warming().maximumPatterns())
-                : new ValkeyQueryPopularityAdapter(settings.redisUri(), applicationSettings.warming().popularityRetention());
+    private ValkeyQueryPopularityAdapter createPopularityTracker() {
+        return new ValkeyQueryPopularityAdapter(settings.redisUri(), applicationSettings.warming().popularityRetention());
     }
 
     /** The data-change canary runs only when an operator supplies a validation query. */
@@ -300,16 +282,14 @@ public final class CascadaEngineFactory implements AutoCloseable {
             if (shutdownFailure == null) shutdownFailure = failure;
             else shutdownFailure.addSuppressed(failure);
         }
-        for (Object connection : List.of(cacheBackend, popularityTracker)) {
-            if (connection instanceof AutoCloseable closeable) {
-                try {
-                    closeable.close();
-                } catch (Exception failure) {
-                    if (shutdownFailure == null) {
-                        shutdownFailure = new IllegalStateException("failed to close cache connection", failure);
-                    } else {
-                        shutdownFailure.addSuppressed(failure);
-                    }
+        for (AutoCloseable connection : List.of(cacheBackend, popularityTracker)) {
+            try {
+                connection.close();
+            } catch (Exception failure) {
+                if (shutdownFailure == null) {
+                    shutdownFailure = new IllegalStateException("failed to close cache connection", failure);
+                } else {
+                    shutdownFailure.addSuppressed(failure);
                 }
             }
         }

@@ -1,10 +1,9 @@
 package com.cascada.sql.simulation;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
-import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.model.warming.WarmingReport;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.application.service.WarmingOrchestrator;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
@@ -17,6 +16,7 @@ import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
 import com.cascada.sql.adapter.out.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.simulation.DirectComputeOracle.MeasureSpec;
@@ -26,6 +26,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -40,7 +42,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * what the engine would have computed on a miss</em> — so warming never changes a query's answer, only
  * its latency.
  */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class WarmingConsistencySimulationTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
     private static final long DAY = 86_400L;
     private static final long START = 0;
@@ -120,24 +126,24 @@ class WarmingConsistencySimulationTest {
                 "SELECT appName, SUM(bytes) AS s FROM traffic WHERE ts >= 0 AND ts <= 259199 GROUP BY appName");
 
         QueryHash hash = hashGenerator.generateQueryHash(canonical, DirectComputeOracle.FIXED_STEP_SECONDS);
-        InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter backend = valkey.cache(serializer);
         WarmingOrchestrator warmer = new WarmingOrchestrator(backend, oracle, gapRewriter,
-                new WarmingQueue(), new QueryPopularityTracker(), DAY, 10);
+                new WarmingQueue(), valkey.popularity(), DAY, 10);
         warmer.recordQuery(hash, canonical);
 
         WarmingReport report = warmer.warmCycle(START, END, false);
         assertThat(report.bucketsWarmed()).isEqualTo(3); // exactly the three body days
-        assertThat(backend.storedBucketCount()).isEqualTo(3);
+        assertThat(backend.sizeReport().bucketCount()).isEqualTo(3);
     }
 
     // --- harness ---------------------------------------------------------------------------------
 
     private ResultFrame warmThenRead(CanonicalQueryObject canonical, DirectComputeOracle oracle) {
         QueryHash hash = hashGenerator.generateQueryHash(canonical, DirectComputeOracle.FIXED_STEP_SECONDS);
-        InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter backend = valkey.cache(serializer);
 
         WarmingOrchestrator warmer = new WarmingOrchestrator(backend, oracle, gapRewriter,
-                new WarmingQueue(), new QueryPopularityTracker(), DAY, 10);
+                new WarmingQueue(), valkey.popularity(), DAY, 10);
         warmer.recordQuery(hash, canonical);
         warmer.warmCycle(START, END, false);
 

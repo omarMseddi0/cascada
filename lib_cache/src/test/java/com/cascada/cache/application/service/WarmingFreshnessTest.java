@@ -1,24 +1,25 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
-import com.cascada.cache.application.model.config.WarmingConfiguration;
+import com.cascada.cache.adapter.out.tracking.ValkeyQueryPopularityAdapter;
 import com.cascada.cache.application.model.warming.WarmingReport;
+import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
-import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.application.service.warming.DataChangeDetector;
 import com.cascada.cache.application.service.warming.WarmingQueue;
-import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.model.cube.QueryShape;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
 import java.time.Clock;
 import java.time.Duration;
@@ -28,12 +29,25 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** The warmer is the only writer: complete buckets only, always with a time-to-live, bounded in size. */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class WarmingFreshnessTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
+    @BeforeEach
+    void connectValkey() {
+        backend = valkey.cache(new PortableFrameSerializer());
+        popularity = valkey.popularity();
+    }
 
     private static final long DAY = 86_400L;
     private static final QueryHash TRAFFIC = QueryHash.of("0000000000000000000000000000000a");
@@ -45,10 +59,9 @@ class WarmingFreshnessTest {
         @Override public Clock withZone(ZoneId zone) { return this; }
         @Override public Instant instant() { return now.get(); }
     };
-    private final InMemoryBlobCacheBackendAdapter backend =
-            new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer(), movableClock);
+    private ValkeyCacheBackendAdapter backend;
     private final AtomicInteger sparkCalls = new AtomicInteger();
-    private final QueryPopularityTracker popularity = new QueryPopularityTracker();
+    private ValkeyQueryPopularityAdapter popularity;
 
     private ResultFrame trafficRows(int rows) {
         sparkCalls.incrementAndGet();
@@ -94,7 +107,11 @@ class WarmingFreshnessTest {
         warmer.recordQuery(TRAFFIC, traffic());
         warmer.warmCycle(0, 2 * DAY - 1, false);
 
-        now.set(now.get().plus(Duration.ofDays(1)));
+        var keys = List.of(CacheKeyFactory.buildBucketKey(TRAFFIC, 0, DAY),
+                CacheKeyFactory.buildBucketKey(TRAFFIC, DAY, DAY));
+        assertThat(backend.remainingTimeToLive(keys)).hasValueSatisfying(remaining ->
+                assertThat(remaining).isBetween(Duration.ofHours(23), Duration.ofDays(1)));
+        keys.forEach(valkey::expireBucket);
 
         assertThat(isCached(0)).isFalse();
         assertThat(isCached(DAY)).isFalse();
@@ -109,7 +126,7 @@ class WarmingFreshnessTest {
 
         assertThat(report.bucketsWarmed()).isZero();
         assertThat(report.bucketsSkipped()).isEqualTo(2);
-        assertThat(backend.storedBucketCount()).isZero();
+        assertThat(backend.sizeReport().bucketCount()).isZero();
     }
 
     @Test

@@ -1,6 +1,6 @@
 package com.cascada.app.adapter.in.api;
 
-import com.cascada.app.adapter.in.api.model.ClusterChangeResult;
+import com.cascada.app.adapter.in.model.api.ClusterChangeResult;
 import com.cascada.app.exception.InvalidRequestException;
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;

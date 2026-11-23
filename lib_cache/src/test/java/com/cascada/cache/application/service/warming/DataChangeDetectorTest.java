@@ -1,30 +1,42 @@
 package com.cascada.cache.application.service.warming;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.time.TimeRange;
 import com.cascada.cache.domain.model.validation.ValidationBaseline;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class DataChangeDetectorTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
+    @BeforeEach
+    void connectValkey() {
+        baselineStore = valkey.cache(new PortableFrameSerializer());
+    }
 
     private static final long DAY = 86_400L;
     private static final String TEMPLATE = "SELECT SUM(bytes) FROM traffic WHERE ts >= {start} AND ts <= {end}";
     private static final TimeRange MONDAY_TO_WEDNESDAY = new TimeRange(0, 3 * DAY - 1);
     private static final TimeRange TUESDAY_TO_THURSDAY = new TimeRange(DAY, 4 * DAY - 1);
 
-    private final InMemoryBlobCacheBackendAdapter baselineStore =
-            new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+    private ValkeyCacheBackendAdapter baselineStore;
     private final AtomicReference<Double> historicalTotal = new AtomicReference<>(100.0);
     private final List<String> executedSql = new ArrayList<>();
 

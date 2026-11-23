@@ -1,7 +1,6 @@
 package com.cascada.cache.application.service;
 
-import java.time.Duration;
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
@@ -10,16 +9,18 @@ import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -29,6 +30,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -40,7 +43,11 @@ import static com.cascada.cache.application.service.EngineTestFixtures.globalAgg
  * lookup (zero EXISTS round trips), and a stale present-bit degrades to a surgical single-bucket
  * re-fetch — never a wrong answer, never a full-window recompute.
  */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class CoverageIndexedEngineTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
     private static final long DAY = 86_400L;
 
@@ -104,7 +111,7 @@ class CoverageIndexedEngineTest {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
 
-        InMemoryBlobCacheBackendAdapter store = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter store = valkey.cache(serializer);
         store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
         store.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20), Duration.ofDays(1));
         CountingBackend backend = new CountingBackend(store);
@@ -134,7 +141,7 @@ class CoverageIndexedEngineTest {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
 
-        InMemoryBlobCacheBackendAdapter store = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter store = valkey.cache(serializer);
         // Days 0 and 1 really exist; day 2's coverage bit is STALE (bucket evicted).
         store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
         store.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20), Duration.ofDays(1));
@@ -165,7 +172,7 @@ class CoverageIndexedEngineTest {
     void vanishedBucketRecoveryCanStartWhileTheOriginalGapIsRunning() {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
-        var store = new InMemoryBlobCacheBackendAdapter(serializer);
+        var store = valkey.cache(serializer);
         store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
         var coverage = new InMemoryCoverageIndexAdapter();
         coverage.markCached(hash, DAY, 0L);

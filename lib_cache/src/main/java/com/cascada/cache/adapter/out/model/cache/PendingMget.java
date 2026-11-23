@@ -1,4 +1,4 @@
-package com.cascada.cache.adapter.out.cache.model;
+package com.cascada.cache.adapter.out.model.cache;
 
 import io.lettuce.core.KeyValue;
 import io.lettuce.core.RedisFuture;

@@ -1,6 +1,5 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
@@ -14,10 +13,13 @@ import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -27,7 +29,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * verified roll-up — zero Spark calls. Any mismatch (different window, time series) falls back to the
  * reference behaviour untouched.
  */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class CacheExecutionEngineCubeTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
     private static final long DAY = 86_400L;
 
@@ -53,7 +59,7 @@ class CacheExecutionEngineCubeTest {
     }
 
     private CacheExecutionEngine engineWith(QueryExecutorPort spark, CubeShapeCatalog catalog) {
-        return new CacheExecutionEngine(new InMemoryBlobCacheBackendAdapter(serializer), spark,
+        return new CacheExecutionEngine(valkey.cache(serializer), spark,
                 fakeRewriter, CacheExecutionConfiguration.defaults(), null, catalog);
     }
 

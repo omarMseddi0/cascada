@@ -1,32 +1,38 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
 import com.cascada.cache.application.port.out.QueryPopularityPort;
 import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.cache.domain.frame.*;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.hashing.HashComponents;
-import com.cascada.cache.domain.query.*;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.query.PopularQuery;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.time.TimeRange;
-import com.cascada.cache.domain.model.query.PopularQuery;
+import com.cascada.cache.domain.query.*;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.*;
 
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class WarmingRetentionTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
     private static QueryHash hash(int number) { return QueryHash.of(String.format("%032x", number)); }
     @Test void concurrentObservationsAllowConsistentHashSnapshots() throws Exception {
-        var backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        var backend = valkey.cache(new PortableFrameSerializer());
         var warmer = new WarmingOrchestrator(backend, sql -> ResultFrame.empty(), (sql, gap) -> sql,
-                new WarmingQueue(256), new QueryPopularityTracker(256), null, 86_400, 3, 256);
+                new WarmingQueue(256), valkey.popularity(), null, 86_400, 3, 256);
         CanonicalQueryObject query = new CanonicalQueryObject(
                 HashComponents.of(List.of(), List.of("SUM(bytes)"), List.of()), new TimeRange(0, 86399),
                 PostProcessing.none(), QueryMetadata.globalAggregate(), "SELECT 1", List.of("traffic"), List.of());
@@ -51,13 +57,12 @@ class WarmingRetentionTest {
         }
         assertThat(warmer.knownQueryHashes()).containsExactlyElementsOf(hashes);
     }
-    @Test void boundsVotesPopularityAndCanonicalHistory() {
+    @Test void boundsVotesAndCanonicalHistory() {
         WarmingQueue queue = new WarmingQueue(2);
-        QueryPopularityTracker popularity = new QueryPopularityTracker(2);
-        for (int number = 1; number <= 3; number++) { queue.vote(hash(number)); popularity.recordObservation(hash(number), "SELECT " + number); }
+        for (int number = 1; number <= 3; number++) {
+            queue.vote(hash(number));
+        }
         assertThat(queue.consumeAll()).containsExactly(hash(2), hash(3));
-        assertThat(popularity.distinctQueryCount()).isEqualTo(2);
-        assertThat(popularity.hitCount(hash(1))).isZero();
         QueryPopularityPort stalePopularity = new QueryPopularityPort() {
             public void recordObservation(QueryHash query, String physicalSql) { }
             public long hitCount(QueryHash query) { return 0; }
@@ -66,7 +71,7 @@ class WarmingRetentionTest {
                         new PopularQuery(hash(3), "SELECT 3"));
             }
         };
-        var backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        var backend = valkey.cache(new PortableFrameSerializer());
         var warmer = new WarmingOrchestrator(backend,
                 sql -> ResultFrame.builder().column("n", ColumnType.LONG).row(1L).build(),
                 (sql, gap) -> sql, new WarmingQueue(2), stalePopularity, null, 86_400, 3, 2);

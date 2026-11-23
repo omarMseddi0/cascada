@@ -1,31 +1,35 @@
 package com.cascada.cache.application.service;
 
-import java.time.Duration;
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
-import com.cascada.cache.application.port.out.CacheBackendPort;
-import com.cascada.cache.application.port.out.GapQueryRewriterPort;
+import com.cascada.cache.adapter.out.tracking.ValkeyQueryPopularityAdapter;
 import com.cascada.cache.application.model.warming.PatternWarmingResult;
 import com.cascada.cache.application.model.warming.WarmingReport;
+import com.cascada.cache.application.port.out.CacheBackendPort;
+import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -34,15 +38,23 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Layer-1 queue drain, Layer-2 top-N de-duplication, per-bucket EXISTS-skip, and force-overwrite —
  * using a fake Spark that counts executions and the real in-memory backend.
  */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class WarmingOrchestratorTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
+    @BeforeEach
+    void connectValkey() {
+        backend = valkey.cache(new PortableFrameSerializer());
+    }
 
     private static final long DAY = 86_400L;
     private static final QueryHash A = QueryHash.of("0000000000000000000000000000000a");
     private static final QueryHash B = QueryHash.of("0000000000000000000000000000000b");
 
     private final AtomicInteger sparkCalls = new AtomicInteger();
-    private final InMemoryBlobCacheBackendAdapter backend =
-            new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+    private ValkeyCacheBackendAdapter backend;
     private final GapQueryRewriterPort passthroughGap = (sql, plan) -> sql;
 
     private ResultFrame fakeResult() {
@@ -58,7 +70,7 @@ class WarmingOrchestratorTest {
                 sql, List.of("traffic"), List.of());
     }
 
-    private WarmingOrchestrator orchestrator(WarmingQueue queue, QueryPopularityTracker tracker) {
+    private WarmingOrchestrator orchestrator(WarmingQueue queue, ValkeyQueryPopularityAdapter tracker) {
         return new WarmingOrchestrator(backend, sql -> fakeResult(), passthroughGap,
                 queue, tracker, DAY, 10);
     }
@@ -66,7 +78,7 @@ class WarmingOrchestratorTest {
     @Test
     void warmsEveryBodyBucketForEachQueuedPattern() {
         WarmingOrchestrator orchestrator =
-                orchestrator(new WarmingQueue(), new QueryPopularityTracker());
+                orchestrator(new WarmingQueue(), valkey.popularity());
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
         orchestrator.recordQuery(B, canonical("SELECT appName, SUM(bytes) FROM other WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
 
@@ -75,12 +87,12 @@ class WarmingOrchestratorTest {
         assertThat(report.patternsWarmed()).isEqualTo(2);
         assertThat(report.bucketsWarmed()).isEqualTo(6); // 3 days x 2 patterns
         assertThat(sparkCalls.get()).isEqualTo(6);
-        assertThat(backend.storedBucketCount()).isEqualTo(6);
+        assertThat(backend.sizeReport().bucketCount()).isEqualTo(6);
     }
 
     @Test
     void skipsAlreadyWarmedBucketsOnTheSecondCycle() {
-        QueryPopularityTracker tracker = new QueryPopularityTracker();
+        ValkeyQueryPopularityAdapter tracker = valkey.popularity();
         WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker);
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
 
@@ -96,7 +108,7 @@ class WarmingOrchestratorTest {
 
     @Test
     void forceOverwriteRewarmsEvenAlreadyWarmedBuckets() {
-        QueryPopularityTracker tracker = new QueryPopularityTracker();
+        ValkeyQueryPopularityAdapter tracker = valkey.popularity();
         WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker);
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
         orchestrator.warmCycle(0, 3 * DAY - 1, false);
@@ -109,7 +121,7 @@ class WarmingOrchestratorTest {
 
     @Test
     void layer2DoesNotDoubleWarmAHashLayer1AlreadyCovered() {
-        QueryPopularityTracker tracker = new QueryPopularityTracker();
+        ValkeyQueryPopularityAdapter tracker = valkey.popularity();
         WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), tracker);
         // record twice so the tracker definitely has it in top-N, and the queue has one vote
         orchestrator.recordQuery(A, canonical("SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName"));
@@ -123,7 +135,7 @@ class WarmingOrchestratorTest {
     @Test
     void perBucketExistsSkipWarmsOnlyTheNewlyRequestedBucket() {
         WarmingOrchestrator orchestrator =
-                orchestrator(new WarmingQueue(), new QueryPopularityTracker());
+                orchestrator(new WarmingQueue(), valkey.popularity());
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
@@ -144,7 +156,7 @@ class WarmingOrchestratorTest {
         // whole bucket forever (permanent undercount with no self-healing). Warming stops at the last
         // COMPLETE bucket boundary; the live partial bucket stays a gap for the read path to compute.
         WarmingOrchestrator orchestrator =
-                orchestrator(new WarmingQueue(), new QueryPopularityTracker());
+                orchestrator(new WarmingQueue(), valkey.popularity());
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
@@ -160,7 +172,7 @@ class WarmingOrchestratorTest {
 
     @Test
     void reversedWarmWindowDoesNoWork() {
-        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), new QueryPopularityTracker());
+        WarmingOrchestrator orchestrator = orchestrator(new WarmingQueue(), valkey.popularity());
 
         PatternWarmingResult result = orchestrator.warmSinglePattern(
                 A, canonical("SELECT SUM(bytes) FROM traffic"), DAY, 0, false);
@@ -173,7 +185,7 @@ class WarmingOrchestratorTest {
     @Test
     void warmsTheLastBucketWhenTheWindowEndsExactlyOnItsBoundary() {
         WarmingOrchestrator orchestrator =
-                orchestrator(new WarmingQueue(), new QueryPopularityTracker());
+                orchestrator(new WarmingQueue(), valkey.popularity());
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
@@ -188,14 +200,13 @@ class WarmingOrchestratorTest {
         com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter coverageIndex =
                 new com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter();
         WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(),
-                passthroughGap, new WarmingQueue(), new QueryPopularityTracker(),
+                passthroughGap, new WarmingQueue(), valkey.popularity(),
                 coverageIndex, DAY, 10);
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
 
         orchestrator.warmSinglePattern(A, canonical, 0, 55 * DAY - 1, false); // day 0..54 warmed + bits set
         sparkCalls.set(0);
-        long existsCallsBefore = backend.existsCallCount();
 
         PatternWarmingResult next =
                 orchestrator.warmSinglePattern(A, canonical, 0, 56 * DAY - 1, false); // one new day
@@ -203,7 +214,6 @@ class WarmingOrchestratorTest {
         assertThat(next.bucketsSkipped()).isEqualTo(55);
         assertThat(next.bucketsWarmed()).isEqualTo(1);   // only day 55 computed
         assertThat(sparkCalls.get()).isEqualTo(1);
-        assertThat(backend.existsCallCount()).isGreaterThan(existsCallsBefore);
     }
 
     @Test
@@ -211,7 +221,7 @@ class WarmingOrchestratorTest {
         com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter coverageIndex =
                 new com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter();
         WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(), passthroughGap,
-                new WarmingQueue(), new QueryPopularityTracker(), coverageIndex, DAY, 10);
+                new WarmingQueue(), valkey.popularity(), coverageIndex, DAY, 10);
         CanonicalQueryObject canonical = canonical("SELECT SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100");
         orchestrator.warmSinglePattern(A, canonical, 0, DAY - 1, false);
         backend.flush(com.cascada.cache.domain.admin.CacheScope.everything());
@@ -228,7 +238,7 @@ class WarmingOrchestratorTest {
         com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter coverageIndex =
                 new com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter();
         WarmingOrchestrator orchestrator = new WarmingOrchestrator(backend, sql -> fakeResult(),
-                passthroughGap, new WarmingQueue(), new QueryPopularityTracker(),
+                passthroughGap, new WarmingQueue(), valkey.popularity(),
                 coverageIndex, DAY, 10);
         CanonicalQueryObject canonical = canonical(
                 "SELECT appName, SUM(bytes) FROM traffic WHERE ts >= 0 AND ts <= 100 GROUP BY appName");
@@ -243,7 +253,7 @@ class WarmingOrchestratorTest {
 
     @Test
     void onePatternFailureDoesNotDiscardLaterWorkAndIsRequeued() {
-        QueryPopularityTracker tracker = new QueryPopularityTracker();
+        ValkeyQueryPopularityAdapter tracker = valkey.popularity();
         java.util.concurrent.atomic.AtomicBoolean failAOnce = new java.util.concurrent.atomic.AtomicBoolean(true);
         CacheBackendPort backendThatFailsAOnce = new CacheBackendPort() {
             @Override public List<Boolean> existsForKeys(List<String> keys) {

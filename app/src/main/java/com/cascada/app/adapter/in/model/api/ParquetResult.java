@@ -1,4 +1,4 @@
-package com.cascada.app.adapter.in.api.model;
+package com.cascada.app.adapter.in.model.api;
 
 import com.cascada.app.adapter.in.api.QueryResponseEncoder;
 import java.io.IOException;

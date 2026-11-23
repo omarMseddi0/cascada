@@ -1,3 +1,3 @@
-package com.cascada.cache.adapter.out.tracking.model;
+package com.cascada.cache.adapter.out.model.tracking;
 
 public record PopularityObservation(String sql, long count) { }

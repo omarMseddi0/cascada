@@ -1,7 +1,6 @@
 package com.cascada.app.adapter.out.configuration;
 
 import com.cascada.app.exception.ConfigurationException;
-import com.cascada.app.model.config.CacheBackend;
 import com.cascada.app.model.config.EngineSettings;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,7 +35,6 @@ class DeploymentSettingsReaderTest {
         assertThat(settings.engine().mainTableName()).isEqualTo("events");
         assertThat(settings.engine().mainTablePath()).isEqualTo("/lake/events");
         assertThat(settings.engine().redisUri()).isEqualTo("redis://cache:6379");
-        assertThat(settings.engine().cacheBackend()).isEqualTo(CacheBackend.VALKEY);
         assertThat(settings.engine().cacheExecution().bucketSeconds()).isEqualTo(3600);
         assertThat(settings.engine().cacheExecution().fixedStepSeconds()).isEqualTo(60);
         assertThat(settings.engine().cacheExecution().timeColumnName()).isEqualTo("event_time");

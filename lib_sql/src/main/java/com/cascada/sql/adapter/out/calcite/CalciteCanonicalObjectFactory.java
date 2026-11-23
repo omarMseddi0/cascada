@@ -1,15 +1,14 @@
 package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.sql.adapter.out.model.calcite.query.ParsedSqlQuery;
+import com.cascada.sql.adapter.out.model.calcite.aggregate.SelectAggregates;
 import com.cascada.sql.adapter.out.model.calcite.aggregate.NormalizedAggregates;
 import com.cascada.sql.adapter.out.model.calcite.time.CanonicalTimeSeriesShape;
 import com.cascada.sql.adapter.out.model.calcite.time.CanonicalTimeRangeExtraction;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.domain.model.hashing.HashComponents;
-import com.cascada.cache.domain.merge.AggregateFunction;
 import com.cascada.cache.domain.merge.AverageIngredients;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
-import com.cascada.cache.domain.model.query.CompositeFormula;
 import com.cascada.cache.domain.model.query.OrderByClause;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
@@ -17,9 +16,7 @@ import com.cascada.cache.domain.time.CacheTimeConstants;
 import com.cascada.sql.domain.model.TimeDimensionMap;
 import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
@@ -34,17 +31,11 @@ import org.apache.calcite.sql.SqlOrderBy;
 import org.apache.calcite.sql.SqlSelect;
 
 /**
- * Extracts a {@link CanonicalQueryObject} from a SQL string using <b>Apache Calcite</b>, porting the
- * logic the Python {@code smart_sql_processor} (sqlglot) + {@code create_canonical_object}
- * ({@code cache_component_adapter.py}) performed: pull group-by, aggregates, filters, time range,
- * ordering and limit; expand {@code AVG} via {@link AggregateNormalizer}; detect time-series and the
- * user's bucket step; and record composite aliases so they can be rebuilt after merge.
+ * Compiles a physical SELECT into the cache's query model. The model captures the query's identity,
+ * requested time window, aggregate merge rules, and final ordering and limit.
  *
- * <p>Calcite is the Java analogue of sqlglot — a full navigable {@code SqlNode} tree and a dialect
- * unparser — replacing the previous JSqlParser implementation. Following the bypass-on-unsupported
- * policy, anything Calcite cannot parse, anything that is not a simple {@code SELECT}, and anything
- * without an extractable time range raises {@link UnsupportedSqlException} so the caller bypasses to
- * Spark rather than caching a guess.
+ * <p>Unsupported shapes raise {@link UnsupportedSqlException} so the caller can execute the original
+ * SQL directly in Spark.
  */
 public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort {
 
@@ -85,6 +76,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         this.storageStepSeconds = storageStepSeconds;
     }
 
+    private final SelectAggregateExtractor selectAggregateExtractor = new SelectAggregateExtractor();
     private final AggregateNormalizer aggregateNormalizer = new AggregateNormalizer();
     private final SqlCacheabilityGuard cacheabilityGuard = new SqlCacheabilityGuard();
     private final CanonicalTimeSeriesAnalyzer timeSeriesAnalyzer = new CanonicalTimeSeriesAnalyzer();
@@ -100,15 +92,11 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         cacheabilityGuard.validate(parsed.root(), select, timeDimensionMap);
 
         List<String> groupBy = extractGroupBy(select);
-        Map<String, String> compositeAliases = new LinkedHashMap<>();
-        Map<String, CompositeFormula> compositeFormulas = new LinkedHashMap<>();
-        List<String> aggregateSpecs = new ArrayList<>();
-        Map<String, AggregateFunction> measureAggregates = new LinkedHashMap<>();
-        List<SqlBasicCall> rawAggregateCalls =
-                extractAggregates(select, aggregateSpecs, compositeAliases, measureAggregates, compositeFormulas);
+        SelectAggregates aggregates = selectAggregateExtractor.extract(select);
         List<String> projectionSignature = extractProjectionSignature(select);
         List<String> logicSignature = extractLogicSignature(select);
-        if (!hasMergeableProjection(parsed, timeDimensionMap)) {
+        List<OrderByClause> orderBy = extractOrderBy(parsed);
+        if (!hasMergeableProjection(parsed, timeDimensionMap, groupBy, orderBy)) {
             logicSignature.add("UNSUPPORTED_MERGE_SHAPE");
         }
 
@@ -129,7 +117,7 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         }
 
         List<String> outputGroupNames = resolveOutputGroupNames(select, groupBy);
-        NormalizedAggregates normalized = aggregateNormalizer.normalize(rawAggregateCalls);
+        NormalizedAggregates normalized = aggregateNormalizer.normalize(aggregates.calls());
 
         HashComponents hashComponents = new HashComponents(
                 new ArrayList<>(new TreeSet<>(outputGroupNames)),
@@ -141,18 +129,18 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
                 shape.isTimeSeries(),
                 0L,
                 normalized.originalAggregates(),
-                compositeAliases,
+                aggregates.compositeAliases(),
                 shape.userStepSeconds(),
                 shape.preserveRawTimeSeries(),
-                aggregateSpecs,
-                measureAggregates).withCompositeFormulas(compositeFormulas);
+                aggregates.specifications(),
+                aggregates.combineFunctions()).withCompositeFormulas(aggregates.formulas());
 
         if (hotBatchPaths != null) {
             boolean touchesBatch = touchesHotBatch(select.getFrom());
             metadata = metadata.withUsesHotBatch(touchesBatch);
         }
 
-        PostProcessing postProcessing = new PostProcessing(extractLimit(parsed), extractOrderBy(parsed));
+        PostProcessing postProcessing = new PostProcessing(extractLimit(parsed), orderBy);
 
         return new CanonicalQueryObject(hashComponents, timeExtraction.timeRange().orElseThrow(), postProcessing,
                 metadata, flattenedSql, extractSourceSignature(select), projectionSignature, logicSignature,
@@ -187,15 +175,15 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         return false;
     }
 
-    private boolean hasMergeableProjection(ParsedSqlQuery parsed, TimeDimensionMap dimensions) {
+    private boolean hasMergeableProjection(ParsedSqlQuery parsed, TimeDimensionMap dimensions,
+                                           List<String> grouped, List<OrderByClause> orderBy) {
         SqlSelect select = parsed.select();
         if ((parsed.orderBy() != null && parsed.orderBy().offset != null) || select.getOffset() != null) {
             return false;
         }
-        if (extractOrderBy(parsed).stream().anyMatch(order -> order.expression().isPresent())) {
+        if (orderBy.stream().anyMatch(order -> order.expression().isPresent())) {
             return false;
         }
-        List<String> grouped = extractGroupBy(select);
         Set<String> projectedGroups = new java.util.HashSet<>();
         for (SqlNode item : select.getSelectList()) {
             SqlNode expression = SqlTrees.unaliased(item);
@@ -265,88 +253,6 @@ public final class CalciteCanonicalObjectFactory implements SqlCanonicalizerPort
         return group.stream()
                 .map(CalciteSql::unparse)
                 .collect(Collectors.toCollection(ArrayList::new));
-    }
-
-    // --- aggregates ------------------------------------------------------------------------------
-
-    private List<SqlBasicCall> extractAggregates(SqlSelect select, List<String> aggregateSpecsOut,
-                                                 Map<String, String> compositeAliasesOut,
-                                                 Map<String, AggregateFunction> measureAggregatesOut,
-                                                 Map<String, CompositeFormula> compositeFormulasOut) {
-        List<SqlBasicCall> rawAggregateCalls = new ArrayList<>();
-        for (SqlNode item : select.getSelectList()) {
-            SqlNode expression = SqlTrees.unaliased(item);
-            String aliasName = expression == item ? null : SqlTrees.outputName(item);
-
-            List<SqlBasicCall> aggregatesInItem = new ArrayList<>();
-            collectAggregateFunctions(expression, aggregatesInItem);
-            if (aggregatesInItem.isEmpty()) {
-                continue;
-            }
-
-            rawAggregateCalls.addAll(aggregatesInItem);
-
-            boolean isComposite = aggregatesInItem.size() > 1 || !isSingleAggregateCall(expression);
-            if (isComposite && aliasName != null) {
-                SqlNode formula = expression.accept(new org.apache.calcite.sql.util.SqlShuttle() {
-                    @Override public SqlNode visit(SqlCall call) {
-                        if (call instanceof SqlBasicCall aggregate && SqlTrees.isAggregateCall(aggregate))
-                            return new SqlIdentifier(CompositeIngredientNames.alias(CalciteSql.unparse(aggregate)), call.getParserPosition());
-                        return super.visit(call);
-                    }
-                });
-                compositeAliasesOut.put(aliasName, CalciteSql.unparse(formula));
-                compositeFormulasOut.put(aliasName, CompositeFormulaCompiler.compile(formula));
-                for (SqlBasicCall ingredient : aggregatesInItem) {
-                    String name = CalciteSql.unparse(ingredient);
-                    String privateName = CompositeIngredientNames.alias(name);
-                    measureAggregatesOut.put(privateName, combineFunctionFor(ingredient.getOperator().getName()));
-                    aggregateSpecsOut.add(name + " AS " + privateName);
-                }
-            }
-
-            // README caveat 4: record the PARSED aggregate function per output column while the AST
-            // is still in hand. The merge path must never re-derive the combine op from the column
-            // name — an alias like MAX(latency) AS peak_latency hides the max signal and would be
-            // SUMmed across buckets.
-            if (!isComposite && expression instanceof SqlBasicCall single) {
-                AggregateFunction function = combineFunctionFor(single.getOperator().getName());
-                if (function != null) {
-                    String outputColumn = aliasName != null ? aliasName : CalciteSql.unparse(expression);
-                    measureAggregatesOut.put(outputColumn, function);
-                }
-            }
-
-            String spec = aliasName != null
-                    ? CalciteSql.unparse(expression) + " AS " + aliasName
-                    : CalciteSql.unparse(expression);
-            aggregateSpecsOut.add(spec);
-        }
-        return rawAggregateCalls;
-    }
-
-    private boolean isSingleAggregateCall(SqlNode expression) {
-        return SqlTrees.isAggregateCall(expression);
-    }
-
-    private void collectAggregateFunctions(SqlNode expression, List<SqlBasicCall> collector) {
-        if (!(expression instanceof SqlCall call)) {
-            return;
-        }
-        if (call instanceof SqlBasicCall basicCall && SqlTrees.isAggregateCall(basicCall)) {
-            collector.add(basicCall);
-            return;
-        }
-        for (SqlNode operand : call.getOperandList()) {
-            if (operand != null) {
-                collectAggregateFunctions(operand, collector);
-            }
-        }
-    }
-
-    /** Maps a parsed aggregate keyword to its cross-bucket combine op; {@code null} when not simple. */
-    private AggregateFunction combineFunctionFor(String operatorName) {
-        return AggregateFunction.fromSqlName(operatorName).orElse(null);
     }
 
     // --- logic signature (HAVING / JOIN ON / DISTINCT) --------------------------------------------

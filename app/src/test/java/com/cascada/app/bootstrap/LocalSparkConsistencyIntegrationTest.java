@@ -1,46 +1,53 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.*;
+import com.cascada.cache.application.service.cube.CubeConsistencyVerifier;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.cube.CubeSubsumptionPlanner;
-import com.cascada.cache.application.service.cube.CubeConsistencyVerifier;
-import com.cascada.cache.domain.model.cube.CachedShapeEntry;
-import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.key.CacheKeyFactory;
-import com.cascada.cache.domain.model.safety.CacheConfiguration;
+import com.cascada.cache.domain.model.cube.CachedShapeEntry;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.domain.model.time.GapPlan;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
+import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import com.cascada.sql.adapter.out.calcite.CalciteCanonicalObjectFactory;
 import com.cascada.sql.adapter.out.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.adapter.out.calcite.LogicalToPhysicalSqlTranslator;
-import com.cascada.sql.domain.model.RegisteredTable;
 import com.cascada.sql.domain.TableCatalog;
-import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
+import com.cascada.sql.domain.model.RegisteredTable;
 import java.math.BigDecimal;
 import java.util.*;
 import java.util.stream.Stream;
 import org.apache.spark.sql.SparkSession;
-import org.apache.spark.storage.StorageLevel;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.*;
 
 /** Differential execution against independent, unmodified Spark SQL; no Java aggregate oracle. */
 @EnabledIfSystemProperty(named = "cascada.spark.integration", matches = "true")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class LocalSparkConsistencyIntegrationTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
     private static final long DAY = 86400, BASE = 1759968000L, END = BASE + 7 * DAY - 1;
     private SparkSession spark;
     private java.nio.file.Path warehouse;
@@ -55,16 +62,20 @@ class LocalSparkConsistencyIntegrationTest {
         warehouse = java.nio.file.Files.createTempDirectory("cascada-consistency-warehouse-");
         boolean nativeMode = Boolean.parseBoolean(System.getenv("CASCADA_GLUTEN_ENABLED"));
         String master = System.getenv().getOrDefault("SPARK_MASTER","local[2]");
-        if (nativeMode) {
+        var deployment = LocalSparkFixtures.deploymentProperties(nativeMode);
+        if (nativeMode || !deployment.isEmpty()) {
             var config = LocalSparkFixtures.localConfig()
-                    .master(master).withEnvironment(System::getenv)
+                    .master(master).withEnvironment(name -> "CASCADA_GLUTEN_ENABLED".equals(name)
+                            ? Boolean.toString(nativeMode) : System.getenv(name))
                     .withProperty("spark.sql.warehouse.dir", warehouse.toUri().toString())
                     .withProperty("spark.sql.shuffle.partitions", "2").withProperty("spark.default.parallelism", "2")
                     .withProperty("spark.sql.session.timeZone", "UTC")
                     .withProperty("spark.sql.ansi.enabled", "false")
                     .withProperty("spark.gluten.sql.native.writer.enabled", "false")
                     .withProperty("spark.databricks.delta.snapshotPartitions", "2")
-                    .withProperty("spark.driver.maxResultSize", "128m").build();
+                    .withProperty("spark.driver.maxResultSize", "128m")
+                    .withGroup(deployment)
+                    .build();
             physicalAdapter = new SparkDeltaQueryExecutor(config);
             spark = SparkSession.active();
         } else spark = LocalSparkFixtures.localDeltaSession().master(master).appName("cascada-epoch-sql-consistency")
@@ -101,9 +112,8 @@ class LocalSparkConsistencyIntegrationTest {
             String deltaPath = warehouse.resolve("events").toUri().toString();
             generated.write().format("delta").mode("overwrite").save(deltaPath);
             assertThat(java.nio.file.Files.isDirectory(warehouse.resolve("events/_delta_log"))).isTrue();
-            spark.read().format("delta").load(deltaPath).persist(StorageLevel.MEMORY_AND_DISK())
-                    .createOrReplaceTempView("events");
-        } else generated.persist(StorageLevel.MEMORY_AND_DISK()).createOrReplaceTempView("events");
+            spark.read().format("delta").load(deltaPath).createOrReplaceTempView("events");
+        } else generated.createOrReplaceTempView("events");
         assertThat(spark.table("events").count()).isEqualTo(rows);
         spark.sql("SELECT ts, CASE WHEN id % 3 = 0 THEN '😀' WHEN id % 3 = 1 THEN '\uE000' ELSE 'z' END AS region, "
                 + "device, amount FROM events").createOrReplaceTempView("unicode_events");
@@ -121,14 +131,22 @@ class LocalSparkConsistencyIntegrationTest {
         if (warehouse != null) deleteFixture(warehouse);
     }
 
+    private ValkeyCacheBackendAdapter bucketStore;
+
+    @BeforeEach
+    void connectValkey() {
+        bucketStore = valkey.cache(new PortableFrameSerializer());
+    }
+
     private class Harness {
         final List<String> executed = Collections.synchronizedList(new ArrayList<>());
-        final InMemoryBlobCacheBackendAdapter cache = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        final ValkeyCacheBackendAdapter cache = bucketStore;
         final InMemoryCoverageIndexAdapter coverage = new InMemoryCoverageIndexAdapter();
         final QueryExecutorPort tracked = sql -> { executed.add(sql); return direct.execute(sql); };
         final CacheExecutionEngine engine;
         final ExecuteLogicalQueryService service;
         Harness(boolean cube) {
+            valkey.clearCascadaKeys();
             engine = new CacheExecutionEngine(cache, tracked, rewriter, CacheExecutionConfiguration.defaults(),
                     coverage, cube ? new CubeShapeCatalog() : null, Runnable::run);
             var cached = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(), CacheConfiguration.defaults(),
@@ -308,10 +326,6 @@ class LocalSparkConsistencyIntegrationTest {
                 checkPaths(new Scenario("cached-composite-" + i, unordered, true));
                 return;
             }
-            if (i == 12) {
-                checkPaths(new Scenario("uncorrelated-IN-subquery", sql, true));
-                return;
-            }
             if (i == 2) {
                 // AVG is cached as SUM and COUNT ingredients and divided after the merge.
                 // The query orders by its last column only, so tied rows have no defined order:
@@ -326,10 +340,6 @@ class LocalSparkConsistencyIntegrationTest {
                 assertDescendingLastColumn(result.frame());
                 return;
             }
-            // Spark 4.2 itself fails to canonicalize this correlated CTE against InMemoryRelation
-            // (NoSuchElementException id#9L). Run both independent executions without Spark table caching.
-            if (i >= 15) spark.catalog().uncacheTable("events");
-            try {
             Harness h = new Harness(true);
             var expected = direct.execute(sql);
             var result = h.service.query(sql);
@@ -338,7 +348,6 @@ class LocalSparkConsistencyIntegrationTest {
             same(result.frame(), expected, sql, "complex-" + i);
             same(h.service.query(sql).frame(), expected, sql, "complex-repeat-" + i);
             System.out.println("CONSISTENCY_PASS complex-" + i);
-            } finally { if (i >= 15) spark.catalog().cacheTable("events"); }
         }));
     }
 
@@ -484,7 +493,7 @@ class LocalSparkConsistencyIntegrationTest {
             var hash = hashing.generateQueryHash(canonical, 300);
             var warmer = new WarmingOrchestrator(h.cache, h.tracked, rewriter,
                     new com.cascada.cache.application.service.warming.WarmingQueue(),
-                    new com.cascada.cache.adapter.out.tracking.QueryPopularityTracker(), h.coverage, DAY, 10);
+                    valkey.popularity(), h.coverage, DAY, 10);
             var first = warmer.warmSinglePattern(hash, canonical, BASE + 123, BASE + 3 * DAY + 177, false);
             assertThat(first.bucketsWarmed()).isEqualTo(3);
             assertThat(h.executed).hasSize(3);

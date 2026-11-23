@@ -1,6 +1,6 @@
 package com.cascada.spark.adapter.out.spark;
 
-import com.cascada.spark.adapter.out.spark.model.SessionLease;
+import com.cascada.spark.adapter.out.model.spark.SessionLease;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;

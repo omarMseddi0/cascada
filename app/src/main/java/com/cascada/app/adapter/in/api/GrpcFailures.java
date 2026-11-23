@@ -1,6 +1,6 @@
 package com.cascada.app.adapter.in.api;
 
-import com.cascada.app.adapter.in.api.model.ApiFailure;
+import com.cascada.app.adapter.in.model.api.ApiFailure;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 

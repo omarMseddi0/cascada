@@ -1,35 +1,40 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.adapter.out.tracking.QueryPopularityTracker;
-import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
-import com.cascada.cache.application.service.hashing.QueryHashGenerator;
+import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
+import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.application.service.warming.DataChangeDetector;
 import com.cascada.cache.application.service.warming.WarmingQueue;
-import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.*;
-import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.merge.*;
-import com.cascada.cache.domain.query.*;
-import com.cascada.cache.domain.model.query.QueryMetadata;
-import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.cube.QueryShape;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
-import com.cascada.cache.domain.safety.*;
+import com.cascada.cache.domain.model.query.PostProcessing;
+import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.domain.query.*;
+import com.cascada.cache.domain.safety.*;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.atomic.*;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class CacheParityRegressionTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
     private static final long DAY = 86400;
     private static final QueryHash HASH = QueryHash.of("000000000000000000000000000000aa");
     private static ResultFrame total(long value) {
@@ -41,9 +46,10 @@ class CacheParityRegressionTest {
                 List.of("traffic"), List.of());
     }
 
+    @EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
     @Test void failedForcedRefreshDoesNotAcknowledgeTheNewBaselineAndRetriesExistingOldKeys() {
         Clock clock = Clock.fixed(Instant.ofEpochSecond(4 * DAY + 3600), ZoneOffset.UTC);
-        var backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer(), clock);
+        var backend = valkey.cache(new PortableFrameSerializer());
         AtomicLong source = new AtomicLong(100);
         var detector = new DataChangeDetector(backend, sql -> sql, sql -> total(source.get()),
                 "validation {start} {end}", Duration.ofDays(7));
@@ -56,7 +62,7 @@ class CacheParityRegressionTest {
         var warmer = new WarmingOrchestrator(backend, sql -> {
             if (failOnce.getAndSet(false)) throw new IllegalStateException("transient Spark failure");
             return total(source.get());
-        }, (sql, gap) -> sql, new WarmingQueue(), new QueryPopularityTracker(), null,
+        }, (sql, gap) -> sql, new WarmingQueue(), valkey.popularity(), null,
                 sql -> query(QueryMetadata.globalAggregate()), detector, null,
                 new WarmingConfiguration(DAY, 10, 100, Duration.ofDays(7), 100), clock);
         warmer.recordQuery(HASH, query(QueryMetadata.globalAggregate()));
@@ -109,8 +115,9 @@ class CacheParityRegressionTest {
         assertThat(catalog.tryAnswer(window, shape)).isEmpty();
     }
 
+    @EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
     @Test void validationDistinguishesSqlNullFromTheLiteralStringNull() {
-        var backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        var backend = valkey.cache(new PortableFrameSerializer());
         AtomicReference<String> value = new AtomicReference<>(null);
         var detector = new DataChangeDetector(backend, sql -> sql,
                 sql -> ResultFrame.builder().column("v", ColumnType.STRING).row((Object) value.get()).build(),
@@ -121,6 +128,7 @@ class CacheParityRegressionTest {
         assertThat(detector.hasHistoricalDataChanged(range)).isTrue();
     }
 
+    @EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
     @Test void cubeAnswerNeverOutlivesTheBucketItWasDerivedFrom() {
         AtomicReference<Instant> now = new AtomicReference<>(Instant.ofEpochSecond(10 * DAY));
         Clock clock = new Clock() {
@@ -128,13 +136,14 @@ class CacheParityRegressionTest {
             public Clock withZone(ZoneId zone) { return this; }
             public Instant instant() { return now.get(); }
         };
-        var backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer(), clock);
+        var backend = valkey.cache(new PortableFrameSerializer());
         var catalog = new CubeShapeCatalog(2, 2, Duration.ofMinutes(5), clock);
         var canonical = new CanonicalQueryObject(HashComponents.of(List.of(), List.of("SUM(bytes)"), List.of()),
                 new TimeRange(0, DAY - 1), PostProcessing.none(), QueryMetadata.globalAggregate(), "full",
                 List.of("traffic"), List.of());
         var hash = new QueryHashGenerator().generateQueryHash(canonical, 300);
-        backend.store(CacheKeyFactory.buildBucketKey(hash, 0, DAY), total(100), Duration.ofSeconds(2));
+        String key = CacheKeyFactory.buildBucketKey(hash, 0, DAY);
+        backend.store(key, total(100), Duration.ofSeconds(2));
         AtomicInteger sparkCalls = new AtomicInteger();
         var engine = new CacheExecutionEngine(backend, sql -> { sparkCalls.incrementAndGet(); return total(200); },
                 (sql, gap) -> sql, CacheExecutionConfiguration.defaults(), null, catalog, Runnable::run, clock);
@@ -142,12 +151,14 @@ class CacheParityRegressionTest {
         assertThat(engine.execute(canonical, hash).longAt(0, 0)).isEqualTo(100);
         assertThat(sparkCalls).hasValue(0);
         now.set(now.get().plusSeconds(3));
+        valkey.expireBucket(key);
         assertThat(engine.execute(canonical, hash).longAt(0, 0)).isEqualTo(200);
         assertThat(sparkCalls).hasValue(1);
     }
 
+    @EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
     @Test void aConcurrentBucketMutationPreventsRegistrationOfAnObsoleteCube() {
-        var backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        var backend = valkey.cache(new PortableFrameSerializer());
         var catalog = new CubeShapeCatalog();
         var canonical = query(QueryMetadata.globalAggregate());
         var hash = new QueryHashGenerator().generateQueryHash(canonical, 300);
@@ -163,8 +174,9 @@ class CacheParityRegressionTest {
         assertThat(calls).hasValue(2);
     }
 
+    @EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
     @Test void aColdAverageUsesOneOriginalSparkQueryWhileTheWarmerOwnsIngredients() {
-        var backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        var backend = valkey.cache(new PortableFrameSerializer());
         var metadata = QueryMetadata.globalAggregate().withMeasureAggregates(Map.of("mean", AggregateFunction.AVERAGE));
         var canonical = new CanonicalQueryObject(HashComponents.of(List.of(), List.of("SUM(x)", "COUNT(x)"), List.of()),
                 new TimeRange(0, DAY - 1), PostProcessing.none(), metadata, "SELECT AVG(x) AS mean", List.of(), List.of());
@@ -178,14 +190,15 @@ class CacheParityRegressionTest {
         assertThat(calls).hasValue(1);
     }
 
+    @EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
     @Test void decimalCompositesStayAuthoritativeInsteadOfCachingUnprovenScaleArithmetic() {
-        var backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        var backend = valkey.cache(new PortableFrameSerializer());
         var canonical = query(QueryMetadata.globalAggregate().withCompositeAliases(Map.of("total", "SUM(x)+SUM(y)")));
         var warmer = new WarmingOrchestrator(backend,
                 sql -> ResultFrame.builder().column("SUM(x)", ColumnType.DECIMAL).column("SUM(y)", ColumnType.DECIMAL)
                         .row(new java.math.BigDecimal("1.123456789012345678"), new java.math.BigDecimal("2.0")).build(),
-                (sql, gap) -> sql, new WarmingQueue(), new QueryPopularityTracker(), DAY, 10);
+                (sql, gap) -> sql, new WarmingQueue(), valkey.popularity(), DAY, 10);
         assertThat(warmer.warmSinglePattern(HASH, canonical, 0, DAY - 1, false).bucketsSkipped()).isOne();
-        assertThat(backend.storedBucketCount()).isZero();
+        assertThat(backend.sizeReport().bucketCount()).isZero();
     }
 }

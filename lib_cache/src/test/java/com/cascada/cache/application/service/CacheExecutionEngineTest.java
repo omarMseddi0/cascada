@@ -1,11 +1,10 @@
 package com.cascada.cache.application.service;
 
-import java.time.Duration;
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
-import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.BucketCachePort;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
@@ -13,23 +12,27 @@ import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.time.TimeBucketCalculator;
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.merge.AggregateFunction;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.time.GapPlan;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -41,7 +44,11 @@ import static com.cascada.cache.application.service.EngineTestFixtures.globalAgg
  * End-to-end exercise of the runnable engine with an in-memory backend and a fake Spark executor:
  * partial-hit merge, and the two direct-to-Spark fast paths.
  */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class CacheExecutionEngineTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
     @Test
     void cancellationDuringCachePresenceCannotLaunchAnAuthoritativeFallback() {
@@ -148,7 +155,7 @@ class CacheExecutionEngineTest {
                 .column("bytes", ColumnType.DOUBLE).build();
     }
 
-    private CacheBackendPort failingBackend(InMemoryBlobCacheBackendAdapter delegate,
+    private CacheBackendPort failingBackend(ValkeyCacheBackendAdapter delegate,
                                             boolean failPresence, boolean failMultiGet, boolean failStore) {
         return new CacheBackendPort() {
             @Override public List<Boolean> existsForKeys(List<String> keys) {
@@ -183,7 +190,7 @@ class CacheExecutionEngineTest {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
 
-        InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter backend = valkey.cache(serializer);
         // Cache day 0 and day 1; leave day 2 to be computed by the (fake) Spark gap.
         backend.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
         backend.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20), Duration.ofDays(1));
@@ -210,7 +217,7 @@ class CacheExecutionEngineTest {
     void zeroCacheHitsBypassToDirectSparkWithTheOriginalSql() {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
-        InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter backend = valkey.cache(serializer);
 
         StringBuilder seenSql = new StringBuilder();
         QueryExecutorPort fakeSpark = sql -> {
@@ -233,7 +240,7 @@ class CacheExecutionEngineTest {
         CanonicalQueryObject canonical = new CanonicalQueryObject(components, new TimeRange(0, 3 * DAY - 1),
                 PostProcessing.none(), QueryMetadata.timeSeries(300), "FULL_SQL", List.of("traffic"), List.of());
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
-        InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter backend = valkey.cache(serializer);
         AtomicInteger calls = new AtomicInteger();
         QueryExecutorPort fakeSpark = sql -> {
             calls.incrementAndGet();
@@ -247,7 +254,7 @@ class CacheExecutionEngineTest {
         engine.execute(canonical, hash);
 
         assertThat(calls.get()).isEqualTo(2);
-        assertThat(backend.storedBucketCount()).isZero();
+        assertThat(backend.sizeReport().bucketCount()).isZero();
     }
 
     @Test
@@ -271,7 +278,7 @@ class CacheExecutionEngineTest {
     void cachePresenceOutageFallsBackToTheOriginalAuthoritativeQuery() {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
-        InMemoryBlobCacheBackendAdapter delegate = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter delegate = valkey.cache(serializer);
         CacheBackendPort unavailable = failingBackend(delegate, true, false, false);
         AtomicInteger calls = new AtomicInteger();
         QueryExecutorPort spark = sql -> {
@@ -291,7 +298,7 @@ class CacheExecutionEngineTest {
     void cacheDecodeFailureFallsBackToTheOriginalAuthoritativeQuery() {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
-        InMemoryBlobCacheBackendAdapter delegate = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter delegate = valkey.cache(serializer);
         for (long day : List.of(0L, DAY, 2 * DAY)) {
             delegate.store(CacheKeyFactory.buildBucketKey(hash, day, DAY), appFrame("netflix", 1), Duration.ofDays(1));
         }
@@ -312,7 +319,7 @@ class CacheExecutionEngineTest {
         CanonicalQueryObject canonical = timeSeriesOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
         CacheBackendPort writeFailing = failingBackend(
-                new InMemoryBlobCacheBackendAdapter(serializer), false, false, true);
+                valkey.cache(serializer), false, false, true);
         AtomicInteger sparkCalls = new AtomicInteger();
         QueryExecutorPort spark = sql -> {
             sparkCalls.incrementAndGet();
@@ -337,7 +344,7 @@ class CacheExecutionEngineTest {
             return emptyTimeSeriesFrame();
         };
 
-        ResultFrame result = new CacheExecutionEngine(new InMemoryBlobCacheBackendAdapter(serializer), spark,
+        ResultFrame result = new CacheExecutionEngine(valkey.cache(serializer), spark,
                 (sql, plan) -> "GAP_SQL", CacheExecutionConfiguration.defaults()).execute(canonical, hash);
 
         assertThat(calls.get()).isEqualTo(1);
@@ -349,7 +356,7 @@ class CacheExecutionEngineTest {
     void incompatibleCachedAndGapFramesFallBackToTheOriginalQuery() {
         CanonicalQueryObject canonical = timeSeriesOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
-        InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter backend = valkey.cache(serializer);
         backend.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), timeSeriesFrame(10.0), Duration.ofDays(1));
         backend.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), timeSeriesFrame(20.0), Duration.ofDays(1));
         AtomicInteger calls = new AtomicInteger();
@@ -374,7 +381,7 @@ class CacheExecutionEngineTest {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);
         CacheBackendPort unavailable = failingBackend(
-                new InMemoryBlobCacheBackendAdapter(serializer), true, false, false);
+                valkey.cache(serializer), true, false, false);
         IllegalStateException authoritativeFailure = new IllegalStateException("authoritative query failed");
         AtomicInteger calls = new AtomicInteger();
         QueryExecutorPort spark = sql -> {
@@ -490,7 +497,7 @@ class CacheExecutionEngineTest {
     void propagatesRequestCancellationToTheParallelSparkGap() {
         var canonical = timeSeriesOverThreeDays();
         QueryHash queryHash = hashGenerator.generateQueryHash(canonical, 300);
-        var backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        var backend = valkey.cache(serializer);
         backend.store(CacheKeyFactory.buildBucketKey(queryHash, 0, DAY), timeSeriesFrame(10), Duration.ofDays(1));
         var cancellation = new com.cascada.cache.application.execution.QueryCancellation();
         AtomicInteger observed = new AtomicInteger();

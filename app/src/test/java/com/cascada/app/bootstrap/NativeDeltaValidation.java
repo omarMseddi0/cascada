@@ -6,7 +6,6 @@ import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.*;
 import org.apache.spark.sql.*;
-import org.apache.spark.sql.execution.SparkPlan;
 import org.apache.spark.scheduler.*;
 
 /** Small, opt-in native Delta gate: transaction semantics and completed physical plans. */
@@ -28,7 +27,9 @@ public final class NativeDeltaValidation {
                 .withProperty("spark.sql.shuffle.partitions","12").withProperty("spark.sql.session.timeZone","UTC")
                 .withProperty("spark.sql.ansi.enabled","false")
                 .withProperty("spark.gluten.sql.native.writer.enabled","false")
-                .withProperty("spark.sql.warehouse.dir","/benchmark-data/smoke-warehouse").build();
+                .withProperty("spark.sql.warehouse.dir","/benchmark-data/smoke-warehouse")
+                .withGroup(LocalSparkFixtures.deploymentProperties(true))
+                .build();
         try (var executor = new SparkDeltaQueryExecutor(config)) {
             SparkSession nativeSession = SparkSession.active();
             var componentObject = Class.forName("org.apache.gluten.component.Component$");
@@ -105,8 +106,8 @@ public final class NativeDeltaValidation {
         List<Row> reference=expected.collectAsList(), rows=actual.collectAsList();
         if (!rows.equals(reference) || !actual.schema().equals(expected.schema()))
             throw new IllegalStateException("Delta correctness/schema mismatch: "+name+" native="+rows+" oracle="+reference);
-        List<String> classes=classes(actual.queryExecution().executedPlan());
-        if(classes(expected.queryExecution().executedPlan()).stream().anyMatch(c -> c.contains("Transformer")))
+        List<String> classes=LocalSparkFixtures.executedPlanClasses(actual.queryExecution().executedPlan());
+        if(LocalSparkFixtures.executedPlanClasses(expected.queryExecution().executedPlan()).stream().anyMatch(c -> c.contains("Transformer")))
             throw new IllegalStateException("Oracle unexpectedly used native execution: "+name);
         long scans=classes.stream().filter(c -> c.endsWith("DeltaScanTransformer")).count();
         // An empty predicate can be optimized to a local relation without scanning any files.
@@ -121,18 +122,4 @@ public final class NativeDeltaValidation {
         System.out.println("NATIVE_DELTA_PASS "+name+" nativeScans="+scans+"\n"+plan);
     }
 
-    private static List<String> classes(SparkPlan root) {
-        Set<SparkPlan> seen=Collections.newSetFromMap(new IdentityHashMap<>());
-        var pending=new ArrayDeque<SparkPlan>();pending.add(root);
-        var result=new ArrayList<String>();
-        while(!pending.isEmpty()) {
-            var node=pending.removeFirst();if(!seen.add(node))continue;result.add(node.getClass().getName());
-            if(node instanceof org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec a) pending.add(a.executedPlan());
-            if(node instanceof org.apache.spark.sql.execution.adaptive.QueryStageExec s) pending.add(s.plan());
-            pending.addAll(scala.jdk.javaapi.CollectionConverters.asJava(node.children()));
-            pending.addAll(scala.jdk.javaapi.CollectionConverters.asJava(node.subqueries()));
-            if(node instanceof org.apache.spark.sql.execution.exchange.ReusedExchangeExec reused) pending.add(reused.child());
-        }
-        return result;
-    }
 }

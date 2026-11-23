@@ -24,21 +24,25 @@ final class SqlCacheabilityGuard {
 
     void validate(SqlNode root, SqlSelect select, TimeDimensionMap dimensions) {
         rejectMultipleTimeColumns(root, dimensions);
-        rejectUnsafeFunctions(root);
+        rejectUnsafeExpressions(root, select);
         rejectUnsupportedTimeGrouping(select, dimensions);
         rejectMultiSourceTimeReferences(root, select.getFrom(), dimensions);
     }
 
-    private void rejectUnsafeFunctions(SqlNode node) {
+    private void rejectUnsafeExpressions(SqlNode node, SqlSelect outerSelect) {
         if (node == null) {
             return;
+        }
+        // A nested query can change a bucket's answer when data outside that bucket changes.
+        if (node instanceof SqlSelect select && select != outerSelect) {
+            throw new UnsupportedSqlException("nested query scopes cannot be safely cached");
         }
         if (isContextDependent(node)) {
             throw new UnsupportedSqlException("context-dependent SQL expressions cannot be cached");
         }
         if (node instanceof SqlNodeList nodeList) {
             for (SqlNode child : nodeList) {
-                rejectUnsafeFunctions(child);
+                rejectUnsafeExpressions(child, outerSelect);
             }
             return;
         }
@@ -50,7 +54,7 @@ final class SqlCacheabilityGuard {
             throw new UnsupportedSqlException("non-deterministic SQL expressions cannot be cached");
         }
         for (SqlNode operand : call.getOperandList()) {
-            rejectUnsafeFunctions(operand);
+            rejectUnsafeExpressions(operand, outerSelect);
         }
     }
 

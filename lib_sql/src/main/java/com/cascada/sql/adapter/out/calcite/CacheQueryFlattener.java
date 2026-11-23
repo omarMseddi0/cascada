@@ -1,59 +1,60 @@
 package com.cascada.sql.adapter.out.calcite;
 
-import java.util.*;
-import org.apache.calcite.sql.*;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+import org.apache.calcite.sql.SqlBasicCall;
+import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.SqlFunction;
+import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLiteral;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlNodeList;
+import org.apache.calcite.sql.SqlOrderBy;
+import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 
-/** Collapses proven distributive wrappers; filters/limits that change aggregate scope stay untouched. */
+/** Flattens distributive aggregates over a derived table when its grouping scope is preserved. */
 final class CacheQueryFlattener {
-    private static final java.util.regex.Pattern DERIVED_SOURCE = java.util.regex.Pattern.compile("(?is)\\bFROM\\s*\\(");
-    private CacheQueryFlattener() { }
+
+    private static final Pattern DERIVED_SOURCE = Pattern.compile("(?is)\\bFROM\\s*\\(");
+    private static final Set<String> DISTRIBUTIVE_FUNCTIONS = Set.of("SUM", "MIN", "MAX");
+
+    private CacheQueryFlattener() {
+    }
 
     static String flatten(String sql) {
-        if (!DERIVED_SOURCE.matcher(sql).find()) return sql;
+        if (!DERIVED_SOURCE.matcher(sql).find()) {
+            return sql;
+        }
         SqlNode parsed = CalciteSql.parseQuery(sql);
         SqlNode root = parsed instanceof SqlOrderBy order ? order.query : parsed;
         if (!(root instanceof SqlSelect outer) || outer.isDistinct() || outer.getWhere() != null
-                || outer.getHaving() != null || outer.getFrom() == null) return sql;
-        SqlNode source = outer.getFrom();
-        source = SqlTrees.stripAlias(source);
-        if (!(source instanceof SqlSelect inner) || inner.isDistinct() || inner.getHaving() != null
-                || inner.getFetch() != null || inner.getOffset() != null
-                || inner.getOrderList() != null && !inner.getOrderList().isEmpty()
-                || !(SqlTrees.stripAlias(inner.getFrom()) instanceof SqlIdentifier)) return sql;
-        Map<String, SqlNode> projected = new HashMap<>();
-        for (SqlNode item : inner.getSelectList()) {
-            if (item.getKind() == SqlKind.AS && item instanceof SqlCall as)
-                projected.put(key(SqlTrees.outputName(item)), as.operand(0));
-            else if (item instanceof SqlIdentifier id && !id.isStar())
-                projected.put(key(SqlTrees.lastName(id)), item);
-            else return sql;
+                || outer.getHaving() != null) {
+            return sql;
         }
-        SqlNodeList groups = outer.getGroup() == null ? inner.getGroup() : new SqlNodeList(outer.getParserPosition());
-        if (outer.getGroup() != null) {
-            Set<String> innerGroups = new HashSet<>();
-            if (inner.getGroup() != null) inner.getGroup().forEach(group -> innerGroups.add(CalciteSql.unparse(group)));
-            for (SqlNode group : outer.getGroup()) {
-                if (!(group instanceof SqlIdentifier id)) return sql;
-                SqlNode mapped = projected.get(key(SqlTrees.lastName(id)));
-                if (mapped == null || !innerGroups.contains(CalciteSql.unparse(mapped))) return sql;
-                groups.add(mapped.clone(mapped.getParserPosition()));
-            }
+        SqlSelect inner = findInnerSelect(outer.getFrom());
+        if (inner == null || dropsGroupingScope(outer, inner)) {
+            return sql;
         }
-        SqlNodeList output = new SqlNodeList(outer.getParserPosition());
-        for (SqlNode item : outer.getSelectList()) {
-            SqlNode expression = item;
-            SqlIdentifier alias = null;
-            if (item.getKind() == SqlKind.AS && item instanceof SqlCall as) {
-                expression = as.operand(0);
-                alias = as.operand(1);
-            }
-            SqlNode mapped = map(expression, projected);
-            if (mapped == null) return sql;
-            if (alias == null && expression instanceof SqlIdentifier id)
-                alias = new SqlIdentifier(SqlTrees.lastName(id), id.getParserPosition());
-            output.add(alias == null ? mapped : SqlStdOperatorTable.AS.createCall(item.getParserPosition(), mapped, alias));
+
+        Map<String, SqlNode> innerProjections = indexProjections(inner);
+        if (innerProjections.isEmpty()) {
+            return sql;
         }
+        SqlNodeList groups = rewriteGroups(outer, inner, innerProjections);
+        if (outer.getGroup() != null && groups == null) {
+            return sql;
+        }
+        SqlNodeList output = rewriteProjections(outer, innerProjections);
+        if (output == null) {
+            return sql;
+        }
+
         outer.setSelectList(output);
         outer.setFrom(inner.getFrom());
         outer.setWhere(inner.getWhere());
@@ -61,31 +62,143 @@ final class CacheQueryFlattener {
         return CalciteSql.unparse(parsed);
     }
 
-    private static SqlNode map(SqlNode node, Map<String, SqlNode> projected) {
-        if (node instanceof SqlIdentifier id) {
-            SqlNode value = projected.get(key(SqlTrees.lastName(id)));
-            return value == null ? null : value.clone(value.getParserPosition());
-        }
-        if (node instanceof SqlLiteral) return node;
-        if (!(node instanceof SqlBasicCall call)) return null;
-        String function = call.getOperator().getName().toUpperCase(Locale.ROOT);
-        if (Set.of("SUM", "MIN", "MAX").contains(function) && call.getFunctionQuantifier() == null
-                && call.operandCount() == 1 && call.operand(0) instanceof SqlIdentifier id) {
-            SqlNode value = projected.get(key(SqlTrees.lastName(id)));
-            if (!(value instanceof SqlBasicCall aggregate) || aggregate.getFunctionQuantifier() != null) return null;
-            String ingredient = aggregate.getOperator().getName().toUpperCase(Locale.ROOT);
-            if (function.equals(ingredient) || function.equals("SUM") && ingredient.equals("COUNT"))
-                return aggregate.clone(aggregate.getParserPosition());
+    private static SqlSelect findInnerSelect(SqlNode source) {
+        if (source instanceof SqlCall alias && alias.getKind() == SqlKind.AS && alias.operandCount() > 2) {
             return null;
         }
-        if (!SqlTrees.ARITHMETIC.contains(call.getKind())) return null;
+        if (!(SqlTrees.stripAlias(source) instanceof SqlSelect inner) || inner.isDistinct()
+                || inner.getHaving() != null || inner.getFetch() != null || inner.getOffset() != null
+                || inner.getOrderList() != null && !inner.getOrderList().isEmpty()
+                || !(SqlTrees.stripAlias(inner.getFrom()) instanceof SqlIdentifier)) {
+            return null;
+        }
+        return inner;
+    }
+
+    private static boolean dropsGroupingScope(SqlSelect outer, SqlSelect inner) {
+        // A scalar aggregate over grouped rows needs the original SQL to preserve row count
+        // and the result for no input rows, such as SUM of an empty set of group counts.
+        return (outer.getGroup() == null || outer.getGroup().isEmpty())
+                && inner.getGroup() != null && !inner.getGroup().isEmpty()
+                && outer.getSelectList().stream().anyMatch(SqlTrees::containsAggregate);
+    }
+
+    private static Map<String, SqlNode> indexProjections(SqlSelect inner) {
+        Map<String, SqlNode> projections = new HashMap<>();
+        for (SqlNode item : inner.getSelectList()) {
+            SqlNode expression = SqlTrees.unaliased(item);
+            if (expression == item && (!(item instanceof SqlIdentifier identifier) || identifier.isStar())) {
+                return Map.of();
+            }
+            if (projections.putIfAbsent(key(SqlTrees.outputName(item)), expression) != null) {
+                return Map.of();
+            }
+        }
+        return projections;
+    }
+
+    private static SqlNodeList rewriteGroups(SqlSelect outer, SqlSelect inner, Map<String, SqlNode> projections) {
+        if (outer.getGroup() == null) {
+            return inner.getGroup();
+        }
+        Set<String> innerGroups = new HashSet<>();
+        if (inner.getGroup() != null) {
+            inner.getGroup().forEach(group -> innerGroups.add(CalciteSql.unparse(group)));
+        }
+        SqlNodeList rewritten = new SqlNodeList(outer.getGroup().getParserPosition());
+        for (SqlNode group : outer.getGroup()) {
+            if (!(group instanceof SqlIdentifier identifier)) {
+                return null;
+            }
+            SqlNode expression = lookup(identifier, projections);
+            if (expression == null || !innerGroups.contains(CalciteSql.unparse(expression))) {
+                return null;
+            }
+            rewritten.add(expression.clone(expression.getParserPosition()));
+        }
+        return rewritten;
+    }
+
+    private static SqlNodeList rewriteProjections(SqlSelect outer, Map<String, SqlNode> projections) {
+        SqlNodeList output = new SqlNodeList(outer.getSelectList().getParserPosition());
+        for (SqlNode item : outer.getSelectList()) {
+            SqlNode expression = SqlTrees.unaliased(item);
+            SqlNode rewritten = rewriteExpression(expression, projections);
+            if (rewritten == null) {
+                return null;
+            }
+            SqlIdentifier alias = null;
+            if (expression != item) {
+                alias = ((SqlCall) item).operand(1);
+            } else if (expression instanceof SqlIdentifier identifier) {
+                alias = new SqlIdentifier(SqlTrees.lastName(identifier), identifier.getParserPosition());
+            } else if (expression != rewritten) {
+                // Spark's implicit result name comes from the original expression.
+                return null;
+            }
+            output.add(alias == null ? rewritten
+                    : SqlStdOperatorTable.AS.createCall(item.getParserPosition(), rewritten, alias));
+        }
+        return output;
+    }
+
+    private static SqlNode rewriteExpression(SqlNode node, Map<String, SqlNode> projections) {
+        if (node instanceof SqlIdentifier identifier) {
+            SqlNode expression = lookup(identifier, projections);
+            return expression == null ? null : expression.clone(expression.getParserPosition());
+        }
+        if (node instanceof SqlLiteral) {
+            return node;
+        }
+        if (!(node instanceof SqlBasicCall call)) {
+            return null;
+        }
+        String function = functionName(call);
+        if (DISTRIBUTIVE_FUNCTIONS.contains(function)) {
+            return rewriteAggregate(call, function, projections);
+        }
+        if (!SqlTrees.ARITHMETIC.contains(call.getKind())) {
+            return null;
+        }
         SqlNode[] operands = new SqlNode[call.operandCount()];
         for (int index = 0; index < operands.length; index++) {
-            operands[index] = map(call.operand(index), projected);
-            if (operands[index] == null) return null;
+            operands[index] = rewriteExpression(call.operand(index), projections);
+            if (operands[index] == null) {
+                return null;
+            }
         }
         return call.getOperator().createCall(call.getParserPosition(), operands);
     }
 
-    private static String key(String name) { return name.toLowerCase(Locale.ROOT); }
+    private static SqlNode rewriteAggregate(SqlBasicCall outer, String function, Map<String, SqlNode> projections) {
+        if (outer.getFunctionQuantifier() != null || outer.operandCount() != 1
+                || !(outer.operand(0) instanceof SqlIdentifier identifier)) {
+            return null;
+        }
+        if (outer.getOperator() instanceof SqlFunction operator
+                && operator.getSqlIdentifier() != null && !operator.getSqlIdentifier().isSimple()) {
+            return null;
+        }
+        SqlNode expression = lookup(identifier, projections);
+        if (!(expression instanceof SqlBasicCall inner) || inner.getFunctionQuantifier() != null) {
+            return null;
+        }
+        String ingredient = functionName(inner);
+        if (function.equals(ingredient) || function.equals("SUM") && ingredient.equals("COUNT")) {
+            return inner.clone(inner.getParserPosition());
+        }
+        return null;
+    }
+
+    private static SqlNode lookup(SqlIdentifier column, Map<String, SqlNode> projections) {
+        return projections.get(key(SqlTrees.lastName(column)));
+    }
+
+    private static String key(String name) {
+        return name.toLowerCase(Locale.ROOT);
+    }
+
+    private static String functionName(SqlBasicCall aggregate) {
+        return aggregate.getOperator().getName().toUpperCase(Locale.ROOT);
+    }
 }

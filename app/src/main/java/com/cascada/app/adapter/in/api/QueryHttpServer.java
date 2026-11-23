@@ -1,9 +1,9 @@
 package com.cascada.app.adapter.in.api;
 
-import com.cascada.app.adapter.in.api.model.ParquetResult;
+import com.cascada.app.adapter.in.model.api.ParquetResult;
 import com.cascada.app.concurrent.RequestExecutor;
 import com.cascada.app.model.config.ServerSettings;
-import com.cascada.app.adapter.in.api.model.ApiFailure;
+import com.cascada.app.adapter.in.model.api.ApiFailure;
 import com.cascada.app.exception.InvalidRequestException;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;

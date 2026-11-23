@@ -1,12 +1,11 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
+import com.cascada.cache.application.model.query.QueryResult;
+import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.application.model.query.QueryResult;
-import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.frame.ColumnType;
@@ -17,17 +16,24 @@ import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** A query bypassed only for being short is still voted, so warming builds buckets a longer query will hit. */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class SmallRangeWarmingVoteTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
     private static final long DAY = 86_400L;
 
@@ -54,7 +60,7 @@ class SmallRangeWarmingVoteTest {
 
     private QueryResult execute(CacheConfiguration configuration, CanonicalQueryObject query) {
         CacheExecutionEngine engine = new CacheExecutionEngine(
-                new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer()), spark,
+                valkey.cache(new PortableFrameSerializer()), spark,
                 (sql, gapPlan) -> "GAP_SQL", CacheExecutionConfiguration.defaults());
         return new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(), configuration,
                 new QueryHashGenerator(), engine, spark, votingWarmer).execute(query);

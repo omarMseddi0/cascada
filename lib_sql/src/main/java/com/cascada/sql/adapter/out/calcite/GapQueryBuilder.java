@@ -4,8 +4,10 @@ import com.cascada.cache.domain.merge.AverageIngredients;
 import com.cascada.cache.domain.model.time.GapPlan;
 import com.cascada.cache.domain.model.time.TimeRange;
 import com.cascada.sql.domain.model.TimeDimensionMap;
+import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -15,6 +17,7 @@ import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlJoin;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOrderBy;
@@ -23,26 +26,9 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParserPos;
 
 /**
- * Surgically rewrites a query so Spark fetches <em>only</em> the gap (the buckets not in cache),
- * ported from {@code GapQueryBuilder} in {@code sql_rewriter.py} — now on <b>Apache Calcite</b>
- * instead of JSqlParser. Faithful port of {@code _redefine_spark_query_for_gaps} and its helpers:
- *
- * <ul>
- *   <li>{@link #mergeConsecutiveGaps(GapPlan)} — verbatim {@code _merge_consecutive_gaps}: coalesce
- *       head + whole body days + tail into the fewest contiguous {@code [start, end]} ranges
- *       (adjacent where {@code prevEnd + 1 >= currentStart});</li>
- *   <li>{@link #buildGapQuery(String, GapPlan)} — build an {@code OR} of the merged ranges on the time
- *       column and inject it, choosing the structure-aware path exactly like the Python: <em>flat</em>
- *       SQL replaces the existing time-only predicate (or ANDs the gap onto non-time predicates), while
- *       <em>UNION/subquery</em> SQL pushes the gap into the innermost data-reading {@code WHERE}s.
- *       {@code ORDER BY}/{@code LIMIT} are dropped from the gap fetch (the Python transformer removes
- *       {@code exp.Order}/{@code exp.Limit});</li>
- *   <li>{@link #stripTimeConditions(String)} — verbatim {@code _strip_time_conditions_from_sql} /
- *       {@code _filter_out_time_conditions}: drop time predicates so a fresh range can be injected.</li>
- * </ul>
- *
- * <p>The emitted predicate is the plain {@code timeCol >= N AND timeCol <= M} shape (Calcite quotes
- * an identifier only when required), which downstream Spark and the cache-correctness oracle both read.
+ * Generates the Spark SQL needed for missing cache buckets. It coalesces adjacent ranges, replaces
+ * the original time bounds while preserving other filters, and fetches mergeable ingredients.
+ * Ordering and limits belong to the final merged result.
  */
 public final class GapQueryBuilder {
 
@@ -67,7 +53,7 @@ public final class GapQueryBuilder {
         this.bucketSeconds = bucketSeconds > 0 ? bucketSeconds : 86_400L;
     }
 
-    /** Ported from {@code _merge_consecutive_gaps}: head + body-day ranges + tail, sorted and coalesced. */
+    /** Sorts the head, complete buckets and tail, then joins overlapping or adjacent ranges. */
     public List<TimeRange> mergeConsecutiveGaps(GapPlan gapPlan) {
         if (!gapPlan.hasGaps()) {
             return List.of();
@@ -75,8 +61,8 @@ public final class GapQueryBuilder {
 
         List<TimeRange> allRanges = new ArrayList<>();
         gapPlan.head().ifPresent(allRanges::add);
-        for (long dayStart : gapPlan.body()) {
-            allRanges.add(new TimeRange(dayStart, dayStart + bucketSeconds - 1));
+        for (long bucketStart : gapPlan.body()) {
+            allRanges.add(new TimeRange(bucketStart, bucketStart + bucketSeconds - 1));
         }
         gapPlan.tail().ifPresent(allRanges::add);
 
@@ -87,7 +73,8 @@ public final class GapQueryBuilder {
         for (int index = 1; index < allRanges.size(); index++) {
             TimeRange current = allRanges.get(index);
             TimeRange previous = merged.get(merged.size() - 1);
-            if (previous.endTimestampSeconds() + 1 >= current.startTimestampSeconds()) {
+            if (current.startTimestampSeconds() <= previous.endTimestampSeconds()
+                    || current.startTimestampSeconds() - 1 == previous.endTimestampSeconds()) {
                 merged.set(merged.size() - 1, new TimeRange(previous.startTimestampSeconds(),
                         Math.max(previous.endTimestampSeconds(), current.endTimestampSeconds())));
             } else {
@@ -97,7 +84,7 @@ public final class GapQueryBuilder {
         return merged;
     }
 
-    /** Ported from {@code _redefine_spark_query_for_gaps}: structure-aware injection of the gap filter. */
+    /** Rewrites the query for just the missing ranges. */
     public String buildGapQuery(String originalSql, GapPlan gapPlan) {
         List<TimeRange> gapRanges = mergeConsecutiveGaps(gapPlan);
         if (gapRanges.isEmpty()) {
@@ -105,21 +92,19 @@ public final class GapQueryBuilder {
         }
 
         SqlNode parsed = CalciteSql.parseQuery(originalSql);
-        // Drop ORDER BY / LIMIT from the gap fetch (Python removes exp.Order / exp.Limit).
+        // Apply ORDER BY and LIMIT to the merged result, after fetching all gap rows.
         SqlNode root = parsed instanceof SqlOrderBy orderBy ? orderBy.query : parsed;
 
         if (SqlTrees.allSelects(root).stream().anyMatch(select -> SqlTrees.containsDerivedSource(select.getFrom()))) {
-            throw new com.cascada.sql.exception.UnsupportedSqlException(
+            throw new UnsupportedSqlException(
                     "derived-table time scopes cannot be safely rewritten for gaps");
         }
 
         SqlNode gapCondition = buildGapCondition(gapRanges, windowTimeColumn(root));
 
-        if (containsSetOperation(root)) {
-            injectGapIntoInnerWhere(root, gapCondition);
-        } else if (root instanceof SqlSelect select) {
-            applyFlatGap(select, gapCondition);
-            replaceAverages(select);
+        if (root instanceof SqlSelect select && !containsSetOperation(root)) {
+            replaceWindow(select, gapCondition);
+            replaceAggregateIngredients(select);
         } else {
             injectGapIntoInnerWhere(root, gapCondition);
         }
@@ -127,21 +112,24 @@ public final class GapQueryBuilder {
         return CalciteSql.unparse(root);
     }
 
+    /** Builds a bucket query at the fixed storage grain, independent of the requested display step. */
     public String buildStorageQuery(String originalSql, GapPlan gapPlan, int fixedStepSeconds) {
         SqlNode parsed = CalciteSql.parseQuery(originalSql);
         for (SqlSelect select : SqlTrees.allSelects(parsed)) {
-            SqlNodeList projections = new SqlNodeList(select.getParserPosition());
-            for (SqlNode item : select.getSelectList())
-                projections.add(TimeStepNormalizer.bucketOutput(item, timeDimensions, fixedStepSeconds));
-            select.setSelectList(projections);
+            select.setSelectList(atStorageStep(select.getSelectList(), fixedStepSeconds, select.getParserPosition()));
             if (select.getGroup() != null) {
-                SqlNodeList groups = new SqlNodeList(select.getParserPosition());
-                for (SqlNode group : select.getGroup())
-                    groups.add(TimeStepNormalizer.bucketOutput(group, timeDimensions, fixedStepSeconds));
-                select.setGroupBy(groups);
+                select.setGroupBy(atStorageStep(select.getGroup(), fixedStepSeconds, select.getParserPosition()));
             }
         }
         return buildGapQuery(CalciteSql.unparse(parsed), gapPlan);
+    }
+
+    private SqlNodeList atStorageStep(SqlNodeList expressions, int fixedStepSeconds, SqlParserPos position) {
+        SqlNodeList rewritten = new SqlNodeList(position);
+        for (SqlNode expression : expressions) {
+            rewritten.add(TimeStepNormalizer.bucketOutput(expression, timeDimensions, fixedStepSeconds));
+        }
+        return rewritten;
     }
 
     /** True for {@code AVG(...)}. Gap queries fetch its SUM and COUNT ingredients instead. */
@@ -154,51 +142,42 @@ public final class GapQueryBuilder {
      * {@link AverageIngredients} names. Buckets store these ingredients; the cache merges them and
      * divides at read time, because an average of per-bucket averages is not the average.
      */
-    private void replaceAverages(SqlSelect select) {
-        SqlNodeList rewritten = new SqlNodeList(SqlParserPos.ZERO);
-        java.util.Set<String> emittedIngredients = new java.util.HashSet<>();
+    private void replaceAggregateIngredients(SqlSelect select) {
+        Set<String> emittedIngredients = new HashSet<>();
         List<SqlNode> expanded = new ArrayList<>();
         for (SqlNode item : select.getSelectList()) {
             if (item.getKind() == SqlKind.AS && item instanceof SqlBasicCall alias
                     && alias.operand(0) instanceof SqlBasicCall expression
                     && SqlTrees.ARITHMETIC.contains(expression.getKind())
-                    && containsAggregate(expression)) {
+                    && SqlTrees.containsAggregate(expression)) {
                 expandIngredients(expression, expanded, emittedIngredients);
-            } else expanded.add(item);
+            } else {
+                expanded.add(item);
+            }
         }
+        SqlNodeList rewritten = new SqlNodeList(SqlParserPos.ZERO);
         for (SqlNode item : expanded) {
-            boolean aliasedAverage = item.getKind() == SqlKind.AS && item instanceof SqlBasicCall alias
-                    && alias.operand(0) instanceof SqlBasicCall call && isAverageCall(call);
-            if (!aliasedAverage) {
+            SqlNode expression = SqlTrees.unaliased(item);
+            if (expression != item && expression instanceof SqlBasicCall average && isAverageCall(average)) {
+                addAverageIngredients(average, SqlTrees.outputName(item), rewritten);
+            } else {
                 rewritten.add(item);
-                continue;
             }
-            SqlBasicCall alias = (SqlBasicCall) item;
-            SqlBasicCall average = (SqlBasicCall) alias.operand(0);
-            if (average.operandCount() != 1 || average.getFunctionQuantifier() != null) {
-                throw new com.cascada.sql.exception.UnsupportedSqlException(
-                        "AVG takes exactly one plain argument in cached queries");
-            }
-            String argument = CalciteSql.unparse(average.operand(0));
-            String name = CalciteSql.unparse(alias.operand(1)).replace("`", "");
-            rewritten.add(aliased(AggregateNormalizer.sumIngredient(argument), AverageIngredients.sumColumn(name)));
-            rewritten.add(aliased(AggregateNormalizer.countIngredient(argument), AverageIngredients.countColumn(name)));
-            rewritten.add(aliased("MIN(TYPEOF(" + argument + "))", AverageIngredients.typeColumn(name)));
         }
         select.setSelectList(rewritten);
     }
 
-    private boolean containsAggregate(SqlNode node) {
-        if (SqlTrees.isAggregateCall(node)) return true;
-        if (node instanceof org.apache.calcite.sql.SqlCall call) {
-            for (SqlNode operand : call.getOperandList()) {
-                if (containsAggregate(operand)) return true;
-            }
+    private void addAverageIngredients(SqlBasicCall average, String name, SqlNodeList projections) {
+        if (average.operandCount() != 1 || average.getFunctionQuantifier() != null) {
+            throw new UnsupportedSqlException("AVG takes exactly one plain argument in cached queries");
         }
-        return false;
+        String argument = CalciteSql.unparse(average.operand(0));
+        projections.add(aliased(AggregateNormalizer.sumIngredient(argument), AverageIngredients.sumColumn(name)));
+        projections.add(aliased(AggregateNormalizer.countIngredient(argument), AverageIngredients.countColumn(name)));
+        projections.add(aliased("MIN(TYPEOF(" + argument + "))", AverageIngredients.typeColumn(name)));
     }
 
-    private void expandIngredients(SqlNode node, List<SqlNode> expanded, java.util.Set<String> emitted) {
+    private void expandIngredients(SqlNode node, List<SqlNode> expanded, Set<String> emitted) {
         if (!(node instanceof SqlBasicCall call)) return;
         if (SqlTrees.isAggregateCall(call)) {
             String expression = CalciteSql.unparse(call);
@@ -213,7 +192,7 @@ public final class GapQueryBuilder {
                 new SqlIdentifier(name, SqlParserPos.ZERO));
     }
 
-    /** Ported from {@code strip_time_conditions}: drop time predicates so a new range can be injected. */
+    /** Removes the original window bounds so warming can inject a different range. */
     public String stripTimeConditions(String sql) {
         SqlNode parsed = CalciteSql.parseQuery(sql);
         SqlNode root = parsed instanceof SqlOrderBy orderBy ? orderBy.query : parsed;
@@ -226,23 +205,20 @@ public final class GapQueryBuilder {
         return CalciteSql.unparse(root);
     }
 
-    // --- flat path (ported from the else branch of _redefine_spark_query_for_gaps) ----------------
 
-    private void applyFlatGap(SqlSelect select, SqlNode gapCondition) {
+    private void replaceWindow(SqlSelect select, SqlNode gapCondition) {
         SqlNode remainder = filterOutTimeConditions(select.getWhere());
         select.setWhere(remainder == null ? cloneCondition(gapCondition) : and(remainder, cloneCondition(gapCondition)));
     }
 
-    // --- union / subquery path (ported from _inject_gap_into_inner_where) -------------------------
 
     private void injectGapIntoInnerWhere(SqlNode root, SqlNode gapCondition) {
         List<SqlSelect> innerSelects = findInnermostSelectsWithFrom(root);
         for (SqlSelect select : innerSelects) {
-            applyFlatGap(select, gapCondition);
+            replaceWindow(select, gapCondition);
         }
     }
 
-    /** Ported from {@code _is_union_or_subquery_structure}; derived tables are rejected before this. */
     private boolean containsSetOperation(SqlNode node) {
         if (node == null) {
             return false;
@@ -251,7 +227,6 @@ public final class GapQueryBuilder {
                 || node instanceof SqlCall call && call.getOperandList().stream().anyMatch(this::containsSetOperation);
     }
 
-    /** Ported from {@code _find_innermost_selects_with_from}: only SELECTs reading directly from a table. */
     private List<SqlSelect> findInnermostSelectsWithFrom(SqlNode root) {
         return SqlTrees.allSelects(root).stream()
                 .filter(select -> readsDirectlyFromTable(select.getFrom()))
@@ -270,9 +245,7 @@ public final class GapQueryBuilder {
                 || SqlTrees.stripAlias(join.getRight()) instanceof SqlIdentifier;
     }
 
-    // --- time predicate analysis (ported from _has_time_only_subtree / _replace_time_condition) ---
 
-    /** Ported from {@code _filter_out_time_conditions}: drop {@code timeCol >/>=/</<=} predicates. */
     private SqlNode filterOutTimeConditions(SqlNode condition) {
         // OR, NOT, functions and time-dependent business filters retain their original meaning; only
         // top-level conjuncts the canonicaliser read as the time window are dropped.
@@ -307,18 +280,17 @@ public final class GapQueryBuilder {
         return timeColumn;
     }
 
-    // --- node construction -----------------------------------------------------------------------
 
     private SqlNode buildGapCondition(List<TimeRange> ranges, String column) {
         SqlNode condition = null;
         for (TimeRange range : ranges) {
             SqlNode lower = SqlStdOperatorTable.GREATER_THAN_OR_EQUAL.createCall(SqlParserPos.ZERO,
                     new SqlIdentifier(column, SqlParserPos.ZERO),
-                    org.apache.calcite.sql.SqlLiteral.createExactNumeric(
+                    SqlLiteral.createExactNumeric(
                             Long.toString(range.startTimestampSeconds()), SqlParserPos.ZERO));
             SqlNode upper = SqlStdOperatorTable.LESS_THAN_OR_EQUAL.createCall(SqlParserPos.ZERO,
                     new SqlIdentifier(column, SqlParserPos.ZERO),
-                    org.apache.calcite.sql.SqlLiteral.createExactNumeric(
+                    SqlLiteral.createExactNumeric(
                             Long.toString(range.endTimestampSeconds()), SqlParserPos.ZERO));
             condition = combine(SqlKind.OR, condition, and(lower, upper));
         }
@@ -340,7 +312,7 @@ public final class GapQueryBuilder {
                 .createCall(SqlParserPos.ZERO, left, right);
     }
 
-    /** Re-parse the gap predicate so each injection site gets an independent subtree (Python copies). */
+    /** Gives each rewritten SELECT its own predicate node. */
     private SqlNode cloneCondition(SqlNode gapCondition) {
         return gapCondition.clone(SqlParserPos.ZERO);
     }

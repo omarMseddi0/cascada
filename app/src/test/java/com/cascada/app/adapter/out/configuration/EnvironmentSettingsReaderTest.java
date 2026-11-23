@@ -1,6 +1,5 @@
 package com.cascada.app.adapter.out.configuration;
 
-import com.cascada.app.model.config.CacheBackend;
 import com.cascada.app.model.config.EngineSettings;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import java.util.Map;
@@ -18,19 +17,18 @@ class EnvironmentSettingsReaderTest {
     }
 
     @Test
-    void storageAndSparkPlacementCanBeSelectedIndependently() {
-        EngineSettings localWithValkey = read(Map.of("CASCADA_CACHE_BACKEND", "valkey"));
-        assertThat(localWithValkey.useLocalSpark()).isTrue();
-        assertThat(localWithValkey.cacheBackend()).isEqualTo(CacheBackend.VALKEY);
-        EngineSettings clusterWithMemory = read(Map.of("CASCADA_RUN_MODE", "cluster", "CASCADA_CACHE_BACKEND", "memory"));
-        assertThat(clusterWithMemory.useLocalSpark()).isFalse();
-        assertThat(clusterWithMemory.cacheBackend()).isEqualTo(CacheBackend.MEMORY);
+    void valkeyIsUsedWithBothSparkPlacements() {
+        assertThat(read(Map.of()).useLocalSpark()).isTrue();
+        assertThat(read(Map.of("CASCADA_RUN_MODE", "cluster", "CASCADA_CACHE_BACKEND", " Valkey "))
+                .useLocalSpark()).isFalse();
     }
 
     @Test
-    void rejectsUnknownStorageChoices() {
-        assertThatThrownBy(() -> read(Map.of("CASCADA_CACHE_BACKEND", "disk")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("CASCADA_CACHE_BACKEND");
+    void rejectsRemovedOrUnknownStorageChoices() {
+        for (String backend : new String[]{"memory", "disk"}) {
+            assertThatThrownBy(() -> read(Map.of("CASCADA_CACHE_BACKEND", backend)))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("CASCADA_CACHE_BACKEND");
+        }
     }
 
     @Test

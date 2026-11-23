@@ -37,6 +37,11 @@ final class SqlTrees {
         return node != null && SET_OPERATIONS.contains(node.getKind());
     }
 
+    static boolean containsAggregate(SqlNode node) {
+        return isAggregateCall(node)
+                || node instanceof SqlCall call && call.getOperandList().stream().anyMatch(SqlTrees::containsAggregate);
+    }
+
     /** {@code SUM}, {@code COUNT}, {@code AVG}, {@code MIN} or {@code MAX}, with or without DISTINCT. */
     static boolean isAggregateCall(SqlNode node) {
         return node instanceof SqlBasicCall call

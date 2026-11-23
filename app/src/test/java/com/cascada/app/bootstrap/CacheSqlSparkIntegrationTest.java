@@ -1,24 +1,31 @@
 package com.cascada.app.bootstrap;
 
 import com.cascada.app.config.*;
-import com.cascada.app.model.config.WarmingSettings;
-import com.cascada.app.model.config.TableSettings;
-import com.cascada.app.model.config.ServerSettings;
-import com.cascada.app.model.config.EngineSettings;
 import com.cascada.app.model.config.ApplicationSettings;
+import com.cascada.app.model.config.EngineSettings;
+import com.cascada.app.model.config.ServerSettings;
+import com.cascada.app.model.config.TableSettings;
+import com.cascada.app.model.config.WarmingSettings;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.spark.adapter.out.spark.SparkDeltaQueryExecutor;
 import java.time.Duration;
 import java.util.*;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import static org.assertj.core.api.Assertions.*;
 
 /** Real Spark SQL differential check. A temporary view substitutes only for the Delta storage location. */
 @EnabledIfSystemProperty(named="cascada.cache.spark.integration", matches="true")
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class CacheSqlSparkIntegrationTest {
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
     @Test void coldMixedAndWarmAnswersMatchSparkForThePythonCoreShapes() {
         SparkSession session = LocalSparkFixtures.localSession().master("local[2]").appName("cascada-cache-parity")
                 .config("spark.sql.shuffle.partitions", "2")
@@ -28,7 +35,7 @@ class CacheSqlSparkIntegrationTest {
             session.sql("CREATE OR REPLACE TEMP VIEW traffic AS SELECT CAST(id % 2 AS STRING) AS app, "
                     + "CAST(id % 3 AS STRING) AS device, id * 60 AS ts, id AS bytes, "
                     + "CAST(id % 7 AS DECIMAL(12,2)) AS x FROM range(0,2880,1,2)");
-            var settings = new EngineSettings(CacheExecutionConfiguration.defaults(), "redis://unused:6379",
+            var settings = new EngineSettings(CacheExecutionConfiguration.defaults(), valkey.uri(),
                     "traffic", "/lake/raw", true, 20);
             var application = new ApplicationSettings(ServerSettings.defaults(),
                     new WarmingSettings(true, Duration.ofHours(1), Duration.ofDays(7), 100),
@@ -56,7 +63,7 @@ class CacheSqlSparkIntegrationTest {
             }
             session.sql("CREATE OR REPLACE TEMP VIEW mapped_traffic AS SELECT app AS D1,ts AS T1,bytes AS M1,x AS X1 FROM traffic");
             var mappedSettings = new EngineSettings(new CacheExecutionConfiguration(86400, 300, "T1"),
-                    "redis://unused:6379", "mapped", "/lake/mapped", true, 10);
+                    valkey.uri(), "mapped", "/lake/mapped", true, 10);
             var mappedApplication = new ApplicationSettings(ServerSettings.defaults(), WarmingSettings.defaults(),
                     List.of(new TableSettings("mapped", "/lake/mapped",
                             Map.of("app", "D1", "ts", "T1", "bytes", "M1", "x", "X1"), Set.of("ts"))));

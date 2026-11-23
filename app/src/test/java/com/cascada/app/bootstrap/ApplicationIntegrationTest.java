@@ -2,8 +2,8 @@ package com.cascada.app.bootstrap;
 
 import com.cascada.app.adapter.in.grpc.protocol.*;
 import com.cascada.app.config.*;
-import com.cascada.app.model.config.ApplicationSettings;
 import com.cascada.app.config.CascadaEngineFactory;
+import com.cascada.app.model.config.ApplicationSettings;
 import com.cascada.app.model.config.EngineSettings;
 import com.cascada.app.model.config.ServerSettings;
 import com.cascada.app.model.config.TableSettings;
@@ -12,6 +12,7 @@ import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.domain.frame.*;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.fabric.adapter.out.manifest.ClusterManifestRenderer;
 import com.cascada.fabric.application.port.out.ClusterOrchestratorPort;
 import com.cascada.fabric.application.service.ClusterLifecycleService;
@@ -24,15 +25,21 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.*;
 
 class ApplicationIntegrationTest {
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
     private static final ObjectMapper JSON = new ObjectMapper();
     private static HttpResponse<String> post(HttpClient client, int port, String path, String body) throws Exception {
         return client.send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + path)).timeout(Duration.ofSeconds(10))
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
     }
+    @EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
     @Test void drivesTheExistingLibraryGraphThroughBothTransports() throws Exception {
         AtomicInteger executions = new AtomicInteger();
         List<String> clusterActions = new ArrayList<>();
@@ -46,7 +53,7 @@ class ApplicationIntegrationTest {
             public void scaleWorkload(String namespace, String name, int replicas) { clusterActions.add("scale=" + replicas); }
             public void restartWorkload(String namespace, String name) { clusterActions.add("restart"); }
         };
-        var settings = new EngineSettings(CacheExecutionConfiguration.defaults(), "redis://unused:6379", "traffic", "/tmp/traffic", true, 10);
+        var settings = new EngineSettings(CacheExecutionConfiguration.defaults(), valkey.uri(), "traffic", "/tmp/traffic", true, 10);
         var application = new ApplicationSettings(new ServerSettings(0, 0, Duration.ofSeconds(2)),
                 new WarmingSettings(true, Duration.ofHours(1), Duration.ofDays(7), 32),
                 List.of(new TableSettings("traffic", "/tmp/traffic", Map.of("ts", "ts", "bytes", "C6"), Set.of("ts"))));

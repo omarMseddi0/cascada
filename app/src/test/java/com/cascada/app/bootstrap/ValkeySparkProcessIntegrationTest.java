@@ -1,6 +1,6 @@
 package com.cascada.app.bootstrap;
 
-import com.cascada.app.model.config.CacheBackend;
+import com.cascada.cache.adapter.out.tracking.ValkeyQueryPopularityAdapter;
 import com.cascada.app.adapter.in.grpc.protocol.*;
 import com.cascada.app.adapter.in.api.*;
 import com.cascada.app.config.*;
@@ -30,10 +30,14 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.scheduler.*;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -87,6 +91,7 @@ class ValkeySparkProcessIntegrationTest {
                 .withProperty("spark.databricks.delta.snapshotPartitions","2")
                 .withProperty("spark.driver.maxResultSize","128m")
                 .withProperty("spark.memory.offHeap.enabled",Boolean.toString(nativeEnabled))
+                .withGroup(LocalSparkFixtures.deploymentProperties(nativeEnabled))
                 .build();
         physical=new SparkDeltaQueryExecutor(config);
         spark=SparkSession.active();
@@ -119,6 +124,9 @@ class ValkeySparkProcessIntegrationTest {
         var catalog=new TableCatalog().register(RegisteredTable.of("traffic",deltaPath,
                 Map.of("ts","ts","region","C_region","device","C_device","amount","C_amount","latency","C_latency"),"ts"));
         translator=new LogicalToPhysicalSqlTranslator(300,catalog);
+        oracle.read().format("delta").load(deltaPath)
+                .selectExpr("ts", "C_region AS region", "C_device AS device", "C_amount AS amount", "C_latency AS latency")
+                .createOrReplaceTempView("traffic");
         assertThat(direct.execute("SELECT COUNT(*) AS n FROM delta.`"+deltaPath+"`").longAt(0,0)).isEqualTo(rows);
         System.out.println("VALKEY_RUNTIME spark="+spark.version()+" rows="+rows+" native="+nativeEnabled+" server="
                 +inspection.sync().info("server").replace('\r',' ').replace('\n',' '));
@@ -133,7 +141,7 @@ class ValkeySparkProcessIntegrationTest {
         var application=new ApplicationSettings(server,new WarmingSettings(true,Duration.ofHours(1),Duration.ofDays(7),128),
                 List.of(new TableSettings("traffic",deltaPath,Map.of("ts","ts","region","C_region","device","C_device",
                         "amount","C_amount","latency","C_latency"),Set.of("ts"))));
-        var settings=new EngineSettings(CacheExecutionConfiguration.defaults(),redisUri,"traffic",deltaPath,true,10,CacheBackend.VALKEY);
+        var settings=new EngineSettings(CacheExecutionConfiguration.defaults(),redisUri,"traffic",deltaPath,true,10);
         factory=new CascadaEngineFactory(settings,sql -> {physicalCalls.incrementAndGet();return physical.execute(sql);},application);
         if(clearBuckets) factory.flushCacheUseCase().flushEverything();
         inspection.sync().set(foreignKey,"preserve-me");
@@ -156,11 +164,11 @@ class ValkeySparkProcessIntegrationTest {
             assertThat(inspection.sync().get(foreignKey)).isEqualTo("preserve-me");
             inspection.sync().del(foreignKey);
             factory.close();factory=null;
-            clearPopularityFixture();
+            clearValkeyQueryPopularityAdapter();
         }
     }
 
-    private void clearPopularityFixture() {
+    private void clearValkeyQueryPopularityAdapter() {
         var commands = inspection.sync();
         var metadataKeys = commands.keys(CacheKeyConstants.QUERY_TRACKER_META_KEY_PREFIX + ":*");
         if (!metadataKeys.isEmpty()) {
@@ -384,7 +392,7 @@ class ValkeySparkProcessIntegrationTest {
             System.out.println("VALKEY_BASIC_PLAN\n"+basic.queryExecution().executedPlan());
         }
         System.out.println("VALKEY_EXECUTED_PLAN native="+nativeEnabled+"\n"+plan);
-        List<String> executedClasses=executedClasses(accelerated.queryExecution().executedPlan());
+        List<String> executedClasses=LocalSparkFixtures.executedPlanClasses(accelerated.queryExecution().executedPlan());
         long nativeStages=executedClasses.stream().filter(name -> name.contains("WholeStageTransformer")).count();
         if(nativeEnabled){
             assertThat(nativeStages).as("actual native stage classes in the executed AQE plan").isPositive();
@@ -419,7 +427,7 @@ class ValkeySparkProcessIntegrationTest {
         for(var entry:cases.entrySet()) {
             var reference=oracle.sql(entry.getValue());
             var expected=reference.collectAsList();
-            assertThat(executedClasses(reference.queryExecution().executedPlan())).noneMatch(name -> name.contains("Transformer"));
+            assertThat(LocalSparkFixtures.executedPlanClasses(reference.queryExecution().executedPlan())).noneMatch(name -> name.contains("Transformer"));
             var candidate=spark.sql(entry.getValue());
             var actual=candidate.collectAsList();
             assertThat(candidate.schema()).as(entry.getKey()+" schema").isEqualTo(reference.schema());
@@ -430,7 +438,7 @@ class ValkeySparkProcessIntegrationTest {
                     assertThat(result).as(entry.getKey()+" numeric cell").isCloseTo(number,within(Math.max(1e-9,Math.abs(number)*1e-9)));
                 else assertThat(got).as(entry.getKey()+" cell").isEqualTo(wanted);
             }
-            var classes=executedClasses(candidate.queryExecution().executedPlan());
+            var classes=LocalSparkFixtures.executedPlanClasses(candidate.queryExecution().executedPlan());
             long stages=classes.stream().filter(name -> name.contains("WholeStageTransformer")).count();
             measurements.add(Map.of("case","sql-matrix-"+entry.getKey(),"rows",actual.size(),"nativeStages",stages,"operators",classes));
             System.out.println("VALKEY_SQL_MATRIX_PASS "+entry.getKey()+" nativeStages="+stages);
@@ -438,21 +446,91 @@ class ValkeySparkProcessIntegrationTest {
         assertThat(spark.conf().get("spark.sql.ansi.enabled")).isEqualTo("false");
     }
 
-    private List<String> executedClasses(org.apache.spark.sql.execution.SparkPlan root) {
-        var seen=Collections.newSetFromMap(new IdentityHashMap<org.apache.spark.sql.execution.SparkPlan,Boolean>());
-        ArrayDeque<org.apache.spark.sql.execution.SparkPlan> pending=new ArrayDeque<>();
-        pending.add(root);
-        List<String> classes=new ArrayList<>();
-        while(!pending.isEmpty()){
-            var node=pending.removeFirst();if(!seen.add(node))continue;
-            classes.add(node.getClass().getName());
-            if(node instanceof org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec adaptive) pending.add(adaptive.executedPlan());
-            if(node instanceof org.apache.spark.sql.execution.adaptive.QueryStageExec stage) pending.add(stage.plan());
-            pending.addAll(scala.jdk.javaapi.CollectionConverters.asJava(node.children()));
-            pending.addAll(scala.jdk.javaapi.CollectionConverters.asJava(node.subqueries()));
-            if(node instanceof org.apache.spark.sql.execution.exchange.ReusedExchangeExec reused) pending.add(reused.child());
+    private static Stream<Arguments> warmingQueries() {
+        String range = " FROM traffic WHERE ts >= " + BASE + " AND ts <= " + (BASE + 2 * DAY - 1);
+        String hour = "CAST(FLOOR(ts / 3600) * 3600 AS BIGINT)";
+        return Stream.of(
+                Arguments.of("scalar count", "SELECT COUNT(*) AS n" + range, true),
+                Arguments.of("empty scalar aggregates",
+                        "SELECT COUNT(*) AS n, SUM(amount) AS total, AVG(amount) AS mean"
+                                + range + " AND amount > 1000000", true),
+                Arguments.of("grouped nullable aggregates",
+                        "SELECT region AS region, SUM(amount) AS total, COUNT(amount) AS present, AVG(amount) AS mean"
+                                + range + " GROUP BY region ORDER BY region NULLS FIRST", true),
+                Arguments.of("filtered composite formula",
+                        "SELECT device AS device, (SUM(amount) + COUNT(*)) * 2 AS total"
+                                + range + " AND (region = 'r1' OR region IS NULL)"
+                                + " GROUP BY device ORDER BY total DESC, device LIMIT 2", true),
+                Arguments.of("time-series resampling",
+                        "SELECT " + hour + " AS ts, device AS device, SUM(amount) AS total, COUNT(*) AS n" + range
+                                + " GROUP BY " + hour + ", device ORDER BY ts, device", true),
+                Arguments.of("distributive derived query",
+                        "SELECT device AS device, SUM(total) AS total FROM (SELECT traffic.device AS device, SUM(amount) AS total"
+                                + range + " GROUP BY traffic.device) AS q GROUP BY device ORDER BY device", true),
+                Arguments.of("scalar rollup over grouped counts",
+                        "SELECT SUM(n) AS n FROM (SELECT traffic.device AS device, COUNT(*) AS n"
+                                + range + " GROUP BY traffic.device) AS grouped", false),
+                Arguments.of("scalar rollup over empty groups",
+                        "SELECT SUM(n) AS n FROM (SELECT traffic.device AS device, COUNT(*) AS n"
+                                + range + " AND amount > 1000000 GROUP BY traffic.device) AS grouped", false),
+                Arguments.of("distinct aggregate",
+                        "SELECT device AS device, COUNT(DISTINCT amount) AS n" + range + " GROUP BY device ORDER BY device", false),
+                Arguments.of("having and offset",
+                        "SELECT device AS device, SUM(amount) AS total" + range
+                                + " GROUP BY device HAVING COUNT(*) > 1 ORDER BY total DESC, device LIMIT 2 OFFSET 1", false),
+                Arguments.of("correlated subquery",
+                        "SELECT t.device AS device, SUM(t.amount) AS total FROM traffic t"
+                                + " WHERE t.ts >= " + BASE + " AND t.ts <= " + (BASE + 2 * DAY - 1)
+                                + " AND EXISTS (SELECT 1 FROM traffic d WHERE d.device = t.device AND d.region = 'r1')"
+                                + " GROUP BY t.device ORDER BY t.device", false),
+                Arguments.of("nested CTE and window",
+                        "WITH totals AS (SELECT region AS region, device AS device, SUM(amount) AS total" + range
+                                + " GROUP BY region, device), ranked AS (SELECT region, device, total,"
+                                + " ROW_NUMBER() OVER (PARTITION BY region ORDER BY total DESC, device) AS pos FROM totals)"
+                                + " SELECT region, device, total FROM ranked WHERE pos <= 2 ORDER BY region NULLS FIRST, pos",
+                        false));
+    }
+
+    @Order(10)
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("warmingQueries")
+    void warmingAndReadsMatchAnIndependentSparkQuery(String name, String sql, boolean warms) throws Exception {
+        long secondDay = BASE + DAY;
+        long end = secondDay + DAY - 1;
+        ResultFrame expected = direct.execute(sql);
+        var query = factory.executeLogicalQueryUseCase();
+
+        int beforeCold = physicalCalls.get();
+        var cold = query.query(sql);
+        same(cold.frame(), expected);
+        assertThat(cold.servedThroughCache()).as(name + " cache eligibility").isEqualTo(warms);
+        assertThat(physicalCalls.get()).isEqualTo(beforeCold + 1);
+        assertThat(factory.measureCacheSizeUseCase().measureCacheSize().bucketCount()).isZero();
+
+        JsonNode firstWarm = post("/cache/warm", Map.of("start", BASE, "end", secondDay - 1));
+        assertThat(firstWarm.path("bucketsWarmed").asInt()).isEqualTo(warms ? 1 : 0);
+
+        int beforeMixed = physicalCalls.get();
+        same(query.query(sql).frame(), expected);
+        assertThat(physicalCalls.get()).as(name + " queries for the missing range or bypass")
+                .isEqualTo(beforeMixed + 1);
+
+        JsonNode secondWarm = post("/cache/warm", Map.of("start", secondDay, "end", end));
+        assertThat(secondWarm.path("bucketsWarmed").asInt()).isEqualTo(warms ? 1 : 0);
+
+        int beforeHot = physicalCalls.get();
+        same(query.query(sql).frame(), expected);
+        assertThat(physicalCalls.get()).as(name + " Spark calls after warming")
+                .isEqualTo(beforeHot + (warms ? 0 : 1));
+
+        var bucketKeys = inspection.sync().keys(CacheKeyConstants.CACHE_KEY_PREFIX + ":B*");
+        measurements.add(Map.of("case", "warming-" + name, "eligible", warms, "buckets", bucketKeys.size(),
+                "sparkCallsAfterWarming", physicalCalls.get() - beforeHot));
+        assertThat(bucketKeys).hasSize(warms ? 2 : 0);
+        for (String key : bucketKeys) {
+            assertThat(inspection.sync().strlen(key)).isPositive();
+            assertThat(inspection.sync().pttl(key)).isPositive();
         }
-        return classes;
     }
 
     private interface ConcurrentAction {void run(int index) throws Exception;}

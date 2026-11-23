@@ -1,31 +1,45 @@
 package com.cascada.cache.application.service;
 
-import java.time.Duration;
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.domain.admin.CacheScope;
-import com.cascada.cache.domain.model.admin.CacheSizeReport;
-import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
 import com.cascada.cache.domain.key.CacheKeyConstants;
+import com.cascada.cache.domain.model.admin.CacheSizeReport;
+import com.cascada.cache.domain.model.cube.QueryShape;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Verifies global cache measurement, full flush, and surgical prefix flush behavior. */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 final class CacheAdministrationTest {
 
-    private final CacheBackendPort backend = new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
-    private final CacheAdministrationService admin = new CacheAdministrationService(backend);
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
+    @BeforeEach
+    void connectValkey() {
+        backend = valkey.cache(new PortableFrameSerializer());
+        admin = new CacheAdministrationService(backend);
+    }
+
+    private CacheBackendPort backend;
+    private CacheAdministrationService admin;
 
     private ResultFrame frame(int rows) {
         ResultFrameBuilder builder = ResultFrame.builder()
@@ -64,17 +78,20 @@ final class CacheAdministrationTest {
 
     @Test
     void globalMeasurementAndFlushIgnoreKeysOutsideTheBucketNamespace() {
-        InMemoryBlobCacheBackendAdapter sharedBackend =
-                new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+        ValkeyCacheBackendAdapter sharedBackend =
+                valkey.cache(new PortableFrameSerializer());
         CacheAdministrationService sharedAdmin = new CacheAdministrationService(sharedBackend);
         sharedBackend.store(bucketKey("hash", 0), frame(10), Duration.ofDays(1));
-        sharedBackend.store("application:settings:theme", frame(1), Duration.ofDays(1));
-
-        assertThat(sharedAdmin.measureCacheSize().bucketCount()).isEqualTo(1);
-        assertThat(sharedAdmin.flushEverything()).isEqualTo(1);
-
-        assertThat(sharedBackend.storedBucketCount()).isEqualTo(1);
-        assertThat(sharedAdmin.measureCacheSize()).isEqualTo(CacheSizeReport.empty());
+        String foreignKey = "application:settings:theme";
+        sharedBackend.store(foreignKey, frame(1), Duration.ofDays(1));
+        try {
+            assertThat(sharedAdmin.measureCacheSize().bucketCount()).isEqualTo(1);
+            assertThat(sharedAdmin.flushEverything()).isEqualTo(1);
+            assertThat(sharedBackend.existsForKeys(List.of(foreignKey))).containsExactly(true);
+            assertThat(sharedAdmin.measureCacheSize()).isEqualTo(CacheSizeReport.empty());
+        } finally {
+            sharedBackend.evict(foreignKey);
+        }
     }
 
     @Test

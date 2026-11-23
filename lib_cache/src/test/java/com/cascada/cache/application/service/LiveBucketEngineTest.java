@@ -1,6 +1,6 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
@@ -8,13 +8,14 @@ import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.time.GapPlan;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
 import java.time.Clock;
 import java.time.Duration;
@@ -25,19 +26,30 @@ import java.util.Map;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** The bucket holding "now" is live data: it is always computed and never served from any cache tier. */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class LiveBucketEngineTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
+
+    @BeforeEach
+    void connectValkey() {
+        backend = valkey.cache(new PortableFrameSerializer());
+    }
 
     private static final long DAY = 86_400L;
     private static final Clock MIDDAY_OF_THIRD_DAY =
             Clock.fixed(Instant.ofEpochSecond(2 * DAY + 12 * 3_600), ZoneOffset.UTC);
 
-    private final InMemoryBlobCacheBackendAdapter backend =
-            new InMemoryBlobCacheBackendAdapter(new PortableFrameSerializer());
+    private ValkeyCacheBackendAdapter backend;
 
     private CanonicalQueryObject trafficByApp(TimeRange window) {
         return new CanonicalQueryObject(HashComponents.of(List.of("appName"), List.of("SUM(bytes)"), List.of()),

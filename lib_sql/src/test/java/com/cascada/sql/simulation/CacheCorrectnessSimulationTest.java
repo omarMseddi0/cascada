@@ -1,6 +1,6 @@
 package com.cascada.sql.simulation;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
@@ -9,12 +9,13 @@ import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
-import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
+import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
 import com.cascada.sql.adapter.out.calcite.GapQueryRewriterAdapter;
 import com.cascada.sql.simulation.DirectComputeOracle.MeasureSpec;
@@ -24,6 +25,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -35,7 +38,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>This proves the governing invariant: <em>the cache path does the same math as the direct path</em>.
  */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class CacheCorrectnessSimulationTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
     private static final long DAY = 86_400L;
     private static final long START = 0;
@@ -129,7 +136,7 @@ class CacheCorrectnessSimulationTest {
     private ResultFrame runEngineWithDaysCached(CanonicalQueryObject canonical, DirectComputeOracle oracle,
                                                 List<Long> daysToCache) {
         QueryHash hash = hashGenerator.generateQueryHash(canonical, DirectComputeOracle.FIXED_STEP_SECONDS);
-        InMemoryBlobCacheBackendAdapter backend = new InMemoryBlobCacheBackendAdapter(serializer);
+        ValkeyCacheBackendAdapter backend = valkey.cache(serializer);
         for (long day : daysToCache) {
             backend.store(CacheKeyFactory.buildBucketKey(hash, day, DAY), oracle.computeDayBucket(day, DAY),
                     java.time.Duration.ofDays(1));

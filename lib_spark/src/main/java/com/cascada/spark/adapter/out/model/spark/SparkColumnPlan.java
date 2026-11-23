@@ -1,4 +1,4 @@
-package com.cascada.spark.adapter.out.spark.model;
+package com.cascada.spark.adapter.out.model.spark;
 
 import com.cascada.cache.domain.frame.ColumnType;
 

@@ -1,6 +1,5 @@
 package com.cascada.app.adapter.out.configuration;
 
-import com.cascada.app.model.config.CacheBackend;
 import com.cascada.app.model.config.EngineSettings;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import java.util.Objects;
@@ -31,6 +30,10 @@ public final class EnvironmentSettingsReader {
                 setting("CASCADA_TIME_COLUMN", SettingValues.jsonText(cache, "timeColumnName", defaults.cacheExecution().timeColumnName())),
                 positiveIntSetting("CASCADA_MERGE_WORKERS", SettingValues.jsonInt(cache, "mergeWorkers", defaults.cacheExecution().mergeWorkerCount())));
 
+        String backend = setting("CASCADA_CACHE_BACKEND", SettingValues.jsonText(cache, "backend", "valkey"));
+        if (!backend.trim().equalsIgnoreCase("valkey")) {
+            throw new IllegalArgumentException("CASCADA_CACHE_BACKEND must be valkey: " + backend);
+        }
         boolean localSpark = localSparkMode(setting("CASCADA_RUN_MODE", SettingValues.jsonText(engine, "runMode", "local")));
 
         return new EngineSettings(
@@ -39,8 +42,7 @@ public final class EnvironmentSettingsReader {
                 setting("CASCADA_MAIN_TABLE_NAME", SettingValues.jsonText(engine, "mainTableName", defaults.mainTableName())),
                 setting("CASCADA_MAIN_TABLE_PATH", SettingValues.jsonText(engine, "mainTablePath", defaults.mainTablePath())),
                 localSpark,
-                intSetting("CASCADA_WARMING_TOP_N", SettingValues.jsonInt(warming, "topNQueries", defaults.warmingTopNQueries())),
-                CacheBackend.parse(setting("CASCADA_CACHE_BACKEND", SettingValues.jsonText(cache, "backend", localSpark ? "memory" : "valkey"))));
+                intSetting("CASCADA_WARMING_TOP_N", SettingValues.jsonInt(warming, "topNQueries", defaults.warmingTopNQueries())));
     }
 
     private String setting(String name, String fallback) {

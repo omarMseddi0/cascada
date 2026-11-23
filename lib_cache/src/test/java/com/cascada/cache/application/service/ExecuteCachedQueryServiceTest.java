@@ -1,12 +1,11 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.adapter.out.cache.InMemoryBlobCacheBackendAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
+import com.cascada.cache.application.model.query.QueryResult;
+import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.application.model.query.QueryResult;
-import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRule;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
@@ -16,15 +15,18 @@ import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PostProcessing;
 import com.cascada.cache.domain.model.query.QueryMetadata;
-import com.cascada.cache.domain.safety.BypassReason;
 import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.cache.domain.model.time.TimeRange;
+import com.cascada.cache.domain.safety.BypassReason;
+import com.cascada.cache.fixture.ValkeyTestDatabase;
 import com.cascada.identity.domain.model.QueryHash;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -32,7 +34,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * The application entry point's two branches: a safety bypass runs the physical SQL directly and says
  * so ({@code servedThroughCache=false}); a safe query goes through the cache engine.
  */
+@EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 class ExecuteCachedQueryServiceTest {
+
+    @RegisterExtension
+    final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
     private static final long DAY = 86_400L;
 
@@ -54,7 +60,7 @@ class ExecuteCachedQueryServiceTest {
 
     private ExecuteCachedQueryService useCase(SafetyRuleRegistry registry, QueryExecutorPort spark) {
         CacheExecutionEngine engine = new CacheExecutionEngine(
-                new InMemoryBlobCacheBackendAdapter(serializer), spark,
+                valkey.cache(serializer), spark,
                 (physicalSql, gapPlan) -> "GAP_SQL", CacheExecutionConfiguration.defaults());
         return new ExecuteCachedQueryService(registry, CacheConfiguration.defaults(),
                 new QueryHashGenerator(), engine, spark);
@@ -109,7 +115,7 @@ class ExecuteCachedQueryServiceTest {
         SafetyRuleRegistry neverBypass = new SafetyRuleRegistry(List.of());
         QueryExecutorPort spark = sql -> frame();
         CacheExecutionEngine engine = new CacheExecutionEngine(
-                new InMemoryBlobCacheBackendAdapter(serializer), spark,
+                valkey.cache(serializer), spark,
                 (physicalSql, gapPlan) -> "GAP_SQL", CacheExecutionConfiguration.defaults());
         WarmCacheUseCase unavailableWarmer = new WarmCacheUseCase() {
             @Override public void recordQuery(com.cascada.identity.domain.model.QueryHash hash,

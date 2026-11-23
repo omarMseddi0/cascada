@@ -1,6 +1,6 @@
 package com.cascada.cache.adapter.out.cache;
 
-import com.cascada.cache.adapter.out.cache.model.PendingMget;
+import com.cascada.cache.adapter.out.model.cache.PendingMget;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.model.cancellation.CancellationRegistration;
@@ -45,7 +45,7 @@ import java.util.logging.Logger;
  * {@code EXISTS} for sub-millisecond gap analysis, then a bulk {@code MGET} of the present buckets.
  *
  * <p>Binary blobs are stored under a {@link ByteArrayCodec}. Frames are serialized through the injected
- * {@link CacheValueSerializerPort}, as they are in {@link InMemoryBlobCacheBackendAdapter}.
+ * {@link CacheValueSerializerPort}.
  */
 public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCloseable {
 

@@ -1,6 +1,6 @@
 package com.cascada.cache.adapter.out.index;
 
-import com.cascada.cache.adapter.out.index.model.CoverageEntry;
+import com.cascada.cache.adapter.out.model.index.CoverageEntry;
 import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.identity.domain.model.QueryHash;

@@ -1,4 +1,4 @@
-package com.cascada.app.adapter.in.api.model;
+package com.cascada.app.adapter.in.model.api;
 
 import com.cascada.app.exception.InvalidRequestException;
 import com.cascada.cache.exception.UncacheableQueryException;

@@ -6,6 +6,7 @@ import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.service.CacheExecutionEngine;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
+import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.frame.*;
 import com.cascada.cache.domain.model.hashing.HashComponents;
 import com.cascada.cache.domain.key.CacheKeyFactory;
@@ -71,7 +72,7 @@ class ValkeyFreshnessIntegrationTest {
              var invalidator = new ValkeyCacheBackendAdapter(URL, new PortableFrameSerializer())) {
             String key = "QC:V4:B86400:" + UUID.randomUUID().toString().replace("-", "") + ":0";
             String oldGeneration = oldWriter.warmingGeneration().orElseThrow();
-            invalidator.flush(com.cascada.cache.domain.admin.CacheScope.everything());
+            invalidator.flush(CacheScope.forBuckets(86400, Set.of(0L)));
             assertThat(oldWriter.storeForGeneration(key, value(100), Duration.ofMinutes(1), oldGeneration)).isFalse();
             assertThat(invalidator.existsForKeys(List.of(key))).containsExactly(false);
             String current = oldWriter.warmingGeneration().orElseThrow();

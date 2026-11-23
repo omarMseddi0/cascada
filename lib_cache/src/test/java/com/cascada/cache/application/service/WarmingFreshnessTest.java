@@ -1,6 +1,7 @@
 package com.cascada.cache.application.service;
 
 import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
+import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.PortableFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.ValkeyQueryPopularityAdapter;
 import com.cascada.cache.application.model.warming.WarmingReport;
@@ -26,7 +27,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
@@ -147,6 +151,113 @@ class WarmingFreshnessTest {
         assertThat(report.bucketsWarmed()).isEqualTo(4);
         assertThat(report.bucketsSkipped()).isZero();
         assertThat(cubeCatalog.windowCount()).isZero();
+    }
+
+    @Test
+    void aBackfillInvalidatesOnlyTheChangedBucketAcrossQueryHashes() {
+        var totals = new AtomicReference<>(Map.of(0L, 1L, DAY, 2L));
+        var warmed = new ArrayList<Long>();
+        var warmer = groupedWarmer(totals, warmed, () -> {});
+        runGroupedCycle(warmer);
+        assertThat(warmed).containsExactly(0L, DAY);
+        var other = QueryHash.of("0000000000000000000000000000000b");
+        var changed = CacheKeyFactory.buildBucketKey(other, 0, DAY);
+        var unchanged = CacheKeyFactory.buildBucketKey(other, DAY, DAY);
+        var otherWidth = CacheKeyFactory.buildBucketKey(other, 0, 2 * DAY);
+        for (String key : List.of(changed, unchanged, otherWidth)) {
+            backend.store(key, trafficRows(1), Duration.ofDays(1));
+        }
+        totals.set(Map.of(DAY, 2L)); // Last source row in the first bucket was deleted.
+        warmed.clear();
+
+        var report = runGroupedCycle(warmer);
+
+        assertThat(warmed).containsExactly(0L);
+        assertThat(report.bucketsWarmed()).isEqualTo(1);
+        assertThat(report.bucketsSkipped()).isEqualTo(1);
+        assertThat(backend.existsForKeys(List.of(changed, unchanged, otherWidth))).containsExactly(false, true, true);
+        warmed.clear();
+        runGroupedCycle(warmer);
+        assertThat(warmed).isEmpty();
+    }
+
+    @Test
+    void aSecondBackfillDuringWarmingEvictsTheAffectedWriteAndRetriesTheBucket() {
+        var totals = new AtomicReference<>(Map.of(0L, 1L, DAY, 2L));
+        var warmed = new ArrayList<Long>();
+        var appendDuringWarm = new AtomicBoolean();
+        var warmer = groupedWarmer(totals, warmed, () -> {
+            if (appendDuringWarm.getAndSet(false)) totals.set(Map.of(0L, 9L, DAY, 2L));
+        });
+        runGroupedCycle(warmer);
+        var baseline = backend.loadValidationBaseline();
+        totals.set(Map.of(0L, 5L, DAY, 2L));
+        appendDuringWarm.set(true);
+        warmed.clear();
+
+        var unstable = runGroupedCycle(warmer);
+
+        assertThat(warmed).containsExactly(0L);
+        assertThat(unstable.bucketsWarmed()).isZero();
+        assertThat(isCached(0)).isFalse();
+        assertThat(isCached(DAY)).isTrue();
+        var preWarmBaseline = backend.loadValidationBaseline();
+        assertThat(preWarmBaseline).isNotEqualTo(baseline);
+        warmed.clear();
+        warmer.warmLookbackWindow(now.get().getEpochSecond(), Duration.ofDays(2));
+        assertThat(warmed).containsExactly(0L);
+        assertThat(isCached(0)).isTrue();
+        assertThat(backend.loadValidationBaseline()).isNotEqualTo(preWarmBaseline);
+    }
+
+    @Test
+    void anUnavailablePostWarmCheckDiscardsOnlyUnverifiedWrites() {
+        var totals = new AtomicReference<>(Map.of(0L, 1L, DAY, 2L));
+        var warmed = new ArrayList<Long>();
+        var failValidation = new AtomicBoolean();
+        var warmer = groupedWarmer(totals, warmed, () -> {
+            if (failValidation.getAndSet(false)) totals.set(null);
+        });
+        runGroupedCycle(warmer);
+        var baseline = backend.loadValidationBaseline();
+        totals.set(Map.of(0L, 5L, DAY, 2L));
+        failValidation.set(true);
+        warmed.clear();
+
+        var report = runGroupedCycle(warmer);
+
+        assertThat(report.bucketsWarmed()).isZero();
+        assertThat(warmed).containsExactly(0L);
+        assertThat(isCached(0)).isFalse();
+        assertThat(isCached(DAY)).isTrue();
+        assertThat(backend.loadValidationBaseline()).isEqualTo(baseline);
+        totals.set(Map.of(0L, 7L, DAY, 2L));
+        warmed.clear();
+        warmer.warmLookbackWindow(now.get().getEpochSecond(), Duration.ofDays(2));
+        assertThat(warmed).containsExactly(0L);
+    }
+
+    private WarmingOrchestrator groupedWarmer(AtomicReference<Map<Long, Long>> totals, List<Long> warmed,
+                                             Runnable duringWarm) {
+        var detector = new DataChangeDetector(backend, sql -> sql, sql -> {
+            var builder = ResultFrame.builder().column("bucket_start", ColumnType.LONG).column("total", ColumnType.LONG);
+            Map<Long, Long> snapshot = totals.get();
+            if (snapshot == null) throw new IllegalStateException("validation source unavailable");
+            snapshot.forEach(builder::row);
+            return builder.build();
+        }, "SELECT {bucketSeconds} FROM traffic WHERE ts >= {start} AND ts <= {end}", Duration.ofDays(7));
+        return new WarmingOrchestrator(backend, sql -> {
+            warmed.add(Long.parseLong(sql));
+            duringWarm.run();
+            return trafficRows(1);
+        }, (sql, gapPlan) -> Long.toString(gapPlan.tail().orElseThrow().startTimestampSeconds()),
+                new WarmingQueue(), popularity, new InMemoryCoverageIndexAdapter(),
+                null, detector, null, new WarmingConfiguration(DAY, 0, 100, Duration.ofDays(1), 100), movableClock);
+    }
+
+    private WarmingReport runGroupedCycle(WarmingOrchestrator warmer) {
+        warmer.recordQuery(TRAFFIC, traffic());
+        return warmer.warmLookbackWindow(now.get().getEpochSecond(), Duration.ofDays(2));
     }
 
     @Test

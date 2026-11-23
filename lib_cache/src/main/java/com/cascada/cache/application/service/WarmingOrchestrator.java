@@ -13,6 +13,7 @@ import com.cascada.cache.application.port.out.QueryPopularityPort;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.application.model.warming.PatternWarmingResult;
 import com.cascada.cache.application.model.warming.WarmingReport;
+import com.cascada.cache.application.model.warming.ValidationCheck;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
@@ -23,7 +24,6 @@ import com.cascada.cache.application.service.warming.WarmingQueue;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.domain.index.BucketCoverageBitmap;
 import com.cascada.cache.domain.key.CacheKeyFactory;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.cache.domain.model.query.PopularQuery;
@@ -194,11 +194,76 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         long validationStart = wholeDays ? todayStart - lookbackSeconds + SECONDS_PER_DAY
                 : BucketMath.floor(warmStart, bucketSeconds) + bucketSeconds;
         long validationEnd = wholeDays ? todayStart - SECONDS_PER_DAY - 1 : currentBucketStart - bucketSeconds - 1;
-        com.cascada.cache.application.model.warming.ValidationCheck check = dataChangeDetector != null && validationEnd >= validationStart
+        if (dataChangeDetector != null && dataChangeDetector.validatesBuckets()) {
+            long start = BucketMath.floor(warmStart, bucketSeconds);
+            long end = currentBucketStart - 1;
+            if (end < start) return new WarmingReport(0, 0, 0);
+            ensureWarmWindowWithinLimit(start, end);
+            return warmValidatedBuckets(new TimeRange(start, end), bucketSeconds);
+        }
+        ValidationCheck check = dataChangeDetector != null && validationEnd >= validationStart
                 ? dataChangeDetector.check(new TimeRange(validationStart, validationEnd)) : null;
         WarmingReport report = warmCycle(warmStart, currentBucketStart - 1, check != null && check.changed());
         if (check != null && lastCycleSucceeded) dataChangeDetector.acknowledge(check);
         return report;
+    }
+
+    private WarmingReport warmValidatedBuckets(TimeRange window, long bucketSeconds) {
+        if (cacheAdministration == null) {
+            throw new IllegalStateException("Bucket validation requires scoped cache invalidation");
+        }
+        ValidationCheck check = dataChangeDetector.checkBuckets(window, bucketSeconds);
+        if (check.nextBaseline().isEmpty()) return new WarmingReport(0, 0, 0);
+
+        invalidateBuckets(check.changedBuckets(), bucketSeconds);
+        Map<QueryHash, Set<Long>> writes = new LinkedHashMap<>();
+        try {
+            WarmingReport report = warmCycle(window.startTimestampSeconds(), window.endTimestampSeconds(),
+                    check.requiresFullRefresh(), writes);
+            Optional<Set<Long>> recheck = dataChangeDetector.changesDuringWarming(
+                    check.nextBaseline().orElseThrow(), bucketSeconds);
+            if (recheck.isEmpty()) {
+                // We cannot verify what was written during this cycle. Keep the previous baseline.
+                return discardUnverifiedWrites(report, writes, writtenBuckets(writes), bucketSeconds);
+            }
+            WarmingReport verified = discardUnverifiedWrites(report, writes, recheck.orElseThrow(), bucketSeconds);
+            // Save the pre-warm signatures only. A later signature for an evicted bucket must
+            // remain a difference until that bucket has been rebuilt.
+            if (lastCycleSucceeded) dataChangeDetector.acknowledge(check);
+            return verified;
+        } catch (RuntimeException failure) {
+            try {
+                invalidateBuckets(writtenBuckets(writes), bucketSeconds);
+            } catch (RuntimeException invalidationFailure) {
+                failure.addSuppressed(invalidationFailure);
+            }
+            writes.keySet().forEach(warmingQueue::vote);
+            throw failure;
+        }
+    }
+
+    private WarmingReport discardUnverifiedWrites(WarmingReport report, Map<QueryHash, Set<Long>> writes,
+                                                   Set<Long> buckets, long bucketSeconds) {
+        if (buckets.isEmpty()) return report;
+        invalidateBuckets(buckets, bucketSeconds);
+        writes.keySet().forEach(warmingQueue::vote);
+        int discarded = Math.toIntExact(writes.values().stream().flatMap(Set::stream)
+                .filter(buckets::contains).count());
+        return new WarmingReport(report.patternsWarmed(), report.bucketsWarmed() - discarded,
+                report.bucketsSkipped() + discarded);
+    }
+
+    private static Set<Long> writtenBuckets(Map<QueryHash, Set<Long>> writes) {
+        Set<Long> buckets = new LinkedHashSet<>();
+        writes.values().forEach(buckets::addAll);
+        return buckets;
+    }
+
+    private void invalidateBuckets(Set<Long> buckets, long bucketSeconds) {
+        if (buckets.isEmpty()) return;
+        cacheAdministration.flush(CacheScope.forBuckets(bucketSeconds, buckets));
+        // Cube windows can span several buckets. The Valkey revision also fences older readers.
+        if (cubeCatalog != null) cubeCatalog.clear();
     }
 
     /**
@@ -208,6 +273,11 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     @Override
     public synchronized WarmingReport warmCycle(long warmStartTimestampSeconds, long requestedWarmEndTimestampSeconds,
                                    boolean forceOverwrite) {
+        return warmCycle(warmStartTimestampSeconds, requestedWarmEndTimestampSeconds, forceOverwrite, null);
+    }
+
+    private WarmingReport warmCycle(long warmStartTimestampSeconds, long requestedWarmEndTimestampSeconds,
+                                    boolean forceOverwrite, Map<QueryHash, Set<Long>> writes) {
         lastCycleSucceeded = false;
         boolean patternsSucceeded = true;
         long nowSeconds = clock.instant().getEpochSecond();
@@ -235,8 +305,10 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             for (Map.Entry<QueryHash, CanonicalQueryObject> entry : toWarm.entrySet()) {
                 QueryCancellation.requireCurrentActive();
                 try {
+                    Set<Long> written = writes == null ? null
+                            : writes.computeIfAbsent(entry.getKey(), ignored -> new LinkedHashSet<>());
                     PatternWarmingResult result = warmSinglePattern(entry.getKey(), entry.getValue(),
-                            warmStartTimestampSeconds, warmEndTimestampSeconds, forceOverwrite);
+                            warmStartTimestampSeconds, warmEndTimestampSeconds, forceOverwrite, written);
                     patternsWarmed++;
                     bucketsWarmed += result.bucketsWarmed();
                     bucketsSkipped += result.bucketsSkipped();
@@ -250,6 +322,10 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                 }
             }
             lastCycleSucceeded = patternsSucceeded;
+            if (writes != null) {
+                // A failed pattern can have written earlier buckets before failing.
+                bucketsWarmed = writes.values().stream().mapToInt(Set::size).sum();
+            }
             return new WarmingReport(patternsWarmed, bucketsWarmed, bucketsSkipped);
         } catch (RuntimeException setupFailure) {
             // Failures while constructing the work set happen after consumeAll drained Layer 1.
@@ -296,6 +372,13 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
     public PatternWarmingResult warmSinglePattern(QueryHash queryHash, CanonicalQueryObject canonicalObject,
                                                   long warmStartTimestampSeconds, long warmEndTimestampSeconds,
                                                   boolean forceOverwrite) {
+        return warmSinglePattern(queryHash, canonicalObject, warmStartTimestampSeconds, warmEndTimestampSeconds,
+                forceOverwrite, null);
+    }
+
+    private PatternWarmingResult warmSinglePattern(QueryHash queryHash, CanonicalQueryObject canonicalObject,
+                                                   long warmStartTimestampSeconds, long warmEndTimestampSeconds,
+                                                   boolean forceOverwrite, Set<Long> written) {
         if (cacheConfiguration != null && !safetyRules.permitsWarming(
                 safetyRules.findAllBypassReasons(canonicalObject, cacheConfiguration), cacheConfiguration)) {
             return new PatternWarmingResult(0, 0);
@@ -322,14 +405,6 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         ensureWarmWindowWithinLimit(firstRepresentableBucketStart, warmEndTimestampSeconds);
         int bucketsWarmed = 0;
         int bucketsSkipped = 0;
-        // Never re-warm what is already cached: one coverage-bitmap load answers presence for the
-        // whole lookback window (plan J.1) instead of one EXISTS round-trip per bucket. No bitmap (or
-        // forceOverwrite) falls back to the per-bucket EXISTS check. A stale present-bit can only
-        // skip a warm, never corrupt data: the read path's vanished-bucket guard recomputes that
-        // bucket live as a gap.
-        Optional<BucketCoverageBitmap> coverage = (coverageIndex != null && !forceOverwrite)
-                ? coverageIndex.load(queryHash, bucketSeconds)
-                : Optional.empty();
         // README caveat 1: warm only COMPLETE buckets. The bucket key claims the FULL window
         // [bucketStart, bucketStart + bucketSeconds - 1]; storing a frame truncated at warmEnd under
         // that key would permanently undercount. The trailing partial bucket is simply not warmed;
@@ -347,23 +422,20 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                 break;
             }
             String key = CacheKeyFactory.buildBucketKey(queryHash, currentBucketStart, bucketSeconds);
-            boolean alreadyWarmed;
             if (forceOverwrite) {
                 cacheBackend.evict(key);
                 if (coverageIndex != null) coverageIndex.markEvicted(queryHash, bucketSeconds, currentBucketStart);
-                alreadyWarmed = false;
-            } else if (coverage.isPresent()) {
-                alreadyWarmed = coverage.get().isCovered(currentBucketStart) && isAlreadyWarmed(key);
-                if (!alreadyWarmed) {
-                    coverageIndex.markEvicted(queryHash, bucketSeconds, currentBucketStart);
-                }
-            } else {
-                alreadyWarmed = isAlreadyWarmed(key);
             }
-            if (alreadyWarmed || !computeAndStoreBucket(queryHash, canonicalObject, key, currentBucketStart, bucketEnd)) {
+            // Valkey is authoritative. A partial local bitmap can miss an existing key, while a
+            // positive bit can outlive an eviction by another instance or scoped invalidation.
+            if (!forceOverwrite && isAlreadyWarmed(key)) {
+                if (coverageIndex != null) coverageIndex.markCached(queryHash, bucketSeconds, currentBucketStart);
                 bucketsSkipped++;
-            } else {
+            } else if (computeAndStoreBucket(queryHash, canonicalObject, key, currentBucketStart, bucketEnd)) {
+                if (written != null) written.add(currentBucketStart);
                 bucketsWarmed++;
+            } else {
+                bucketsSkipped++;
             }
             try {
                 currentBucketStart = Math.addExact(currentBucketStart, bucketSeconds);

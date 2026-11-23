@@ -2,6 +2,8 @@ package com.cascada.cache.domain.admin;
 
 import com.cascada.cache.domain.key.CacheKeyConstants;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * What a flush operation applies to. Flush-all matches Cascada bucket keys, while prefix scopes
@@ -17,15 +19,17 @@ public final class CacheScope {
     private final String keyPrefix;
     private final String description;
     private final boolean everything;
+    private final Set<String> bucketStarts;
 
-    private CacheScope(String keyPrefix, String description, boolean everything) {
+    private CacheScope(String keyPrefix, String description, boolean everything, Set<String> bucketStarts) {
         this.keyPrefix = keyPrefix;
         this.description = description;
         this.everything = everything;
+        this.bucketStarts = bucketStarts;
     }
 
     public static CacheScope everything() {
-        return new CacheScope("", "all Cascada buckets", true);
+        return new CacheScope("", "all Cascada buckets", true, Set.of());
     }
 
     public static CacheScope forKeyPrefix(String keyPrefix) {
@@ -34,7 +38,17 @@ public final class CacheScope {
             throw new IllegalArgumentException("Cache prefix must start with "
                     + CacheKeyConstants.CACHE_KEY_PREFIX + ":");
         }
-        return new CacheScope(keyPrefix, "prefix '" + keyPrefix + "'", false);
+        return new CacheScope(keyPrefix, "prefix '" + keyPrefix + "'", false, Set.of());
+    }
+
+    /** Matches a set of bucket starts across all query hashes for the given bucket width. */
+    public static CacheScope forBuckets(long bucketSeconds, Set<Long> bucketStarts) {
+        if (bucketSeconds <= 0 || bucketStarts.isEmpty()) {
+            throw new IllegalArgumentException("Bucket invalidation requires a positive width and bucket starts");
+        }
+        String prefix = CacheKeyConstants.CACHE_KEY_PREFIX + ":B" + bucketSeconds + ":";
+        Set<String> starts = bucketStarts.stream().map(Object::toString).collect(Collectors.toUnmodifiableSet());
+        return new CacheScope(prefix, "bucket starts " + starts, false, starts);
     }
 
     /** True when this scope covers the entire cache (no prefix filter). */
@@ -47,7 +61,8 @@ public final class CacheScope {
         if (everything) {
             return CacheKeyConstants.isBucketKey(key);
         }
-        return CacheKeyConstants.isBucketKey(key) && key.startsWith(keyPrefix);
+        return CacheKeyConstants.isBucketKey(key) && key.startsWith(keyPrefix)
+                && (bucketStarts.isEmpty() || bucketStarts.contains(key.substring(key.lastIndexOf(':') + 1)));
     }
 
     public String keyPrefix() {

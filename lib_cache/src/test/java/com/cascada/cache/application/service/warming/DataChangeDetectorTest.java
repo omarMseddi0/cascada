@@ -11,6 +11,7 @@ import com.cascada.cache.fixture.ValkeyTestDatabase;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -100,6 +101,57 @@ class DataChangeDetectorTest {
         detector.hasHistoricalDataChanged(MONDAY_TO_WEDNESDAY);
 
         assertThat(detector.hasHistoricalDataChanged(MONDAY_TO_WEDNESDAY)).isFalse();
+    }
+
+    private DataChangeDetector groupedDetector(QueryExecutorPort executor) {
+        return new DataChangeDetector(baselineStore, sql -> sql, executor,
+                "SELECT {bucketSeconds} FROM traffic WHERE ts >= {start} AND ts <= {end}", Duration.ofDays(7));
+    }
+
+    private ResultFrame buckets(Map<Long, Long> values) {
+        var frame = ResultFrame.builder().column("bucket_start", ColumnType.LONG).column("total", ColumnType.LONG);
+        values.forEach(frame::row);
+        return frame.build();
+    }
+
+    @Test
+    void groupedValidationFindsChangesWithTheSameTotalAndHandlesDeletedAndNewRows() {
+        var source = new AtomicReference<>(Map.of(0L, 10L, DAY, 20L, 2 * DAY, 30L));
+        var detector = groupedDetector(sql -> {
+            executedSql.add(sql);
+            return buckets(source.get());
+        });
+        var first = detector.checkBuckets(MONDAY_TO_WEDNESDAY, DAY);
+        assertThat(first.requiresFullRefresh()).isTrue();
+        detector.acknowledge(first);
+        source.set(Map.of(0L, 20L, DAY, 10L, 2 * DAY, 30L));
+
+        var changed = detector.checkBuckets(MONDAY_TO_WEDNESDAY, DAY);
+        assertThat(changed.requiresFullRefresh()).isFalse();
+        assertThat(changed.changedBuckets()).containsExactlyInAnyOrder(0L, DAY);
+        detector.acknowledge(changed);
+        source.set(Map.of(DAY, 10L, 3 * DAY, 30L));
+
+        var slid = detector.checkBuckets(TUESDAY_TO_THURSDAY, DAY);
+        assertThat(slid.changedBuckets()).containsExactlyInAnyOrder(2 * DAY, 3 * DAY);
+        assertThat(executedSql).containsExactly(
+                "SELECT 86400 FROM traffic WHERE ts >= 0 AND ts <= 259199",
+                "SELECT 86400 FROM traffic WHERE ts >= 0 AND ts <= 259199",
+                "SELECT 86400 FROM traffic WHERE ts >= 86400 AND ts <= 345599");
+    }
+
+    @Test
+    void groupedValidationRejectsDuplicatesAndMisalignedRowsWithoutReplacingTheBaseline() {
+        var valid = groupedDetector(sql -> buckets(Map.of(0L, 1L)));
+        valid.acknowledge(valid.checkBuckets(MONDAY_TO_WEDNESDAY, DAY));
+        var baseline = baselineStore.loadValidationBaseline();
+        var duplicate = groupedDetector(sql -> ResultFrame.builder().column("bucket_start", ColumnType.LONG)
+                .row(0L).row(0L).build());
+        var misaligned = groupedDetector(sql -> buckets(Map.of(1L, 1L)));
+
+        assertThat(duplicate.checkBuckets(MONDAY_TO_WEDNESDAY, DAY).nextBaseline()).isEmpty();
+        assertThat(misaligned.checkBuckets(MONDAY_TO_WEDNESDAY, DAY).nextBaseline()).isEmpty();
+        assertThat(baselineStore.loadValidationBaseline()).isEqualTo(baseline);
     }
 
     @Test

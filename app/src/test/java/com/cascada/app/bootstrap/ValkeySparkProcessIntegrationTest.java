@@ -552,4 +552,40 @@ class ValkeySparkProcessIntegrationTest {
         Arrays.sort(elapsed);
         return new double[]{elapsed[count/2]/1_000_000.0,elapsed[Math.min(count-1,(int)Math.ceil(count*.95)-1)]/1_000_000.0};
     }
+    @Test
+    @Order(99)
+    void deltaBackfillRefreshesOnlyTheChangedBucket() {
+        String validationSql = """
+                SELECT CAST(FLOOR(ts / {bucketSeconds}) * {bucketSeconds} AS BIGINT) AS bucket_start,
+                       COUNT(*) AS row_count, SUM(amount) AS amount_total
+                FROM traffic WHERE ts >= {start} AND ts <= {end}
+                GROUP BY CAST(FLOOR(ts / {bucketSeconds}) * {bucketSeconds} AS BIGINT)
+                """;
+        var warming = new WarmingSettings(true, Duration.ofHours(1), Duration.ofDays(7), 128,
+                validationSql, WarmingSettings.DEFAULT_POPULARITY_RETENTION);
+        var application = new ApplicationSettings(new ServerSettings(0, 0, Duration.ofSeconds(30)), warming,
+                List.of(new TableSettings("traffic", deltaPath, Map.of("ts", "ts", "region", "C_region",
+                        "device", "C_device", "amount", "C_amount", "latency", "C_latency"), Set.of("ts"))));
+        var settings = new EngineSettings(CacheExecutionConfiguration.defaults(), redisUri, "traffic", deltaPath, true, 10);
+        String logical = global(BASE, END);
+        try (var validating = new CascadaEngineFactory(settings, physical, application)) {
+            same(validating.executeLogicalQueryUseCase().query(logical).frame(), truth(logical));
+            var warmer = validating.warmCacheUseCase();
+            assertThat(warmer.warmLookbackWindow(END + 1, warming.lookback()).bucketsWarmed()).isEqualTo(7);
+            oracle.sql("""
+                    INSERT INTO delta.`%s`
+                    SELECT CAST(%d AS BIGINT), 'r-backfilled', 'd1', CAST(900 AS BIGINT), CAST(1 AS DOUBLE)
+                    """.formatted(deltaPath, BASE + 2 * DAY + 100)).collect();
+
+            var result = warmer.warmLookbackWindow(END + 1, warming.lookback());
+
+            assertThat(result.bucketsWarmed()).isEqualTo(1);
+            assertThat(result.bucketsSkipped()).isEqualTo(6);
+            same(validating.executeLogicalQueryUseCase().query(logical).frame(), truth(logical));
+            assertThat(warmer.warmLookbackWindow(END + 1, warming.lookback()).bucketsWarmed()).isZero();
+        } finally {
+            inspection.sync().del(CacheKeyConstants.VALIDATION_BASELINE_KEY);
+        }
+    }
+
 }

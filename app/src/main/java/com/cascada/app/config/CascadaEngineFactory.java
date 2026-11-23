@@ -23,7 +23,6 @@ import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
 import com.cascada.cache.application.service.cube.ExactCubeExecution;
 import com.cascada.sql.adapter.out.calcite.ExactCubeSqlAdapter;
-import java.time.Duration;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.application.service.CacheAdministrationService;
 import com.cascada.cache.application.service.CacheExecutionEngine;
@@ -136,7 +135,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
                 && accessScope != null && !accessScope.isBlank()
                 ? new ExactCubeExecution(new ExactCubeSqlAdapter(batchPaths(),
                         settings.cacheExecution().timeColumnName()), cacheBackend.exactCubeStore(), pinned,
-                        accessScope, Clock.systemUTC(), settings.cacheExecution().bucketSeconds(), Duration.ofHours(1))
+                        accessScope, Clock.systemUTC(), settings.cacheExecution().bucketSeconds(), applicationSettings.warming().lookback())
                 : null;
         this.logicalQueryUseCase = new ExecuteLogicalQueryService(createTranslator(), createCanonicalizer(),
                 cachedQueryUseCase, queryExecutor, exactCube);

@@ -6,23 +6,19 @@ import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import com.cascada.cache.domain.frame.ResultFrame;
-import com.cascada.cache.exception.CubeRollUpUnavailableException;
 import com.cascada.spark.domain.SparkSessionConfig;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Objects;
-import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.delta.DeltaLog;
 import org.apache.spark.sql.delta.Snapshot;
 import org.apache.spark.sql.execution.QueryExecution;
@@ -106,17 +102,8 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
 
     @Override
     public ResultFrame executePinned(ExactCubeSource binding, String physicalSql) {
-        return executePinned(binding, () -> execute(physicalSql));
-    }
-
-    @Override
-    public ResultFrame executePinnedState(ExactCubeSource binding, String physicalSql, long byteBudget) {
-        return executePinned(binding, () -> executeWithCancellation(() -> collectCubeState(physicalSql, byteBudget)));
-    }
-
-    private ResultFrame executePinned(ExactCubeSource binding, Supplier<ResultFrame> action) {
         ensureSameTable(binding);
-        ResultFrame answer = action.get();
+        ResultFrame answer = execute(physicalSql);
         ensureSameTable(binding);
         return answer;
     }
@@ -132,15 +119,11 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
 
     @Override
     public ResultFrame execute(String physicalSql) {
-        return executeWithCancellation(() -> executeSql(physicalSql));
+        return QueryExecutionScope.current().map(cancellation -> executeCancellable(physicalSql, cancellation))
+                .orElseGet(() -> executeSql(physicalSql));
     }
 
-    private ResultFrame executeWithCancellation(Supplier<ResultFrame> action) {
-        return QueryExecutionScope.current().map(cancellation -> executeCancellable(action, cancellation))
-                .orElseGet(action);
-    }
-
-    private ResultFrame executeCancellable(Supplier<ResultFrame> action, QueryCancellation cancellation) {
+    private ResultFrame executeCancellable(String physicalSql, QueryCancellation cancellation) {
         cancellation.requireActive();
         var context = sparkSession.sparkContext();
         String previousGroup = context.getLocalProperty("spark.jobGroup.id");
@@ -149,7 +132,7 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
         context.setJobGroup(cancellation.executionId(), "Cascada query", true);
         try (var registration = cancellation.onCancel(() -> context.cancelJobGroupAndFutureJobs(cancellation.executionId()))) {
             cancellation.requireActive();
-            return action.get();
+            return executeSql(physicalSql);
         } finally {
             context.setLocalProperty("spark.jobGroup.id", previousGroup);
             context.setLocalProperty("spark.job.description", previousDescription);
@@ -170,27 +153,6 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
                     + " result_rows=" + result.rowCount() + " result_columns=" + result.columnNames().size());
         }
         return result;
-    }
-
-    private ResultFrame collectCubeState(String physicalSql, long byteBudget) {
-        var dataset = (org.apache.spark.sql.classic.Dataset<Row>) sparkSession.sql(physicalSql);
-        var query = dataset.queryExecution();
-        return SQLExecution.withNewExecutionId(query, Option.apply("cascada-cube-state"), () -> {
-            // Spark delivers one partition at a time. Stop before retaining an oversized state frame.
-            var iterator = query.executedPlan().executeToIterator();
-            var rows = new ArrayList<InternalRow>();
-            long remaining = byteBudget;
-            while (iterator.hasNext()) {
-                QueryCancellation.requireCurrentActive();
-                UnsafeRow row = (UnsafeRow) iterator.next();
-                remaining -= row.getSizeInBytes();
-                if (remaining < 0) {
-                    throw new CubeRollUpUnavailableException("Spark cube state exceeds the byte budget");
-                }
-                rows.add(row);
-            }
-            return resultFrameMapper.map(dataset.schema(), rows.toArray(InternalRow[]::new));
-        });
     }
 
     /** Map a Spark result into a {@link ResultFrame}; visible for the cluster integration test. */

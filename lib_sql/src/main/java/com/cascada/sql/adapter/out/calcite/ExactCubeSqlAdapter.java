@@ -51,7 +51,7 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
 
     @Override
     public Optional<ExactCubeQuery> recognize(String physicalSql) {
-        if (physicalSql.length() > 16_384 || physicalSql.contains("${")) return Optional.empty();
+        if (physicalSql.contains("${")) return Optional.empty();
         try {
             return Optional.of(extract(physicalSql));
         } catch (IllegalArgumentException | ArithmeticException | UnsupportedSqlException ineligible) {
@@ -126,7 +126,6 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
                 grain.add(name);
             }
         }
-        require(grain.size() <= 4 && inner.getSelectList().size() <= 8);
         var projections = new ArrayList<CubeProjection>();
         var labels = new HashSet<String>();
         var measures = EnumSet.noneOf(CubeMeasure.class);

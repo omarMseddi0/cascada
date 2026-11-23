@@ -11,7 +11,7 @@ import java.util.Optional;
 import java.util.Set;
 
 public interface ExactCubeStorePort {
-    List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval, int limit);
+    List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval);
 
     Optional<ResultFrame> read(ExactCubeFragment manifest);
 

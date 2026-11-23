@@ -5,7 +5,6 @@ import com.cascada.cache.application.model.query.CubeCoverEdge;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
-import com.cascada.cache.domain.model.cube.ExactCubeLimits;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
@@ -66,8 +65,6 @@ final class ExactCubePlannerTest {
         var random = new Random(640_025);
         var window = new CubeInterval(0, 4);
         var query = query(Set.of(SUM), List.of("region"), window);
-        // Warm the same bounded code path before checking it under the pilot planning deadline.
-        ExactCubePlanner.select(query, POPULATION, List.of(fragment("warm", 0, 4, List.of("region"), Set.of(SUM), 10)), 1);
         for (int iteration = 0; iteration < 80; iteration++) {
             var candidates = new ArrayList<ExactCubeFragment>();
             for (int start = 0; start < 4; start++) {
@@ -86,11 +83,23 @@ final class ExactCubePlannerTest {
         }
     }
 
-    @Test void denseMillionDescriptorInputDeclinesBeforeEnumeration() {
+    @Test void denseMillionDescriptorInputCanUseACover() {
         var fragment = fragment("dense", 0, 9, List.of("region"), Set.of(SUM), 10);
         var dense = Collections.nCopies(1_000_000, fragment);
         var query = query(Set.of(SUM), List.of("region"), WINDOW);
-        assertThat(ExactCubePlanner.select(query, POPULATION, dense, 1)).isEmpty();
+        var plan = ExactCubePlanner.select(query, POPULATION, dense, 1).orElseThrow();
+        assertThat(plan.covers().get(SUM)).containsExactly(new CubeCoverEdge(WINDOW, fragment));
+    }
+
+    @Test void sharedCoverCanReadPastTheFormerCandidateAndFragmentCutoffs() {
+        var candidates = new ArrayList<ExactCubeFragment>();
+        for (int day = 0; day < 96; day++) {
+            candidates.add(fragment("day-" + day, day, day + 1, List.of("region"), Set.of(SUM, COUNT), 10));
+        }
+        var query = query(Set.of(SUM, COUNT), List.of("region"), new CubeInterval(0, 96));
+        var plan = ExactCubePlanner.select(query, POPULATION, candidates, 1).orElseThrow();
+        assertThat(plan.covers().get(SUM)).hasSize(96).isEqualTo(plan.covers().get(COUNT));
+        assertThat(plan.covers().get(SUM).stream().map(CubeCoverEdge::fragment)).containsExactlyElementsOf(candidates);
     }
 
     private static double exhaustive(List<ExactCubeFragment> candidates, long start, boolean previousResidual) {
@@ -110,7 +119,7 @@ final class ExactCubePlannerTest {
     }
 
     private static double cacheCost(ExactCubeFragment fragment) {
-        return 0.02 + fragment.decodedBytes() / (double) ExactCubeLimits.MAX_STATE_BYTES;
+        return 0.02 + fragment.decodedBytes() / (double) (8 * 1024 * 1024);
     }
 
     private static ExactCubeQuery query(Set<CubeMeasure> measures, List<String> grain, CubeInterval interval) {

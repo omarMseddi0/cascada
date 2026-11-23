@@ -2,7 +2,6 @@ package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
-import com.cascada.cache.domain.model.cube.ExactCubeLimits;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
@@ -24,9 +23,7 @@ final class ExactCubeSql {
         for (int i = 0; i < grain.size(); i++) {
             String key = grain.get(i);
             if (source.types().get(query.grain().get(i)).equals("string")) {
-                String bytes = "CAST(" + key + " AS BINARY)";
-                key = "CASE WHEN length(" + bytes + ") > " + ExactCubeLimits.MAX_KEY_BYTES
-                        + " THEN '!' ELSE hex(" + bytes + ") END";
+                key = "hex(CAST(" + key + " AS BINARY))";
             }
             select.add(key + " AS cube_k" + i);
         }
@@ -46,7 +43,6 @@ final class ExactCubeSql {
         int count = Math.max(1, frame.rowCount());
         var rows = new ArrayList<String>(count);
         var names = query.projections().stream().map(p -> quote(p.label())).toList();
-        int length = 0;
         for (int row = 0; row < count; row++) {
             var values = new ArrayList<String>(names.size());
             for (int column = 0; column < names.size(); column++) {
@@ -59,10 +55,7 @@ final class ExactCubeSql {
                 Object value = frame.isEmpty() ? null : frame.valueAt(row, column);
                 values.add(literal(value, type));
             }
-            String tuple = "(" + String.join(", ", values) + ")";
-            length += tuple.length();
-            if (length > 64 * 1024) throw new IllegalStateException("outer SQL exceeds cube materialization budget");
-            rows.add(tuple);
+            rows.add("(" + String.join(", ", values) + ")");
         }
         String derived = "(SELECT * FROM VALUES " + String.join(", ", rows) + " AS cube_values ("
                 + String.join(", ", names) + ")" + (frame.isEmpty() ? " WHERE FALSE" : "") + ")";

@@ -5,7 +5,6 @@ import com.cascada.cache.application.service.merge.SparkAverage;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
-import com.cascada.cache.domain.model.cube.ExactCubeLimits;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import java.nio.ByteBuffer;
@@ -154,7 +153,7 @@ final class ExactCubeState {
     }
 
     private static void validateHex(String value) {
-        require(value.length() <= ExactCubeLimits.MAX_KEY_BYTES * 2 && value.equals(value.toUpperCase(java.util.Locale.ROOT)));
+        require(value.equals(value.toUpperCase(java.util.Locale.ROOT)));
         decode(value);
     }
 

@@ -55,19 +55,6 @@ public final class LazyQueryExecutor implements PinnedQueryExecutorPort, AutoClo
         }
     }
 
-    @Override
-    public ResultFrame executePinnedState(ExactCubeSource binding, String physicalSql, long byteBudget) {
-        lifecycle.readLock().lock();
-        try {
-            if (initializedExecutor() instanceof PinnedQueryExecutorPort pinned) {
-                return pinned.executePinnedState(binding, physicalSql, byteBudget);
-            }
-            throw new IllegalStateException("executor does not support pinned Delta reads");
-        } finally {
-            lifecycle.readLock().unlock();
-        }
-    }
-
     private QueryExecutorPort initializedExecutor() {
         initialization.lock();
         try {

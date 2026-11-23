@@ -10,7 +10,6 @@ import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
-import com.cascada.cache.domain.model.cube.ExactCubeLimits;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
@@ -22,7 +21,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 
@@ -30,7 +28,6 @@ import java.util.logging.Logger;
 public final class ExactCubeExecution {
     private static final Logger LOGGER = Logger.getLogger(ExactCubeExecution.class.getName());
     private static final Set<String> INTEGRALS = Set.of("tinyint", "smallint", "int");
-    private static final long MAX_EXACT_SCORE = 1L << 53;
     private final ExactCubeSqlPort sql;
     private final ExactCubeStorePort store;
     private final PinnedQueryExecutorPort executor;
@@ -38,7 +35,6 @@ public final class ExactCubeExecution {
     private final Clock clock;
     private final long bucketSeconds;
     private final Duration ttl;
-    private final Semaphore permits = new Semaphore(2);
 
     public ExactCubeExecution(ExactCubeSqlPort sql, ExactCubeStorePort store, PinnedQueryExecutorPort executor,
                               String accessScope, Clock clock, long bucketSeconds, Duration ttl) {
@@ -68,14 +64,7 @@ public final class ExactCubeExecution {
         var population = new CubePopulation(source, query.timeColumn(), query.predicate(), query.input());
         String rejection = rejection(query, source);
         if (rejection != null) return direct(query, source, rejection, List.of(), List.of(), 0);
-        if (!permits.tryAcquire()) {
-            return direct(query, source, "concurrency-budget", List.of(), List.of(), 0);
-        }
-        try {
-            return executeBound(query, population);
-        } finally {
-            permits.release();
-        }
+        return executeBound(query, population);
     }
 
     private static QueryResult existing(String reason, Supplier<QueryResult> fallback) {
@@ -87,8 +76,8 @@ public final class ExactCubeExecution {
 
     private String rejection(ExactCubeQuery query, ExactCubeSource source) {
         var interval = query.interval();
-        if (!ExactCubePlanChecker.aligned(interval, bucketSeconds) || interval.start() < -MAX_EXACT_SCORE
-                || interval.end() > MAX_EXACT_SCORE || interval.end() > clock.instant().getEpochSecond()) {
+        if (!ExactCubePlanChecker.aligned(interval, bucketSeconds)
+                || interval.end() > clock.instant().getEpochSecond()) {
             return "open-or-unaligned-window";
         }
         if (!"bigint".equals(source.types().get(query.timeColumn()))
@@ -109,7 +98,7 @@ public final class ExactCubeExecution {
         long planningNanos = 0;
         String failureReason;
         try {
-            var candidates = store.candidates(population, query.interval(), ExactCubePlanner.CANDIDATES + 1);
+            var candidates = store.candidates(population, query.interval());
             var selected = ExactCubePlanner.select(query, population, candidates, bucketSeconds);
             planningNanos = System.nanoTime() - planningStarted;
             if (selected.isPresent()) {
@@ -118,12 +107,10 @@ public final class ExactCubeExecution {
             boolean alreadyPublished = candidates.stream().anyMatch(fragment ->
                     fragment.interval().equals(query.interval()) && fragment.grain().equals(query.grain())
                             && fragment.measures().containsAll(query.measures()));
-            if (!alreadyPublished && candidates.size() <= ExactCubePlanner.CANDIDATES
-                    && query.outerSql() == null && query.limit() == null) {
+            if (!alreadyPublished && query.outerSql() == null && query.limit() == null) {
                 return build(query, population, planningNanos);
             }
-            failureReason = candidates.size() > ExactCubePlanner.CANDIDATES ? "candidate-budget"
-                    : candidates.isEmpty() ? "no-manifest" : "no-beneficial-verified-cover";
+            failureReason = candidates.isEmpty() ? "no-manifest" : "no-beneficial-verified-cover";
         } catch (Exception failure) {
             QueryCancellation.rethrowIfCancelled(failure);
             failureReason = "recovery:" + failure.getClass().getSimpleName();
@@ -162,7 +149,7 @@ public final class ExactCubeExecution {
         for (var entry : residuals.entrySet()) {
             String residual = sql.stateStatement(query, source, entry.getKey(), entry.getValue());
             submitted.add(residual);
-            state.add(executor.executePinnedState(source, residual, ExactCubeLimits.MAX_STATE_BYTES), query.grain(), entry.getValue(), entry.getValue());
+            state.add(executor.executePinned(source, residual), query.grain(), entry.getValue(), entry.getValue());
         }
         var result = state.finish();
         String outer = null;
@@ -178,7 +165,7 @@ public final class ExactCubeExecution {
         String fence = store.publicationFence();
         var source = population.source();
         String statement = sql.stateStatement(query, source, query.interval(), query.measures());
-        var frame = executor.executePinnedState(source, statement, ExactCubeLimits.MAX_STATE_BYTES);
+        var frame = executor.executePinned(source, statement);
         var state = new ExactCubeState(query, source);
         state.add(frame, query.grain(), query.measures(), query.measures());
         var answer = state.finish();

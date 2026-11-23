@@ -455,9 +455,8 @@ class ExactCubeDifferentialIntegrationTest {
             String generation = hot.exactCubeTrace().fragments().getLast().generation();
             var store = ((ValkeyCacheBackendAdapter) factory.cacheBackendForShutdown()).exactCubeStore();
             var evicting = new ExactCubeStorePort() {
-                @Override public List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval,
-                                                                     int limit) {
-                    return store.candidates(population, interval, limit);
+                @Override public List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval) {
+                    return store.candidates(population, interval);
                 }
 
                 @Override public Optional<ResultFrame> read(ExactCubeFragment fragment) {
@@ -535,17 +534,17 @@ class ExactCubeDifferentialIntegrationTest {
         throw new AssertionError("expected a Spark SQL error");
     }
 
-    @Test void wideStateUsesTheByteBudgetAcrossTheFormerRowCutoff() {
+    @Test void wideStateExceedsFormerRowKeyAndByteLimits() {
         String original = path;
         path = scratch.resolve("wide-facts").toUri().toString();
         spark.sql("""
                 SELECT CASE WHEN id < 12000 THEN 0L ELSE 86400L END AS ts,
-                       concat(lpad(CAST(id AS STRING), 8, '0'), repeat('x', 110)) AS region,
+                       concat(lpad(CAST(id AS STRING), 8, '0'), repeat('x', 142)) AS region,
                        'skewed' AS device, CAST(pmod(id, 17) - 8 AS INT) AS amount
                 FROM range(48000)
                 """).write().format("delta").save(path);
         String fits = aggregate("SUM", "region", 0, 1, "");
-        String tooWide = aggregate("SUM", "region", 1, 2, "");
+        String larger = aggregate("SUM", "region", 1, 2, "");
         try (var factory = factory(SCOPE, true)) {
             var entry = factory.executeLogicalQueryUseCase();
             tracked.calls.clear();
@@ -559,15 +558,19 @@ class ExactCubeDifferentialIntegrationTest {
                     .satisfies(fragment -> assertThat(fragment.rows()).isEqualTo(12_000));
             assertThat(tracked.calls).isEmpty();
 
-            var declined = entry.query(tooWide);
-            check(tooWide, 0, false, declined, "pinned-spark");
-            assertThat(declined.frame().rowCount()).isEqualTo(36_000);
-            assertThat(declined.exactCubeTrace().reason()).isEqualTo("recovery:CubeRollUpUnavailableException");
-            assertThat(tracked.calls).hasSize(2).allSatisfy(sql -> assertThat(sql).doesNotContain("LIMIT"));
+            check(larger, 0, false, entry.query(larger), "pinned-build");
+            assertThat(tracked.calls).singleElement().asString().doesNotContain("LIMIT");
+            tracked.calls.clear();
+            var largeCover = entry.query(larger);
+            check(larger, 0, false, largeCover, "exact-cube");
+            assertThat(largeCover.frame().rowCount()).isEqualTo(36_000);
+            assertThat(largeCover.exactCubeTrace().fragments()).singleElement().satisfies(fragment ->
+                    assertThat(fragment.decodedBytes()).isGreaterThan(8 * 1024 * 1024));
+            assertThat(tracked.calls).isEmpty();
         } finally {
             path = original;
         }
-        System.out.println("EXACT_CUBE_WIDE cachedGroups=12000 byteBudgetDeclinedGroups=36000 keyBytes=118");
+        System.out.println("EXACT_CUBE_WIDE cachedGroups=36000 keyBytes=150");
     }
 
     private CascadaEngineFactory factory(String scope, boolean enabled) {
@@ -652,11 +655,6 @@ class ExactCubeDifferentialIntegrationTest {
         @Override public ResultFrame executePinned(ExactCubeSource source, String sql) {
             trackPinned(sql);
             return spark.executePinned(source, sql);
-        }
-
-        @Override public ResultFrame executePinnedState(ExactCubeSource source, String sql, long byteBudget) {
-            trackPinned(sql);
-            return spark.executePinnedState(source, sql, byteBudget);
         }
 
         private void trackPinned(String sql) {

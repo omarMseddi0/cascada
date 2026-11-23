@@ -1,6 +1,6 @@
 package com.cascada.cache.application.service;
 
-import com.cascada.cache.application.model.ResolvedWarmingQuery;
+import com.cascada.cache.application.model.warming.ResolvedWarmingQuery;
 import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
@@ -11,8 +11,8 @@ import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.port.out.QueryPopularityPort;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
-import com.cascada.cache.application.model.PatternWarmingResult;
-import com.cascada.cache.application.model.WarmingReport;
+import com.cascada.cache.application.model.warming.PatternWarmingResult;
+import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;

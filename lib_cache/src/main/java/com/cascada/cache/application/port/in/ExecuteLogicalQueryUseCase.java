@@ -1,6 +1,6 @@
 package com.cascada.cache.application.port.in;
 
-import com.cascada.cache.application.model.QueryResult;
+import com.cascada.cache.application.model.query.QueryResult;
 
 /**
  * <b>Primary (driving) port</b> — "answer this query, written the way the customer thinks about their

@@ -1,4 +1,4 @@
-package com.cascada.sql.adapter.out.calcite.model;
+package com.cascada.sql.adapter.out.model.calcite.aggregate;
 
 import java.util.List;
 

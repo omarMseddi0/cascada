@@ -3,7 +3,7 @@ package com.cascada.cache.adapter.out.cache;
 import com.cascada.cache.adapter.out.cache.model.PendingMget;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
-import com.cascada.cache.application.model.CancellationRegistration;
+import com.cascada.cache.application.model.cancellation.CancellationRegistration;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.domain.admin.CacheScope;

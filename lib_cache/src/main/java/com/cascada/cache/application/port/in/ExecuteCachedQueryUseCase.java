@@ -1,6 +1,6 @@
 package com.cascada.cache.application.port.in;
 
-import com.cascada.cache.application.model.QueryResult;
+import com.cascada.cache.application.model.query.QueryResult;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 
 /**

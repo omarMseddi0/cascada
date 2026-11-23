@@ -1,4 +1,4 @@
-package com.cascada.cache.application.model;
+package com.cascada.cache.application.model.query;
 
 import com.cascada.cache.domain.frame.ResultFrame;
 

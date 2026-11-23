@@ -1,6 +1,6 @@
 package com.cascada.sql.adapter.out.calcite;
 
-import com.cascada.sql.adapter.out.calcite.model.CanonicalTimeBound;
+import com.cascada.sql.adapter.out.model.calcite.time.CanonicalTimeBound;
 import com.cascada.sql.domain.model.TimeDimensionMap;
 import com.cascada.sql.exception.UnsupportedSqlException;
 import org.apache.calcite.sql.SqlBasicCall;

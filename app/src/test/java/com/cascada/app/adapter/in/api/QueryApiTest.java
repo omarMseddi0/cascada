@@ -1,7 +1,7 @@
 package com.cascada.app.adapter.in.api;
 
 import com.cascada.app.adapter.in.grpc.protocol.*;
-import com.cascada.cache.application.model.QueryResult;
+import com.cascada.cache.application.model.query.QueryResult;
 import com.cascada.cache.domain.frame.*;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;

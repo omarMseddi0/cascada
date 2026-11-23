@@ -1,4 +1,4 @@
-package com.cascada.sql.adapter.out.calcite.model;
+package com.cascada.sql.adapter.out.model.calcite.query;
 
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;

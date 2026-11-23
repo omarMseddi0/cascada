@@ -2,7 +2,7 @@ package com.cascada.app.adapter.in.scheduling;
 
 import com.cascada.app.model.config.WarmingSettings;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
-import com.cascada.cache.application.model.WarmingReport;
+import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.identity.domain.model.QueryHash;
 import java.time.*;

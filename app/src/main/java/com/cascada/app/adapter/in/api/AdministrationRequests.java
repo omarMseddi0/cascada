@@ -4,7 +4,7 @@ import com.cascada.app.adapter.in.api.model.ClusterChangeResult;
 import com.cascada.app.exception.InvalidRequestException;
 import com.cascada.cache.application.port.in.FlushCacheUseCase;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
-import com.cascada.cache.application.model.WarmingReport;
+import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.fabric.application.port.in.ManageClusterLifecycleUseCase;
 import com.cascada.fabric.application.port.in.PrepareClusterSettingsUseCase;

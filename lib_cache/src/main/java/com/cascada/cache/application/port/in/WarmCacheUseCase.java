@@ -1,6 +1,6 @@
 package com.cascada.cache.application.port.in;
 
-import com.cascada.cache.application.model.WarmingReport;
+import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.identity.domain.model.QueryHash;
 import java.time.Duration;

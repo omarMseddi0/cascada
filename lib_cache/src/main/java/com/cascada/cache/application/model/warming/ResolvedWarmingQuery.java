@@ -1,4 +1,4 @@
-package com.cascada.cache.application.model;
+package com.cascada.cache.application.model.warming;
 
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
 import com.cascada.identity.domain.model.QueryHash;

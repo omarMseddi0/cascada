@@ -4,7 +4,7 @@ import com.cascada.app.model.config.EngineSettings;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.application.model.QueryResult;
+import com.cascada.cache.application.model.query.QueryResult;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import java.util.HashMap;

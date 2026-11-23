@@ -2,17 +2,21 @@ package com.cascada.app.adapter.in.api;
 
 import com.cascada.app.adapter.in.grpc.protocol.*;
 import com.cascada.app.model.config.ServerSettings;
+import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.model.query.QueryResult;
 import com.cascada.cache.domain.frame.*;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.*;
+import io.grpc.stub.ClientCallStreamObserver;
+import io.grpc.stub.ClientResponseObserver;
 import java.net.URI;
 import java.net.http.*;
 import java.time.Duration;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.*;
@@ -78,6 +82,50 @@ class VirtualRequestConcurrencyTest {
             }
         } finally { release.countDown(); }
     }
+    @Test void aSlowGrpcClientCanCancelWhileAnotherResponseCompletes() throws Exception {
+        var field = ResultFrame.builder().expectedRows(2048).column("payload", ColumnType.STRING);
+        String text = "x".repeat(4096);
+        for (int row = 0; row < 2048; row++) field.appendString(text);
+        var large = field.build();
+        var small = ResultFrame.builder().column("n", ColumnType.LONG).row(7L).build();
+        var metadata = new CountDownLatch(1);
+        var serverCancelled = new CountDownLatch(1);
+        var terminal = new CompletableFuture<Throwable>();
+        var call = new AtomicReference<ClientCallStreamObserver<QueryRequest>>();
+        try (var service = new QueryGrpcService(sql -> {
+            if (!sql.equals("large")) return new QueryResult(small, true);
+            QueryExecutionScope.current().orElseThrow().onCancel(serverCancelled::countDown);
+            return new QueryResult(large, true);
+        })) {
+            Server server = ServerBuilder.forPort(0).addService(service).build().start();
+            ManagedChannel channel = ManagedChannelBuilder.forAddress("localhost", server.getPort()).usePlaintext().build();
+            try {
+                var request = QueryRequest.newBuilder().setSql("large").setFormat(ResponseFormat.JSON).build();
+                QueryServiceGrpc.newStub(channel).query(request, new ClientResponseObserver<QueryRequest, QueryChunk>() {
+                    @Override public void beforeStart(ClientCallStreamObserver<QueryRequest> stream) {
+                        call.set(stream);
+                        stream.disableAutoRequestWithInitial(1);
+                    }
+                    @Override public void onNext(QueryChunk chunk) { metadata.countDown(); }
+                    @Override public void onError(Throwable error) { terminal.complete(error); }
+                    @Override public void onCompleted() { terminal.completeExceptionally(new AssertionError("expected cancellation")); }
+                });
+                assertThat(metadata.await(5, TimeUnit.SECONDS)).isTrue();
+                var fast = QueryServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
+                        .query(QueryRequest.newBuilder().setSql("small").build());
+                assertThat(fast.next().getRowCount()).isEqualTo(1);
+                assertThat(fast.next().getRows(0).getCells(0).getLongValue()).isEqualTo(7);
+                assertThat(fast.hasNext()).isFalse();
+                call.get().cancel("test finished", null);
+                assertThat(Status.fromThrowable(terminal.get(5, TimeUnit.SECONDS)).getCode()).isEqualTo(Status.Code.CANCELLED);
+                assertThat(serverCancelled.await(5, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+                server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
     @Test void publishedGrpcBuffersRemainImmutableAfterSubsequentWrites() throws Exception {
         java.util.List<com.google.protobuf.ByteString> chunks = new java.util.ArrayList<>();
         try (var output = new GrpcChunkOutputStream(chunks::add)) {

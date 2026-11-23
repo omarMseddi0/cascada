@@ -5,10 +5,10 @@ import java.math.BigDecimal;
 
 /** Sets each visited value on the current protobuf cell; a NULL cell carries no value. */
 final class ProtobufCellWriter implements ResultCellVisitor<RuntimeException> {
-    private Cell.Builder cell;
+    private final Cell.Builder cell = Cell.newBuilder();
 
-    void startCell() { cell = Cell.newBuilder(); }
-    Cell.Builder cell() { return cell; }
+    void startCell() { cell.clear(); }
+    Cell cell() { return cell.build(); }
 
     public void nullValue() { }
     public void longValue(long value) { cell.setLongValue(value); }

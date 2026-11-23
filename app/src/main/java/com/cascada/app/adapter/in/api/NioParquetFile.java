@@ -23,7 +23,7 @@ final class NioParquetFile implements InputFile, OutputFile {
         return output(StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
     }
     private PositionOutputStream output(OpenOption... options) throws IOException {
-        OutputStream output = Files.newOutputStream(path, options);
+        OutputStream output = new BufferedOutputStream(Files.newOutputStream(path, options), 64 * 1024);
         return new PositionOutputStream() {
             private long position;
             @Override public long getPos() { return position; }

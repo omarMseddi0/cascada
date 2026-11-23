@@ -3,10 +3,14 @@ package com.cascada.cache.application.service.merge;
 import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.frame.ResultFrameBuilder;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -88,6 +92,35 @@ class TypedFrameOutputParallelismTest {
             assertThat(result.longAt(0, 0)).isZero();
             assertThat(result.longAt(result.rowCount() - 1, 0)).isEqualTo(39_999L);
             assertThat(result.isNullAt(0, result.columnNames().size() - 1)).isTrue();
+        }
+    }
+
+    @Test
+    void fifteenConcurrentWideMergesKeepTheirOwnGroupsAndSums() throws Exception {
+        ResultFrame input = frame(70_000, 30);
+        var expected = new ArrayList<ResultFrame>();
+        for (int frames = 2; frames <= 4; frames++) {
+            var serial = new TypedFrameAccumulator(input, List.of("key"), Map.of(), "ts", 300);
+            for (int index = 0; index < frames; index++) serial.accept(input);
+            expected.add(serial.finish());
+        }
+        var start = new CountDownLatch(1);
+        try (var workers = Executors.newFixedThreadPool(4);
+             var requests = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<ResultFrame>> results = new ArrayList<>();
+            for (int index = 0; index < 15; index++) {
+                int frameCount = 2 + index % expected.size();
+                results.add(requests.submit(() -> {
+                    start.await();
+                    var merge = partitioned(input, workers);
+                    for (int frame = 0; frame < frameCount; frame++) merge.accept(input);
+                    return merge.finish();
+                }));
+            }
+            start.countDown();
+            for (int index = 0; index < results.size(); index++) {
+                assertSameValues(results.get(index).get(30, TimeUnit.SECONDS), expected.get(index % expected.size()));
+            }
         }
     }
 

@@ -9,6 +9,7 @@ import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
 import com.cascada.cache.adapter.out.index.InMemoryCoverageIndexAdapter;
 import com.cascada.cache.adapter.out.serialization.ArrowResultFrameSerializer;
 import com.cascada.cache.adapter.out.tracking.ValkeyQueryPopularityAdapter;
+import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
@@ -90,8 +91,10 @@ public final class CascadaEngineFactory implements AutoCloseable {
         CacheConfiguration validatedConfiguration = resolveCacheSafetyConfiguration();
         this.tableCatalog = createTableCatalog();
         this.cacheTasks = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("cache-gap-", 0).factory());
-        int mergeThreads = Math.min(settings.cacheExecution().mergeWorkerCount(),
-                Runtime.getRuntime().availableProcessors());
+        CacheExecutionConfiguration execution = settings.cacheExecution();
+        int mergeThreads = Math.min(execution.mergeWorkerCount(), Runtime.getRuntime().availableProcessors());
+        CacheExecutionConfiguration mergeConfiguration = new CacheExecutionConfiguration(
+                execution.bucketSeconds(), execution.fixedStepSeconds(), execution.timeColumnName(), mergeThreads);
         this.mergeTasks = createCpuPool(mergeThreads, "cache-merge-");
         int decodeThreads = Math.max(1, Math.min(4, mergeThreads));
         this.decodeTasks = createCpuPool(decodeThreads, "cache-decode-");
@@ -115,7 +118,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
         GapQueryRewriterPort gapQueryRewriter = createGapQueryRewriter();
         this.warmingOrchestrator = createWarmingOrchestrator(gapQueryRewriter, validatedConfiguration);
         CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
-                gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks,
+                gapQueryRewriter, mergeConfiguration, coverageIndex, cubeCatalog, cacheTasks,
                 Clock.systemUTC(), mergeTasks);
         this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
                 validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor,

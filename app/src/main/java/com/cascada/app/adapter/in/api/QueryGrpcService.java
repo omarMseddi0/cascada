@@ -5,16 +5,14 @@ import com.cascada.app.adapter.in.model.api.ParquetResult;
 import com.cascada.app.concurrent.RequestExecutor;
 import com.cascada.app.model.config.ServerSettings;
 import com.cascada.cache.application.execution.QueryCancellation;
-import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase;
+import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
 import io.grpc.Status;
 import io.grpc.stub.*;
-import java.io.*;
-import java.nio.file.*;
 import java.util.concurrent.*;
 
-/** Streaming transport with bounded admission and gRPC readiness/cancellation handling. */
+/** Streams query responses with gRPC readiness and request cancellation handling. */
 public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBase implements AutoCloseable {
     private final ExecuteLogicalQueryUseCase queries;
     private final RequestExecutor requests;
@@ -30,15 +28,14 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
             return;
         }
         ServerCallStreamObserver<QueryChunk> stream = (ServerCallStreamObserver<QueryChunk>) observer;
-        Object ready = new Object();
-        Runnable wake = () -> { synchronized (ready) { ready.notifyAll(); } };
-        stream.setOnReadyHandler(wake);
+        var ready = new Semaphore(0);
+        stream.setOnReadyHandler(ready::release);
         QueryCancellation cancellation = new QueryCancellation();
         var submitted = new java.util.concurrent.atomic.AtomicReference<Future<?>>();
         Runnable cancel = () -> {
             cancellation.cancel();
             java.util.Optional.ofNullable(submitted.get()).ifPresent(task -> task.cancel(true));
-            wake.run();
+            ready.release();
         };
         stream.setOnCancelHandler(cancel);
         try {
@@ -50,7 +47,7 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
         }
     }
 
-    private void respond(QueryRequest request, ServerCallStreamObserver<QueryChunk> stream, Object ready) {
+    private void respond(QueryRequest request, ServerCallStreamObserver<QueryChunk> stream, Semaphore ready) {
         try {
             if (stream.isCancelled()) return;
             var result = queries.query(request.getSql());
@@ -91,19 +88,21 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
     }
 
     /** JSON and Parquet payloads are cut into about 64 KiB chunks, each sent when the client is ready. */
-    private static GrpcChunkOutputStream payloadStream(ServerCallStreamObserver<QueryChunk> stream, Object ready) {
+    private static GrpcChunkOutputStream payloadStream(ServerCallStreamObserver<QueryChunk> stream, Semaphore ready) {
         return new GrpcChunkOutputStream(payload -> send(stream, ready, QueryChunk.newBuilder().setPayload(payload).build()));
     }
 
-    private static void sendRows(ResultFrame frame, ServerCallStreamObserver<QueryChunk> stream, Object ready) {
+    private static void sendRows(ResultFrame frame, ServerCallStreamObserver<QueryChunk> stream, Semaphore ready) {
         var chunk = QueryChunk.newBuilder();
         int chunkBytes = 0;
         ProtobufCellWriter cells = new ProtobufCellWriter();
+        FrameColumnReader[] columns = ResultCells.readers(frame);
         for (int rowIndex = 0; rowIndex < frame.rowCount(); rowIndex++) {
             var row = Row.newBuilder();
-            for (int columnIndex = 0; columnIndex < frame.columnNames().size(); columnIndex++) {
+            if ((rowIndex & 1023) == 0) QueryCancellation.requireCurrentActive();
+            for (FrameColumnReader column : columns) {
                 cells.startCell();
-                ResultCells.visit(frame, rowIndex, columnIndex, cells);
+                ResultCells.visit(column, rowIndex, cells);
                 row.addCells(cells.cell());
             }
             var encoded = row.build();
@@ -115,14 +114,16 @@ public final class QueryGrpcService extends QueryServiceGrpc.QueryServiceImplBas
         }
         if (chunk.getRowsCount() > 0) send(stream, ready, chunk.build());
     }
-    private static void send(ServerCallStreamObserver<QueryChunk> stream, Object ready, QueryChunk chunk) {
-        synchronized (ready) {
-            while (!stream.isReady() && !stream.isCancelled()) {
-                try { ready.wait(1000); }
-                catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw Status.CANCELLED.asRuntimeException();
-                }
+    private static void send(ServerCallStreamObserver<QueryChunk> stream, Semaphore ready, QueryChunk chunk) {
+        // Consume old readiness signals before checking stream state. A later callback can wake
+        // the request even if it fires between the check and acquire.
+        ready.drainPermits();
+        while (!stream.isReady() && !stream.isCancelled()) {
+            try {
+                ready.acquire();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw Status.CANCELLED.asRuntimeException();
             }
         }
         if (stream.isCancelled()) throw Status.CANCELLED.asRuntimeException();

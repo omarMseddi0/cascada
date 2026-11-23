@@ -1,26 +1,53 @@
 package com.cascada.app.adapter.in.api;
 
-import java.math.BigDecimal;
-import org.apache.parquet.example.data.Group;
+import com.cascada.cache.domain.frame.FrameColumnReader;
+import java.util.Map;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.parquet.hadoop.api.WriteSupport;
 import org.apache.parquet.io.api.Binary;
+import org.apache.parquet.io.api.RecordConsumer;
+import org.apache.parquet.schema.MessageType;
 
-/** Writes each visited cell into the current Parquet record; NULL cells are simply left unset. */
-final class ParquetCellWriter implements ResultCellVisitor<RuntimeException> {
+/** Writes typed frame rows directly to Parquet's column writer. */
+final class ParquetCellWriter extends WriteSupport<Integer> {
+    private final MessageType schema;
+    private final FrameColumnReader[] columns;
     private final int[] scales;
-    private Group record;
-    private int field;
+    private final String[] names;
+    private RecordConsumer consumer;
 
-    ParquetCellWriter(int[] scales) { this.scales = scales; }
+    ParquetCellWriter(MessageType schema, FrameColumnReader[] columns, int[] scales) {
+        this.schema = schema;
+        this.columns = columns;
+        this.scales = scales;
+        names = schema.getFields().stream().map(field -> field.getName()).toArray(String[]::new);
+    }
 
-    void startRecord(Group record) { this.record = record; }
-    void field(int field) { this.field = field; }
-    Group record() { return record; }
+    @Override public WriteContext init(Configuration configuration) {
+        return new WriteContext(schema, Map.of());
+    }
 
-    public void nullValue() { }
-    public void longValue(long value) { record.add(field, value); }
-    public void doubleValue(double value) { record.add(field, value); }
-    public void stringValue(String value) { record.add(field, value); }
-    public void decimalValue(BigDecimal value) {
-        record.add(field, Binary.fromConstantByteArray(value.setScale(scales[field]).unscaledValue().toByteArray()));
+    @Override public void prepareForWrite(RecordConsumer recordConsumer) {
+        consumer = recordConsumer;
+    }
+
+    @Override public void write(Integer rowIndex) {
+        int row = rowIndex;
+        consumer.startMessage();
+        for (int index = 0; index < columns.length; index++) {
+            FrameColumnReader column = columns[index];
+            if (column.isNullAt(row)) continue;
+            String field = names[index];
+            consumer.startField(field, index);
+            switch (column.type()) {
+                case LONG -> consumer.addLong(column.longValue(row));
+                case DOUBLE -> consumer.addDouble(column.doubleValue(row));
+                case STRING -> consumer.addBinary(Binary.fromString(column.stringValue(row)));
+                case DECIMAL -> consumer.addBinary(Binary.fromConstantByteArray(
+                        column.decimalValue(row).setScale(scales[index]).unscaledValue().toByteArray()));
+            }
+            consumer.endField(field, index);
+        }
+        consumer.endMessage();
     }
 }

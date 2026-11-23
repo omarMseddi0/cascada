@@ -1,29 +1,32 @@
 package com.cascada.app.adapter.in.api;
 
+import com.cascada.cache.domain.frame.FrameColumnReader;
 import com.cascada.cache.domain.frame.ResultFrame;
-import java.math.BigDecimal;
+import java.util.Arrays;
 
-/**
- * One typed dispatch over a result cell for every response encoder (JSON, Parquet, protobuf rows). A
- * switch statement over the column type compiles even when a case is missing; this one fails loudly if
- * a new column type is ever added without an encoding.
- */
+/** Binds typed column readers once and dispatches cells for the HTTP and gRPC encoders. */
 final class ResultCells {
 
     private ResultCells() {
     }
 
-    static <E extends Exception> void visit(ResultFrame frame, int row, int column, ResultCellVisitor<E> visitor) throws E {
-        if (frame.isNullAt(row, column)) {
+    static FrameColumnReader[] readers(ResultFrame frame) {
+        FrameColumnReader[] readers = new FrameColumnReader[frame.columnNames().size()];
+        Arrays.setAll(readers, frame::columnReader);
+        return readers;
+    }
+
+    static <E extends Exception> void visit(FrameColumnReader column, int row, ResultCellVisitor<E> visitor)
+            throws E {
+        if (column.isNullAt(row)) {
             visitor.nullValue();
             return;
         }
-        switch (frame.columnTypeAt(column)) {
-            case LONG -> visitor.longValue(frame.longAt(row, column));
-            case DOUBLE -> visitor.doubleValue(frame.doubleAt(row, column));
-            case STRING -> visitor.stringValue(frame.stringAt(row, column));
-            case DECIMAL -> visitor.decimalValue((BigDecimal) frame.valueAt(row, column));
-            default -> throw new IllegalStateException("no encoding for column type " + frame.columnTypeAt(column));
+        switch (column.type()) {
+            case LONG -> visitor.longValue(column.longValue(row));
+            case DOUBLE -> visitor.doubleValue(column.doubleValue(row));
+            case STRING -> visitor.stringValue(column.stringValue(row));
+            case DECIMAL -> visitor.decimalValue(column.decimalValue(row));
         }
     }
 }

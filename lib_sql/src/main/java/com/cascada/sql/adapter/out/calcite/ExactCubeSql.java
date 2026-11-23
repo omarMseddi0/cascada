@@ -38,8 +38,7 @@ final class ExactCubeSql {
         return "SELECT " + String.join(", ", select) + " FROM " + relation(source)
                 + " WHERE " + time + " >= " + range.start() + " AND " + time + " < " + range.end()
                 + (query.predicate().isEmpty() ? "" : " AND " + query.predicate())
-                + (grain.isEmpty() ? "" : " GROUP BY " + String.join(", ", grain))
-                + " LIMIT " + (ExactCubeLimits.MAX_ROWS + 1);
+                + (grain.isEmpty() ? "" : " GROUP BY " + String.join(", ", grain));
     }
 
     static String outer(ExactCubeQuery query, ExactCubeSource source, ResultFrame frame) {

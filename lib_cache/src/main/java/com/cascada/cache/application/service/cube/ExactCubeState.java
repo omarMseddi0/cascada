@@ -36,7 +36,6 @@ final class ExactCubeState {
     }
 
     void add(ResultFrame frame, List<String> grain, Set<CubeMeasure> columns, Set<CubeMeasure> use) {
-        require(frame.rowCount() <= ExactCubeLimits.MAX_ROWS);
         var expected = new ArrayList<String>();
         for (int i = 0; i < grain.size(); i++) {
             expected.add("cube_k" + i);
@@ -77,7 +76,6 @@ final class ExactCubeState {
                 }
                 Map<List<Object>, CubeAccumulator> groups = measures.get(measure);
                 var aggregate = groups.computeIfAbsent(key, ignored -> new CubeAccumulator());
-                require(groups.size() <= ExactCubeLimits.MAX_ROWS);
                 aggregate.presence += present;
                 require(aggregate.presence <= MAX_PRESENT);
                 aggregate.value = Math.addExact(aggregate.value, value);

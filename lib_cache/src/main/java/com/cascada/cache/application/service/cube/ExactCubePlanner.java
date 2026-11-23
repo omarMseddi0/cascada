@@ -5,6 +5,7 @@ import com.cascada.cache.application.model.query.CubeCoverEdge;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
+import com.cascada.cache.domain.model.cube.ExactCubeLimits;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import java.util.ArrayList;
@@ -21,7 +22,6 @@ import java.util.TreeSet;
 /** Bounded forward graph. Keep alternative covers for joint pricing. */
 public final class ExactCubePlanner {
     static final int CANDIDATES = 64;
-    static final int MAX_BYTES = 8 * 1024 * 1024;
     static final long MAX_PLANNING_NANOS = 25_000_000L;
     private static final int ALTERNATIVES = 8;
 
@@ -119,7 +119,7 @@ public final class ExactCubePlanner {
                         cost += 1 + (double) (edge.interval().end() - edge.interval().start()) / bucketSeconds;
                     }
                 } else if (reads.add(edge.fragment().generation())) {
-                    cost += 0.02 + edge.fragment().decodedBytes() / (double) MAX_BYTES;
+                    cost += 0.02 + edge.fragment().decodedBytes() / (double) ExactCubeLimits.MAX_STATE_BYTES;
                 }
             }
         }

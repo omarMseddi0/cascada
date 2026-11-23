@@ -5,6 +5,7 @@ import com.cascada.cache.application.model.query.CubeCoverEdge;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
+import com.cascada.cache.domain.model.cube.ExactCubeLimits;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
@@ -109,7 +110,7 @@ final class ExactCubePlannerTest {
     }
 
     private static double cacheCost(ExactCubeFragment fragment) {
-        return 0.02 + fragment.decodedBytes() / (double) ExactCubePlanner.MAX_BYTES;
+        return 0.02 + fragment.decodedBytes() / (double) ExactCubeLimits.MAX_STATE_BYTES;
     }
 
     private static ExactCubeQuery query(Set<CubeMeasure> measures, List<String> grain, CubeInterval interval) {

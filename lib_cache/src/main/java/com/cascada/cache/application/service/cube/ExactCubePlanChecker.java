@@ -19,9 +19,9 @@ final class ExactCubePlanChecker {
                 && fragment.grain().containsAll(query.grain())
                 && fragment.grain().size() <= 4 && new HashSet<>(fragment.grain()).size() == fragment.grain().size()
                 && fragment.grain().stream().allMatch(key -> validKeyType(population.source().types().get(key)))
-                && fragment.rows() >= 0 && fragment.rows() <= ExactCubeLimits.MAX_ROWS
-                && fragment.compressedBytes() > 0 && fragment.compressedBytes() <= ExactCubePlanner.MAX_BYTES
-                && fragment.decodedBytes() > 0 && fragment.decodedBytes() <= ExactCubePlanner.MAX_BYTES;
+                && fragment.rows() >= 0
+                && fragment.compressedBytes() > 0 && fragment.compressedBytes() <= ExactCubeLimits.MAX_STATE_BYTES
+                && fragment.decodedBytes() > 0 && fragment.decodedBytes() <= ExactCubeLimits.MAX_STATE_BYTES;
     }
 
     static boolean aligned(CubeInterval interval, long width) {
@@ -55,8 +55,7 @@ final class ExactCubePlanChecker {
             if (cursor != query.interval().end()) return false;
         }
         return !reads.isEmpty() && residuals <= 8 && reads.size() <= 16
-                && reads.values().stream().mapToLong(ExactCubeFragment::decodedBytes).sum() <= ExactCubePlanner.MAX_BYTES
-                && reads.values().stream().mapToLong(ExactCubeFragment::compressedBytes).sum() <= ExactCubePlanner.MAX_BYTES
-                && reads.values().stream().mapToLong(ExactCubeFragment::rows).sum() <= ExactCubeLimits.MAX_ROWS;
+                && reads.values().stream().mapToLong(ExactCubeFragment::decodedBytes).sum() <= ExactCubeLimits.MAX_STATE_BYTES
+                && reads.values().stream().mapToLong(ExactCubeFragment::compressedBytes).sum() <= ExactCubeLimits.MAX_STATE_BYTES;
     }
 }

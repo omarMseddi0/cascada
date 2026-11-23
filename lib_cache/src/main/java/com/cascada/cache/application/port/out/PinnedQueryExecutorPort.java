@@ -9,4 +9,7 @@ public interface PinnedQueryExecutorPort extends QueryExecutorPort {
     Optional<ExactCubeSource> bind(String registeredPath, String accessScope);
 
     ResultFrame executePinned(ExactCubeSource binding, String physicalSql);
+
+    /** Collect exact aggregate state within a byte budget or decline the rewrite. */
+    ResultFrame executePinnedState(ExactCubeSource binding, String physicalSql, long byteBudget);
 }

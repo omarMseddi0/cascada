@@ -535,29 +535,39 @@ class ExactCubeDifferentialIntegrationTest {
         throw new AssertionError("expected a Spark SQL error");
     }
 
-    @Test void wideHighCardinalityStateDeclinesBeforePublication() {
+    @Test void wideStateUsesTheByteBudgetAcrossTheFormerRowCutoff() {
         String original = path;
         path = scratch.resolve("wide-facts").toUri().toString();
         spark.sql("""
-                SELECT CAST(0 AS BIGINT) AS ts,
+                SELECT CASE WHEN id < 12000 THEN 0L ELSE 86400L END AS ts,
                        concat(lpad(CAST(id AS STRING), 8, '0'), repeat('x', 110)) AS region,
                        'skewed' AS device, CAST(pmod(id, 17) - 8 AS INT) AS amount
-                FROM range(12000)
+                FROM range(48000)
                 """).write().format("delta").save(path);
-        String sql = aggregate("SUM", "region", 0, 1, "");
+        String fits = aggregate("SUM", "region", 0, 1, "");
+        String tooWide = aggregate("SUM", "region", 1, 2, "");
         try (var factory = factory(SCOPE, true)) {
+            var entry = factory.executeLogicalQueryUseCase();
             tracked.calls.clear();
-            var result = factory.executeLogicalQueryUseCase().query(sql);
-            check(sql, 0, false, result, "pinned-spark");
-            assertThat(result.frame().rowCount()).isEqualTo(12_000);
-            assertThat(result.exactCubeTrace().reason()).startsWith("recovery:");
-            assertThat(tracked.calls).hasSize(2);
-            assertThat(tracked.calls.getFirst()).endsWith("LIMIT 8193");
-            assertThat(tracked.calls.getLast()).doesNotContain("LIMIT");
+            check(fits, 0, false, entry.query(fits), "pinned-build");
+            assertThat(tracked.calls).singleElement().asString().doesNotContain("LIMIT");
+            tracked.calls.clear();
+            var covered = entry.query(fits);
+            check(fits, 0, false, covered, "exact-cube");
+            assertThat(covered.frame().rowCount()).isEqualTo(12_000);
+            assertThat(covered.exactCubeTrace().fragments()).singleElement()
+                    .satisfies(fragment -> assertThat(fragment.rows()).isEqualTo(12_000));
+            assertThat(tracked.calls).isEmpty();
+
+            var declined = entry.query(tooWide);
+            check(tooWide, 0, false, declined, "pinned-spark");
+            assertThat(declined.frame().rowCount()).isEqualTo(36_000);
+            assertThat(declined.exactCubeTrace().reason()).isEqualTo("recovery:CubeRollUpUnavailableException");
+            assertThat(tracked.calls).hasSize(2).allSatisfy(sql -> assertThat(sql).doesNotContain("LIMIT"));
         } finally {
             path = original;
         }
-        System.out.println("EXACT_CUBE_WIDE declined=true distinctGroups=12000 keyBytes=118");
+        System.out.println("EXACT_CUBE_WIDE cachedGroups=12000 byteBudgetDeclinedGroups=36000 keyBytes=118");
     }
 
     private CascadaEngineFactory factory(String scope, boolean enabled) {
@@ -640,10 +650,19 @@ class ExactCubeDifferentialIntegrationTest {
         }
 
         @Override public ResultFrame executePinned(ExactCubeSource source, String sql) {
+            trackPinned(sql);
+            return spark.executePinned(source, sql);
+        }
+
+        @Override public ResultFrame executePinnedState(ExactCubeSource source, String sql, long byteBudget) {
+            trackPinned(sql);
+            return spark.executePinnedState(source, sql, byteBudget);
+        }
+
+        private void trackPinned(String sql) {
             Runnable hook = beforePinned.getAndSet(null);
             if (hook != null) hook.run();
             calls.add(sql);
-            return spark.executePinned(source, sql);
         }
 
         @Override public ResultFrame execute(String sql) {

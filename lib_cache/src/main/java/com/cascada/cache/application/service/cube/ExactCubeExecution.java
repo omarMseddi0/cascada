@@ -10,6 +10,7 @@ import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
+import com.cascada.cache.domain.model.cube.ExactCubeLimits;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
@@ -161,7 +162,7 @@ public final class ExactCubeExecution {
         for (var entry : residuals.entrySet()) {
             String residual = sql.stateStatement(query, source, entry.getKey(), entry.getValue());
             submitted.add(residual);
-            state.add(executor.executePinned(source, residual), query.grain(), entry.getValue(), entry.getValue());
+            state.add(executor.executePinnedState(source, residual, ExactCubeLimits.MAX_STATE_BYTES), query.grain(), entry.getValue(), entry.getValue());
         }
         var result = state.finish();
         String outer = null;
@@ -177,7 +178,7 @@ public final class ExactCubeExecution {
         String fence = store.publicationFence();
         var source = population.source();
         String statement = sql.stateStatement(query, source, query.interval(), query.measures());
-        var frame = executor.executePinned(source, statement);
+        var frame = executor.executePinnedState(source, statement, ExactCubeLimits.MAX_STATE_BYTES);
         var state = new ExactCubeState(query, source);
         state.add(frame, query.grain(), query.measures(), query.measures());
         var answer = state.finish();

@@ -5,6 +5,7 @@ import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.application.port.out.ExactCubeStorePort;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
+import com.cascada.cache.domain.model.cube.ExactCubeLimits;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
@@ -30,7 +31,6 @@ import java.util.stream.Collectors;
 /** Immutable payloads become visible only through the scoped manifest index. */
 final class ValkeyExactCubeStore implements ExactCubeStorePort {
     static final String PREFIX = "QC:V4:exact:v1:";
-    private static final int MAX_BYTES = 8 * 1024 * 1024;
     private static final int MAX_INDEX_ENTRIES = 4096;
     private static final String PUBLISH = """
             if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 0 end
@@ -87,8 +87,8 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
     public Optional<ResultFrame> read(ExactCubeFragment manifest) {
         QueryCancellation.requireCurrentActive();
         int separator = manifest.generation().indexOf('/');
-        if (separator < 0 || manifest.compressedBytes() <= 0 || manifest.compressedBytes() > MAX_BYTES
-                || manifest.decodedBytes() <= 0 || manifest.decodedBytes() > MAX_BYTES) return Optional.empty();
+        if (separator < 0 || manifest.compressedBytes() <= 0 || manifest.compressedBytes() > ExactCubeLimits.MAX_STATE_BYTES
+                || manifest.decodedBytes() <= 0 || manifest.decodedBytes() > ExactCubeLimits.MAX_STATE_BYTES) return Optional.empty();
         String generationFence = manifest.generation().substring(0, separator);
         byte[] payload = commands.eval(READ, ScriptOutputType.VALUE,
                 new byte[][] {frame(manifest.generation()), fenceKey, index(manifest.population(), generationFence)},
@@ -106,7 +106,7 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
         QueryCancellation.requireCurrentActive();
         byte[] payload = serializer.serialize(state);
         int expanded = ByteBuffer.wrap(payload).getInt();
-        if (payload.length > MAX_BYTES || expanded <= 0 || expanded > MAX_BYTES) return;
+        if (payload.length > ExactCubeLimits.MAX_STATE_BYTES || expanded <= 0 || expanded > ExactCubeLimits.MAX_STATE_BYTES) return;
         String generation = publicationFence + "/" + UUID.randomUUID();
         var manifest = new ExactCubeFragment(generation, population, interval, grain, measures,
                 state.rowCount(), payload.length, expanded, digest(payload));

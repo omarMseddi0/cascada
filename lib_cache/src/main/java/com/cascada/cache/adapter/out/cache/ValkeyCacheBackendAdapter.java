@@ -6,6 +6,7 @@ import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.model.cancellation.CancellationRegistration;
 import com.cascada.cache.application.port.out.CacheBackendPort;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
+import com.cascada.cache.application.port.out.ExactCubeStorePort;
 import com.cascada.cache.domain.admin.CacheScope;
 import com.cascada.cache.domain.model.admin.CacheSizeReport;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -304,6 +305,11 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         return Optional.ofNullable(revision).map(value -> new String(value, StandardCharsets.UTF_8));
     }
 
+    public ExactCubeStorePort exactCubeStore() {
+        return new ValkeyExactCubeStore(connection.sync(), serializer,
+                () -> warmingGeneration().orElseThrow(), WARMING_GENERATION_KEY);
+    }
+
     @Override public Optional<Duration> remainingTimeToLive(List<String> keys) {
         long started = System.nanoTime();
         List<RedisFuture<Long>> pending = keys.stream().map(key -> connection.async().pttl(toBytes(key))).toList();
@@ -421,8 +427,8 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     /**
      * Purges every key in {@code scope} using a {@code SCAN} + {@code DEL} sweep (never the
      * O(N)-blocking {@code KEYS}/{@code FLUSHDB}, which would stall the shard and ignore key prefixes).
-     * Each scanned key is checked against the requested scope before deletion; a flush-all scope matches
-     * only well-formed Cascada bucket keys, so other keys in a shared database are preserved.
+     * Each scanned key is checked against the requested scope before deletion. Flush-all also removes
+     * exact-cube payloads and manifests while preserving keys outside the Cascada cache namespaces.
      */
     @Override
     public long flush(CacheScope scope) {
@@ -435,11 +441,15 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
         ScanCursor cursor = ScanCursor.INITIAL;
         do {
             KeyScanCursor<byte[]> page = sync.scan(cursor, scanArgs);
-            List<byte[]> keys = page.getKeys().stream()
-                    .filter(key -> scope.matches(new String(key, StandardCharsets.UTF_8))).toList();
-            if (!keys.isEmpty()) {
-                purged += sync.del(keys.toArray(new byte[0][]));
+            List<byte[]> buckets = new ArrayList<>();
+            List<byte[]> exactKeys = new ArrayList<>();
+            for (byte[] key : page.getKeys()) {
+                String name = new String(key, StandardCharsets.UTF_8);
+                if (scope.matches(name)) buckets.add(key);
+                if (scope.isEverything() && name.startsWith(ValkeyExactCubeStore.PREFIX)) exactKeys.add(key);
             }
+            if (!buckets.isEmpty()) purged += sync.del(buckets.toArray(byte[][]::new));
+            if (!exactKeys.isEmpty()) sync.del(exactKeys.toArray(byte[][]::new));
             cursor = page;
         } while (!cursor.isFinished());
         sync.set(toBytes(REVISION_KEY), newToken());

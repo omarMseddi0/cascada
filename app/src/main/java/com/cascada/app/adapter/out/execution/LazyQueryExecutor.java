@@ -1,13 +1,16 @@
 package com.cascada.app.adapter.out.execution;
 
 import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
+import com.cascada.cache.domain.model.cube.ExactCubeSource;
+import java.util.Optional;
 import com.cascada.cache.domain.frame.ResultFrame;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
 
 /** Starts the execution tier only when a query or warming operation needs it. */
-public final class LazyQueryExecutor implements QueryExecutorPort, AutoCloseable {
+public final class LazyQueryExecutor implements PinnedQueryExecutorPort, AutoCloseable {
     private final Supplier<? extends QueryExecutorPort> factory;
     private QueryExecutorPort delegate;
     private final java.util.concurrent.locks.ReentrantLock initialization = new java.util.concurrent.locks.ReentrantLock();
@@ -23,6 +26,30 @@ public final class LazyQueryExecutor implements QueryExecutorPort, AutoCloseable
         lifecycle.readLock().lock();
         try {
             return initializedExecutor().execute(physicalSql);
+        } finally {
+            lifecycle.readLock().unlock();
+        }
+    }
+
+    @Override
+    public Optional<ExactCubeSource> bind(String path, String accessScope) {
+        lifecycle.readLock().lock();
+        try {
+            return initializedExecutor() instanceof PinnedQueryExecutorPort pinned
+                    ? pinned.bind(path, accessScope) : Optional.empty();
+        } finally {
+            lifecycle.readLock().unlock();
+        }
+    }
+
+    @Override
+    public ResultFrame executePinned(ExactCubeSource binding, String physicalSql) {
+        lifecycle.readLock().lock();
+        try {
+            if (initializedExecutor() instanceof PinnedQueryExecutorPort pinned) {
+                return pinned.executePinned(binding, physicalSql);
+            }
+            throw new IllegalStateException("executor does not support pinned Delta reads");
         } finally {
             lifecycle.readLock().unlock();
         }

@@ -92,11 +92,12 @@ public final class CalciteSql {
      * quoted. The original parser failure is reported when the retry does not help.
      */
     private static SqlNode withReservedIdentifierRetry(String text, CalciteParse parse) throws SqlParseException {
+        String normalized = normalizeNullSafeEquality(text);
         try {
-            return parse.parse(text);
+            return parse.parse(normalized);
         } catch (SqlParseException notParseable) {
-            String quoted = quoteReservedTimestampIdentifiers(text);
-            if (!quoted.equals(text)) {
+            String quoted = quoteReservedTimestampIdentifiers(normalized);
+            if (!quoted.equals(normalized)) {
                 try {
                     return parse.parse(quoted);
                 } catch (SqlParseException stillNotParseable) {
@@ -105,6 +106,22 @@ public final class CalciteSql {
             }
             throw notParseable;
         }
+    }
+
+    /** Spark's null-safe equality has a standard SQL spelling that Calcite also accepts. */
+    private static String normalizeNullSafeEquality(String sql) {
+        if (!sql.contains("<=>")) return sql;
+        boolean[] code = SqlTextScanner.codePositions(sql);
+        StringBuilder normalized = new StringBuilder(sql.length());
+        for (int i = 0; i < sql.length(); i++) {
+            if (sql.startsWith("<=>", i) && code[i] && code[i + 1] && code[i + 2]) {
+                normalized.append(" IS NOT DISTINCT FROM ");
+                i += 2;
+            } else {
+                normalized.append(sql.charAt(i));
+            }
+        }
+        return normalized.toString();
     }
 
     /** Calcite's MySQL lexer treats TIMESTAMP (and a bare VALUE) as reserved, including in column refs. */

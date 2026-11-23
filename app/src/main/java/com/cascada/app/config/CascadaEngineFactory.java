@@ -20,6 +20,10 @@ import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
+import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
+import com.cascada.cache.application.service.cube.ExactCubeExecution;
+import com.cascada.sql.adapter.out.calcite.ExactCubeSqlAdapter;
+import java.time.Duration;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
 import com.cascada.cache.application.service.CacheAdministrationService;
 import com.cascada.cache.application.service.CacheExecutionEngine;
@@ -83,6 +87,12 @@ public final class CascadaEngineFactory implements AutoCloseable {
     }
 
     public CascadaEngineFactory(EngineSettings settings, QueryExecutorPort queryExecutor, ApplicationSettings applicationSettings) {
+        this(settings, queryExecutor, applicationSettings, Boolean.parseBoolean(System.getenv("CASCADA_EXACT_CUBE_ENABLED")),
+                System.getenv().getOrDefault("CASCADA_EXACT_CUBE_ACCESS_SCOPE", "registered-source/full-table/v1"));
+    }
+
+    public CascadaEngineFactory(EngineSettings settings, QueryExecutorPort queryExecutor, ApplicationSettings applicationSettings,
+                                boolean exactCubeEnabled, String accessScope) {
         this.applicationSettings = Objects.requireNonNull(applicationSettings);
         this.settings = Objects.requireNonNull(settings, "settings");
         this.queryExecutor = Objects.requireNonNull(queryExecutor, "queryExecutor");
@@ -120,8 +130,16 @@ public final class CascadaEngineFactory implements AutoCloseable {
         this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
                 validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor,
                 applicationSettings.warming().enabled() ? warmingOrchestrator : null);
+        // The current registered-source deployment grants the same table visibility to every SQL caller.
+        // Deployments with different effective policies must configure separate scope identities.
+        ExactCubeExecution exactCube = exactCubeEnabled && queryExecutor instanceof PinnedQueryExecutorPort pinned
+                && accessScope != null && !accessScope.isBlank()
+                ? new ExactCubeExecution(new ExactCubeSqlAdapter(batchPaths(),
+                        settings.cacheExecution().timeColumnName()), cacheBackend.exactCubeStore(), pinned,
+                        accessScope, Clock.systemUTC(), settings.cacheExecution().bucketSeconds(), Duration.ofHours(1))
+                : null;
         this.logicalQueryUseCase = new ExecuteLogicalQueryService(createTranslator(), createCanonicalizer(),
-                cachedQueryUseCase, queryExecutor);
+                cachedQueryUseCase, queryExecutor, exactCube);
         this.administrationService = new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
         mergeTasks.prestartAllCoreThreads();
         decodeTasks.prestartAllCoreThreads();
@@ -185,12 +203,14 @@ public final class CascadaEngineFactory implements AutoCloseable {
 
     /** Calcite canonicalisation, behind the cache's port. */
     private SqlCanonicalizerPort createCanonicalizer() {
-        Set<String> batchPaths = applicationSettings.tables().isEmpty()
-                ? Set.of(settings.mainTablePath())
-                : applicationSettings.tables().stream().filter(table -> table.sourceType().equals("HOT_BATCH"))
-                        .map(TableSettings::deltaPath).collect(Collectors.toSet());
-        return new CalciteCanonicalObjectFactory(timeDimensions(), batchPaths,
+        return new CalciteCanonicalObjectFactory(timeDimensions(), batchPaths(),
                 settings.cacheExecution().fixedStepSeconds());
+    }
+
+    private Set<String> batchPaths() {
+        return applicationSettings.tables().isEmpty() ? Set.of(settings.mainTablePath())
+                : applicationSettings.tables().stream().filter(table -> table.sourceType().equals("HOT_BATCH"))
+                        .map(TableSettings::deltaPath).collect(Collectors.toUnmodifiableSet());
     }
 
     /**

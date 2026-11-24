@@ -22,7 +22,6 @@ import org.apache.calcite.sql.util.SqlShuttle;
 
 /** Finds independent aggregate relations while leaving resolution of the surrounding SQL to Spark. */
 final class ExactCubeRelations {
-    private static final int MAX_SELECTS = 32;
     private final SqlNode root;
     private final String sourceToken;
     private final Map<SqlSelect, Map<String, SqlWithItem>> scopes = new IdentityHashMap<>();
@@ -39,7 +38,6 @@ final class ExactCubeRelations {
         root.accept(new SqlShuttle() {
             private final Set<SqlNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
             private Map<String, SqlWithItem> scope = Map.of();
-            private int selects;
 
             @Override public SqlNode visit(SqlCall call) {
                 if (call instanceof SqlWith with) {
@@ -59,7 +57,6 @@ final class ExactCubeRelations {
                 if (call instanceof SqlOrderBy order) ordered.add(order.query);
                 if (call instanceof SqlSelect select) {
                     if (!visited.add(select)) return call;
-                    require(++selects <= MAX_SELECTS);
                     scopes.put(select, scope);
                     if (!ordered.contains(select) && select.getSelectList().stream().anyMatch(SqlTrees::containsAggregate)) {
                         candidates.add(select);
@@ -89,7 +86,7 @@ final class ExactCubeRelations {
 
     String sourcePath(SqlSelect aggregate, java.util.function.BiConsumer<SqlNode, String> collectFilter) {
         SqlSelect select = aggregate;
-        for (int depth = 0; depth < MAX_SELECTS; depth++) {
+        while (true) {
             SqlNode from = select.getFrom();
             SqlNode input = SqlTrees.stripAlias(from);
             String qualifier = null;
@@ -112,7 +109,6 @@ final class ExactCubeRelations {
             require(input instanceof SqlSelect && transparent((SqlSelect) input));
             select = (SqlSelect) input;
         }
-        throw new IllegalArgumentException("aggregate input exceeds query graph budget");
     }
 
     private static boolean transparent(SqlSelect select) {
@@ -189,6 +185,6 @@ final class ExactCubeRelations {
     }
 
     private static void require(boolean condition) {
-        if (!condition) throw new IllegalArgumentException("unbound or over-budget query graph");
+        if (!condition) throw new IllegalArgumentException("unbound query graph");
     }
 }

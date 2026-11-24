@@ -162,7 +162,6 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
         var groupAliases = new HashSet<String>();
         var grain = new ArrayList<String>();
         if (inner.getGroup() != null) {
-            require(inner.getGroup().size() <= 16);
             for (SqlNode key : inner.getGroup()) {
                 String name = column(key, qualifier);
                 if (((SqlIdentifier) key).isSimple() && projectedKeys.containsKey(name)) {
@@ -295,7 +294,7 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
                 if (call.operand(1) instanceof SqlCharStringLiteral literal
                         && literal.getNlsString().getCharsetName() == null
                         && literal.getNlsString().getCollation() == null
-                        && literal.getNlsString().getValue().matches("[A-Za-z0-9 _.:-]{0,64}")) {
+                        && literal.getNlsString().getValue().matches("[A-Za-z0-9 _.:-]*")) {
                     yield new CubeKeyFilter(id.getSimple(), CubeKeyFilterOperator.STRING_EQUALS,
                             literal.getNlsString().getValue());
                 }

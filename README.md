@@ -31,7 +31,7 @@ The reactor targets Java 21, Spark 4.1.1, Scala 2.13, and Delta Lake 4.1.0. The 
 
 Set `CASCADA_EXACT_CUBE_ENABLED=true` to opt in. The exact route uses Valkey manifests scoped to a registered Delta table, its pinned version, SQL semantics, and the configured `CASCADA_EXACT_CUBE_ACCESS_SCOPE`. The default scope assumes all query callers have the same table visibility.
 
-Supported prior queries publish complete integral `SUM` and `COUNT(column)` state. A later ordinary SQL request can roll the state up or combine it with a version-pinned Spark residual, including to reconstruct `AVG`. A supported aggregate can also supply a typed relation inside a CTE, join, or subquery. Filter narrowing requires the relevant key to survive in the stored grain. The original query runs through the appropriate Spark or existing cache route when a proof or resource budget fails.
+Supported prior queries publish complete integral `SUM` and `COUNT(column)` state. A later ordinary SQL request can roll the state up or combine it with a version-pinned Spark residual, including to reconstruct `AVG`. A supported aggregate can also supply a typed relation inside a CTE, join, or subquery. Filter narrowing requires the relevant key to survive in the stored grain. The original query runs through the appropriate Spark or existing cache route when a proof fails.
 
 For the qualification suite, use JDK 21 and an isolated disposable Valkey database:
 

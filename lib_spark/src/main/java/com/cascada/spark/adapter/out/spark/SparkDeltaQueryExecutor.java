@@ -117,10 +117,6 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
     @Override
     public ResultFrame executeWithAggregate(ExactCubeSource binding, String sql, String relation,
                                             ResultFrame frame, List<String> types) {
-        // A local Spark relation is driver-resident. Reserve headroom for Spark's copy of the rows.
-        if ((long) frame.rowCount() * types.size() > 262_144) {
-            throw new IllegalArgumentException("completed aggregate exceeds local relation budget");
-        }
         var fields = new ArrayList<StructField>(types.size());
         for (int column = 0; column < types.size(); column++) {
             fields.add(DataTypes.createStructField(frame.columnNames().get(column), switch (types.get(column)) {
@@ -134,7 +130,6 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
             }, true));
         }
         var rows = new ArrayList<Row>(frame.rowCount());
-        long stringBytes = 0;
         for (int row = 0; row < frame.rowCount(); row++) {
             QueryCancellation.requireCurrentActive();
             var cells = new Object[types.size()];
@@ -147,9 +142,6 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
                         case "int" -> Integer.valueOf(number.intValue());
                         default -> number;
                     };
-                } else if (value instanceof String string) {
-                    stringBytes += 3L * string.length();
-                    if (stringBytes > (8L << 20)) throw new IllegalArgumentException("local aggregate strings exceed budget");
                 }
                 cells[column] = value;
             }

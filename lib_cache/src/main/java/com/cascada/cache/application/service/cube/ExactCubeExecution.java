@@ -21,18 +21,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 /** Coordinates the opt-in, snapshot-bound route at logical SQL admission. */
 public final class ExactCubeExecution {
     private static final Logger LOGGER = Logger.getLogger(ExactCubeExecution.class.getName());
-    private static final int MAX_ENUMERATED_EDGES = 50_000;
-    private static final int CACHE_MEMORY_UNITS = 64;
-    private static final int MIB = 1 << 20;
-    private static final int MAX_FETCH_BATCH = 4;
-    private static final int MAX_FETCH_DECODED_BYTES = 8 * MIB;
     private static final Set<String> INTEGRALS = Set.of("tinyint", "smallint", "int");
     private final ExactCubeSqlPort sql;
     private final ExactCubeStorePort store;
@@ -41,7 +35,6 @@ public final class ExactCubeExecution {
     private final Clock clock;
     private final long bucketSeconds;
     private final Duration ttl;
-    private final Semaphore cacheMemory = new Semaphore(CACHE_MEMORY_UNITS);
 
     public ExactCubeExecution(ExactCubeSqlPort sql, ExactCubeStorePort store, PinnedQueryExecutorPort executor,
                               String accessScope, Clock clock, long bucketSeconds, Duration ttl) {
@@ -125,36 +118,19 @@ public final class ExactCubeExecution {
                 candidates.addAll(store.candidates(ExactCubePlanChecker.unfiltered(population), query.interval(),
                         List.copyOf(grain), query.measures()));
             }
-            var missing = new ArrayList<ExactCubeFragment>(1);
-            for (int attempt = 0; attempt < 2; attempt++) {
-                var selected = ExactCubePlanner.select(query, population, candidates, bucketSeconds, MAX_ENUMERATED_EDGES);
-                planningNanos += System.nanoTime() - planningStarted;
-                if (selected.isEmpty()) break;
-                int units = Math.toIntExact((decodedBytes(selected.get()) + MIB - 1) / MIB);
-                if (!cacheMemory.tryAcquire(units)) {
-                    failureReason = "cache-decode-budget";
-                    break;
-                }
-                try {
-                    var answer = compose(query, population, selected.get(), reads, submitted, missing, planningNanos);
-                    if (answer != null) return answer;
-                } finally {
-                    cacheMemory.release(units);
-                }
-                candidates.removeAll(missing);
-                planningStarted = System.nanoTime();
+            var selected = ExactCubePlanner.select(query, population, candidates, bucketSeconds);
+            planningNanos = System.nanoTime() - planningStarted;
+            if (selected.isPresent()) {
+                return compose(query, population, selected.get(), reads, submitted, planningNanos);
             }
-            if (failureReason == null && !missing.isEmpty()) failureReason = "recovery:missing-generation";
-            if (failureReason == null) {
-                boolean alreadyPublished = candidates.stream().anyMatch(fragment ->
-                        fragment.population().equals(population) && fragment.interval().equals(query.interval())
-                                && fragment.grain().equals(query.grain())
-                                && fragment.measures().containsAll(query.measures()));
-                if (!alreadyPublished && query.outerSql() == null && query.limit() == null) {
-                    return build(query, population, planningNanos);
-                }
-                failureReason = candidates.isEmpty() ? "no-manifest" : "no-beneficial-verified-cover";
+            boolean alreadyPublished = candidates.stream().anyMatch(fragment ->
+                    fragment.population().equals(population) && fragment.interval().equals(query.interval())
+                            && fragment.grain().equals(query.grain())
+                            && fragment.measures().containsAll(query.measures()));
+            if (!alreadyPublished && query.outerSql() == null && query.limit() == null) {
+                return build(query, population, planningNanos);
             }
+            failureReason = candidates.isEmpty() ? "no-manifest" : "no-beneficial-verified-cover";
         } catch (Exception failure) {
             QueryCancellation.rethrowIfCancelled(failure);
             failureReason = "recovery:" + failure.getClass().getSimpleName();
@@ -163,14 +139,8 @@ public final class ExactCubeExecution {
         return direct(query, source, failureReason, reads, submitted, planningNanos);
     }
 
-    private static long decodedBytes(ExactCubePlan plan) {
-        return plan.covers().values().stream().flatMap(List::stream).map(edge -> edge.fragment())
-                .filter(java.util.Objects::nonNull).distinct().mapToLong(ExactCubeFragment::decodedBytes).sum();
-    }
-
     private QueryResult compose(ExactCubeQuery query, CubePopulation population, ExactCubePlan plan,
-                                List<ExactCubeFragment> reads, List<String> submitted,
-                                List<ExactCubeFragment> missing, long planningNanos) {
+                                List<ExactCubeFragment> reads, List<String> submitted, long planningNanos) {
         if (!ExactCubePlanChecker.valid(query, population, plan, bucketSeconds)) {
             throw new IllegalStateException("invalid cube cover");
         }
@@ -186,32 +156,15 @@ public final class ExactCubeExecution {
                 }
             }
         }
-        var fragments = new ArrayList<>(cache.keySet());
-        for (int offset = 0; offset < fragments.size();) {
+        for (var entry : cache.entrySet()) {
             QueryCancellation.requireCurrentActive();
-            int end = offset + 1;
-            long batchBytes = fragments.get(offset).decodedBytes();
-            while (end < fragments.size() && end - offset < MAX_FETCH_BATCH
-                    && batchBytes + fragments.get(end).decodedBytes() <= MAX_FETCH_DECODED_BYTES) {
-                batchBytes += fragments.get(end++).decodedBytes();
-            }
-            var batch = fragments.subList(offset, end);
-            var frames = store.readBatch(batch);
-            if (frames.size() != batch.size()) throw new IllegalStateException("invalid fragment batch size");
-            int previousMisses = missing.size();
-            for (int i = 0; i < batch.size(); i++) {
-                if (frames.get(i).isPresent()) reads.add(batch.get(i));
-                else missing.add(batch.get(i));
-            }
-            if (missing.size() != previousMisses) return null;
-            for (int i = 0; i < batch.size(); i++) {
-                var fragment = batch.get(i);
-                var frame = frames.get(i);
-                if (frame.get().rowCount() != fragment.rows()) throw new IllegalStateException("manifest row count mismatch");
-                state.add(frame.get(), fragment.grain(), fragment.measures(), cache.get(fragment),
-                        fragment.population().equals(population) ? List.of() : query.keyFilters());
-            }
-            offset = end;
+            var fragment = entry.getKey();
+            var frame = store.read(fragment).orElseThrow(() ->
+                    new IllegalStateException("missing or corrupt generation " + fragment.generation()));
+            reads.add(fragment);
+            if (frame.rowCount() != fragment.rows()) throw new IllegalStateException("manifest row count mismatch");
+            state.add(frame, fragment.grain(), fragment.measures(), entry.getValue(),
+                    fragment.population().equals(population) ? List.of() : query.keyFilters());
         }
         var source = population.source();
         for (var entry : residuals.entrySet()) {
@@ -231,8 +184,7 @@ public final class ExactCubeExecution {
             result = executor.executeWithAggregate(source, outer, query.outerRelation(), result, types);
         }
         QueryCancellation.requireCurrentActive();
-        return new QueryResult(result, true, trace("exact-cube", missing.isEmpty() ? "verified" : "verified-after-miss",
-                source, reads, submitted, outer, planningNanos));
+        return new QueryResult(result, true, trace("exact-cube", "verified", source, reads, submitted, outer, planningNanos));
     }
 
     private QueryResult build(ExactCubeQuery query, CubePopulation population, long planningNanos) {

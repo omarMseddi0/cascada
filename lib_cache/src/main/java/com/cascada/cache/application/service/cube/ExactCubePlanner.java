@@ -28,12 +28,6 @@ public final class ExactCubePlanner {
 
     public static Optional<ExactCubePlan> select(ExactCubeQuery query, CubePopulation population,
                                                  List<ExactCubeFragment> candidates, long bucketSeconds) {
-        return select(query, population, candidates, bucketSeconds, Long.MAX_VALUE);
-    }
-
-    static Optional<ExactCubePlan> select(ExactCubeQuery query, CubePopulation population,
-                                          List<ExactCubeFragment> candidates, long bucketSeconds, long edgeBudget) {
-        long work = 0;
         var ingredients = query.measures().stream().sorted().toList();
         if (ingredients.isEmpty()) return Optional.empty();
         long end = query.interval().end();
@@ -44,7 +38,6 @@ public final class ExactCubePlanner {
         // Keep distinct measure sets so a shared read is still available to the optimizer.
         var byStart = new HashMap<Long, Map<CubeInterval, Map<Set<CubeMeasure>, ExactCubeFragment>>>();
         for (var fragment : candidates) {
-            if (++work > edgeBudget) return Optional.empty();
             QueryCancellation.requireCurrentActive();
             if (!ExactCubePlanChecker.compatible(query, population, fragment, bucketSeconds)
                     || Collections.disjoint(fragment.measures(), query.measures())) continue;
@@ -80,13 +73,11 @@ public final class ExactCubePlanner {
             long at = Math.min(first, second);
             for (var group : byStart.getOrDefault(at, Map.of()).values()) {
                 for (var fragment : group.values()) {
-                    if (++work > edgeBudget) return Optional.empty();
                     advance(step, new CubeCoverEdge(fragment.interval(), fragment), ingredients,
                             fragmentCost(fragment), directCost, best, queue);
                 }
             }
             for (long stop : starts.tailSet(at, false)) {
-                if (++work > edgeBudget) return Optional.empty();
                 var interval = new CubeInterval(at, stop);
                 double cost = scanCost(interval, bucketSeconds);
                 if (step.cost() + cost >= directCost) break;

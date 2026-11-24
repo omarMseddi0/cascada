@@ -25,7 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ValkeyExactCubeIndexIntegrationTest {
     @RegisterExtension final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
-    @Test void selectsRarePostingsAndBoundsDiscoveryInADensePopulation() {
+    @Test void selectsRarePostingsAndReturnsAllMatchingDescriptors() {
         var source = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
         var population = new CubePopulation(source, "ts", "", "amount");
         var range = new CubeInterval(0, 86400);
@@ -71,11 +71,11 @@ class ValkeyExactCubeIndexIntegrationTest {
                 assertThat(fragment.measures()).containsExactly(CubeMeasure.SUM);
                 assertThat(store.read(fragment)).isPresent();
             });
-            assertThat(store.candidates(population, range, List.of("region"), measure)).hasSize(128);
+            assertThat(store.candidates(population, range, List.of("region"), measure)).hasSize(width + stale + 1);
             assertThat(store.candidates(population, range, List.of("unknown"), measure)).isEmpty();
             assertThat(calls(commands.info("commandstats"), "keys")).isEqualTo(keysBefore);
             assertThat(calls(commands.info("commandstats"), "scan")).isEqualTo(scansBefore);
-            System.out.println("EXACT_CUBE_VALKEY indexed=" + (width + stale + 1) + " rare=1 bounded=128");
+            System.out.println("EXACT_CUBE_VALKEY indexed=" + (width + stale + 1) + " rare=1 broad=" + (width + stale + 1));
         } finally {
             client.shutdown();
         }

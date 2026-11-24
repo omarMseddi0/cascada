@@ -20,10 +20,6 @@ public interface ExactCubeStorePort {
 
     Optional<ResultFrame> read(ExactCubeFragment manifest);
 
-    default List<Optional<ResultFrame>> readBatch(List<ExactCubeFragment> manifests) {
-        return manifests.stream().map(this::read).toList();
-    }
-
     void publish(CubePopulation population, CubeInterval interval, List<String> grain, Set<CubeMeasure> measures,
                  ResultFrame state, Duration ttl, String publicationFence);
 

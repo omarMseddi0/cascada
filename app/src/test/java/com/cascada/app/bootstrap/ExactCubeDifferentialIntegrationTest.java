@@ -222,7 +222,7 @@ class ExactCubeDifferentialIntegrationTest {
         }
     }
 
-    @Test void evictedWinnerUsesAndKeepsItsHealthyAlternative() {
+    @Test void missingAndCorruptGenerationsAreRemovedBeforeTheNextRequest() {
         String sql = aggregate("SUM", "region", 0, 6, "");
         try (var factory = factory(SCOPE, true); var inspector = RedisClient.create(valkey.uri());
              var connection = inspector.connect()) {
@@ -236,13 +236,16 @@ class ExactCubeDifferentialIntegrationTest {
             assertThat(store.candidates(original.population(), original.interval())).hasSize(2);
             var winner = entry.query(sql).exactCubeTrace().fragments().getFirst();
             assertThat(connection.sync().del("QC:V4:exact:v1:frame:" + winner.generation())).isEqualTo(1);
-            for (int attempt = 0; attempt < 2; attempt++) {
-                tracked.calls.clear();
-                var result = entry.query(sql);
-                check(sql, 0, false, result, "exact-cube");
-                assertThat(result.exactCubeTrace().fragments()).noneMatch(winner::equals);
-                assertThat(tracked.calls).isEmpty();
-            }
+            tracked.calls.clear();
+            var missing = entry.query(sql);
+            check(sql, 0, false, missing, "pinned-spark");
+            assertThat(tracked.calls).singleElement().asString().contains("VERSION AS OF 0");
+
+            tracked.calls.clear();
+            var healthy = entry.query(sql);
+            check(sql, 0, false, healthy, "exact-cube");
+            assertThat(healthy.exactCubeTrace().fragments()).noneMatch(winner::equals);
+            assertThat(tracked.calls).isEmpty();
             assertThat(store.candidates(original.population(), original.interval())).hasSize(1);
             store.publish(original.population(), original.interval(), original.grain(), original.measures(),
                     frame, Duration.ofHours(1), store.publicationFence());
@@ -251,11 +254,15 @@ class ExactCubeDifferentialIntegrationTest {
                     "x".repeat(corrupt.compressedBytes()));
             tracked.calls.clear();
             var answer = entry.query(sql);
-            check(sql, 0, false, answer, "exact-cube");
-            assertThat(answer.exactCubeTrace().reason()).isEqualTo("verified-after-miss");
-            assertThat(answer.exactCubeTrace().fragments()).noneMatch(corrupt::equals);
-            assertThat(tracked.calls).isEmpty();
+            check(sql, 0, false, answer, "pinned-spark");
+            assertThat(tracked.calls).singleElement().asString().contains("VERSION AS OF 0");
             assertThat(store.candidates(original.population(), original.interval())).hasSize(1);
+
+            tracked.calls.clear();
+            var afterCorruption = entry.query(sql);
+            check(sql, 0, false, afterCorruption, "exact-cube");
+            assertThat(afterCorruption.exactCubeTrace().fragments()).noneMatch(corrupt::equals);
+            assertThat(tracked.calls).isEmpty();
         }
     }
 

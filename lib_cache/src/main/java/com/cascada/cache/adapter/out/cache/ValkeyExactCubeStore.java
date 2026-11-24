@@ -1,7 +1,6 @@
 package com.cascada.cache.adapter.out.cache;
 
 import com.cascada.cache.application.execution.QueryCancellation;
-import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.application.port.out.ExactCubeStorePort;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -9,9 +8,7 @@ import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
-import io.lettuce.core.RedisFuture;
 import io.lettuce.core.ScriptOutputType;
-import io.lettuce.core.api.async.RedisAsyncCommands;
 import io.lettuce.core.api.sync.RedisCommands;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -26,9 +23,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -36,7 +30,6 @@ import java.util.stream.Collectors;
 final class ValkeyExactCubeStore implements ExactCubeStorePort {
     static final String PREFIX = "QC:V4:exact:v1:";
     private static final String POSTINGS = ":postings:v2:";
-    private static final int CANDIDATES_PER_MEASURE = 128;
     private static final String PUBLISH = """
             if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
             if not redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3], 'NX') then return 0 end
@@ -49,8 +42,7 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
             """;
     private static final String CANDIDATES = """
             local result = {}
-            local width = tonumber(ARGV[4])
-            local limit = tonumber(ARGV[3])
+            local width = tonumber(ARGV[3])
             for first = 1, #KEYS, width do
                 local last = first + width - 1
                 local selected = first
@@ -61,9 +53,7 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
                     if size < smallest then selected = i; smallest = size end
                 end
                 if smallest > 0 then
-                    local window = redis.call('ZRANGEBYSCORE', KEYS[selected], ARGV[1], ARGV[2],
-                        'LIMIT', 0, width == 1 and limit or limit * 4)
-                    local found = 0
+                    local window = redis.call('ZRANGEBYSCORE', KEYS[selected], ARGV[1], ARGV[2])
                     for _, descriptor in ipairs(window) do
                         local matches = true
                         for i = first, last do
@@ -74,8 +64,6 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
                         end
                         if matches then
                             result[#result + 1] = descriptor
-                            found = found + 1
-                            if found == limit then break end
                         end
                     end
                 end
@@ -101,18 +89,13 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
             """;
 
     private final RedisCommands<byte[], byte[]> commands;
-    private final RedisAsyncCommands<byte[], byte[]> async;
-    private final Duration commandTimeout;
     private final CacheValueSerializerPort serializer;
     private final Supplier<String> fence;
     private final byte[] fenceKey;
 
-    ValkeyExactCubeStore(RedisCommands<byte[], byte[]> commands, RedisAsyncCommands<byte[], byte[]> async,
-                         Duration commandTimeout, CacheValueSerializerPort serializer, Supplier<String> fence,
-                         String fenceKey) {
+    ValkeyExactCubeStore(RedisCommands<byte[], byte[]> commands, CacheValueSerializerPort serializer,
+                         Supplier<String> fence, String fenceKey) {
         this.commands = commands;
-        this.async = async;
-        this.commandTimeout = commandTimeout;
         this.serializer = serializer;
         this.fence = fence;
         this.fenceKey = bytes(fenceKey);
@@ -146,7 +129,7 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
         }
         if (keys.isEmpty()) return List.of();
         List<byte[]> descriptors = commands.eval(CANDIDATES, ScriptOutputType.MULTI,
-                keys.toArray(byte[][]::new), low, high, bytes(Integer.toString(CANDIDATES_PER_MEASURE)),
+                keys.toArray(byte[][]::new), low, high,
                 bytes(Integer.toString(Math.max(1, grain.size()))));
         var manifests = new LinkedHashSet<ExactCubeFragment>();
         for (byte[] descriptor : descriptors) {
@@ -170,51 +153,6 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
                 bytes(generationFence), bytes(Integer.toString(manifest.compressedBytes())),
                 bytes(descriptor(manifest)));
         return decode(manifest, generationFence, payload);
-    }
-
-    @Override
-    public List<Optional<ResultFrame>> readBatch(List<ExactCubeFragment> manifests) {
-        if (manifests.size() == 1) return List.of(read(manifests.getFirst()));
-        QueryCancellation.requireCurrentActive();
-        var pending = new ArrayList<RedisFuture<byte[]>>(manifests.size());
-        try (var ignored = QueryExecutionScope.current()
-                .map(scope -> scope.onCancel(() -> cancel(pending))).orElse(null)) {
-            synchronized (pending) {
-                for (var manifest : manifests) {
-                    QueryCancellation.requireCurrentActive();
-                    String generationFence = generationFence(manifest);
-                    pending.add(async.eval(READ, ScriptOutputType.VALUE, manifestKeys(manifest, generationFence, true),
-                            bytes(generationFence), bytes(Integer.toString(manifest.compressedBytes())),
-                            bytes(descriptor(manifest))));
-                }
-            }
-            var frames = new ArrayList<Optional<ResultFrame>>(manifests.size());
-            long deadline = System.nanoTime() + commandTimeout.toNanos();
-            for (int i = 0; i < manifests.size(); i++) {
-                QueryCancellation.requireCurrentActive();
-                var manifest = manifests.get(i);
-                byte[] payload = pending.get(i).get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
-                frames.add(decode(manifest, generationFence(manifest), payload));
-            }
-            return frames;
-        } catch (InterruptedException | ExecutionException | TimeoutException failure) {
-            QueryCancellation.rethrowIfCancelled(failure);
-            throw new IllegalStateException("Valkey fragment pipeline failed", failure);
-        } finally {
-            cancel(pending);
-        }
-    }
-
-    private static void cancel(List<RedisFuture<byte[]>> pending) {
-        synchronized (pending) {
-            pending.forEach(future -> {
-                if (!future.isDone()) future.cancel(false);
-            });
-        }
-    }
-
-    private static String generationFence(ExactCubeFragment manifest) {
-        return manifest.generation().substring(0, manifest.generation().indexOf('/'));
     }
 
     private Optional<ResultFrame> decode(ExactCubeFragment manifest, String generationFence, byte[] payload) {

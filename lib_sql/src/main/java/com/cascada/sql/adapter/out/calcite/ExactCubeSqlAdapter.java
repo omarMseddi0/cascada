@@ -293,22 +293,39 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
     }
 
     private static CubeKeyFilter keyFilter(SqlNode node) {
-        if (!(node instanceof SqlCall call) || !(call.operand(0) instanceof SqlIdentifier id)) return null;
-        return switch (call.getKind()) {
-            case IS_NULL -> new CubeKeyFilter(id.getSimple(), CubeKeyFilterOperator.IS_NULL, null);
-            case IS_NOT_NULL -> new CubeKeyFilter(id.getSimple(), CubeKeyFilterOperator.IS_NOT_NULL, null);
-            case EQUALS -> {
-                if (call.operand(1) instanceof SqlCharStringLiteral literal
-                        && literal.getNlsString().getCharsetName() == null
-                        && literal.getNlsString().getCollation() == null
-                        && literal.getNlsString().getValue().matches("[A-Za-z0-9 _.:-]*")) {
-                    yield new CubeKeyFilter(id.getSimple(), CubeKeyFilterOperator.STRING_EQUALS,
-                            literal.getNlsString().getValue());
-                }
-                yield null;
-            }
+        if (!(node instanceof SqlCall call)) return null;
+        SqlNode left = call.operand(0);
+        if (call.getKind() == SqlKind.IS_NULL || call.getKind() == SqlKind.IS_NOT_NULL) {
+            if (!(left instanceof SqlIdentifier column)) return null;
+            var operator = call.getKind() == SqlKind.IS_NULL ? CubeKeyFilterOperator.IS_NULL : CubeKeyFilterOperator.IS_NOT_NULL;
+            return new CubeKeyFilter(column.getSimple(), operator, null);
+        }
+        if (call.operandCount() != 2) return null;
+        SqlNode right = call.operand(1);
+        boolean reversed = right instanceof SqlIdentifier;
+        if (!((reversed ? right : left) instanceof SqlIdentifier column)) return null;
+        SqlNode value = reversed ? left : right;
+        if (call.getKind() == SqlKind.EQUALS && value instanceof SqlCharStringLiteral literal
+                && literal.getNlsString().getCharsetName() == null
+                && literal.getNlsString().getCollation() == null
+                && literal.getNlsString().getValue().matches("[A-Za-z0-9 _.:-]*")) {
+            return new CubeKeyFilter(column.getSimple(), CubeKeyFilterOperator.STRING_EQUALS,
+                    literal.getNlsString().getValue());
+        }
+        if (!(value instanceof SqlNumericLiteral literal) || !literal.isInteger()) return null;
+        var operator = switch (call.getKind()) {
+            case EQUALS -> CubeKeyFilterOperator.INTEGER_EQUALS;
+            case NOT_EQUALS -> CubeKeyFilterOperator.INTEGER_NOT_EQUALS;
+            case LESS_THAN -> reversed ? CubeKeyFilterOperator.INTEGER_GREATER : CubeKeyFilterOperator.INTEGER_LESS;
+            case LESS_THAN_OR_EQUAL -> reversed ? CubeKeyFilterOperator.INTEGER_GREATER_OR_EQUAL
+                    : CubeKeyFilterOperator.INTEGER_LESS_OR_EQUAL;
+            case GREATER_THAN -> reversed ? CubeKeyFilterOperator.INTEGER_LESS : CubeKeyFilterOperator.INTEGER_GREATER;
+            case GREATER_THAN_OR_EQUAL -> reversed ? CubeKeyFilterOperator.INTEGER_LESS_OR_EQUAL
+                    : CubeKeyFilterOperator.INTEGER_GREATER_OR_EQUAL;
             default -> null;
         };
+        return operator == null ? null
+                : new CubeKeyFilter(column.getSimple(), operator, Long.toString(number(value)));
     }
 
     private static boolean predicate(SqlNode node) {

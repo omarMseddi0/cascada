@@ -57,6 +57,11 @@ final class ExactCubeState {
         }
         ResultFrame selected = frame.project(inputs, outputs);
         if (!filters.isEmpty()) {
+            long[] integerLiterals = new long[filters.size()];
+            for (int i = 0; i < filters.size(); i++) {
+                var filter = filters.get(i);
+                if (filter.operator().isIntegralComparison()) integerLiterals[i] = Long.parseLong(filter.literal());
+            }
             var builder = ResultFrame.builder();
             for (String name : selected.columnNames()) builder.column(name, selected.columnType(name));
             for (int row = 0; row < selected.rowCount(); row++) {
@@ -70,6 +75,8 @@ final class ExactCubeState {
                         case IS_NOT_NULL -> !frame.isNullAt(row, column);
                         case STRING_EQUALS -> !frame.isNullAt(row, column)
                                 && filter.literal().equals(frame.stringAt(row, column));
+                        default -> !frame.isNullAt(row, column)
+                                && filter.operator().matchesInteger(frame.longAt(row, column), integerLiterals[i]);
                     };
                 }
                 if (keep) {

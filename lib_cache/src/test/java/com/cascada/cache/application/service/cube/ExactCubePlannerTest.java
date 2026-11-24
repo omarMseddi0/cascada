@@ -61,6 +61,24 @@ final class ExactCubePlannerTest {
         assertThat(ExactCubePlanner.select(query, POPULATION, List.of(head), 4)).isEmpty();
     }
 
+    @Test void acceptsPartialSparkEdgesButRejectsPartialBucketPayloads() {
+        var request = new CubeInterval(1, 39);
+        var query = query(Set.of(SUM), List.of("region"), request);
+        var middle = fragment("middle", 10, 30, List.of("region"), Set.of(SUM), 10);
+        var plan = ExactCubePlanner.select(query, POPULATION, List.of(middle), 10).orElseThrow();
+        assertThat(plan.covers().get(SUM)).containsExactly(
+                new CubeCoverEdge(new CubeInterval(1, 10), null),
+                new CubeCoverEdge(middle.interval(), middle),
+                new CubeCoverEdge(new CubeInterval(30, 39), null));
+        assertThat(ExactCubePlanChecker.valid(query, POPULATION, plan, 10)).isTrue();
+        var partialBucket = fragment("partial", 1, 10, List.of("region"), Set.of(SUM), 10);
+        var invalid = new ExactCubePlan(Map.of(SUM, List.of(
+                new CubeCoverEdge(partialBucket.interval(), partialBucket),
+                new CubeCoverEdge(middle.interval(), middle),
+                new CubeCoverEdge(new CubeInterval(30, 39), null))));
+        assertThat(ExactCubePlanChecker.valid(query, POPULATION, invalid, 10)).isFalse();
+    }
+
     @Test void singleIngredientPlansMatchExhaustiveIntervalCovers() {
         var random = new Random(640_025);
         var window = new CubeInterval(0, 4);

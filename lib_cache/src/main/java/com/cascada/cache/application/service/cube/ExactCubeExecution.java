@@ -86,9 +86,8 @@ public final class ExactCubeExecution {
 
     private String rejection(ExactCubeQuery query, ExactCubeSource source) {
         var interval = query.interval();
-        if (!ExactCubePlanChecker.aligned(interval, bucketSeconds)
-                || interval.end() > clock.instant().getEpochSecond()) {
-            return "open-or-unaligned-window";
+        if (interval.end() > clock.instant().getEpochSecond()) {
+            return "window-ends-in-future";
         }
         if (!"bigint".equals(source.types().get(query.timeColumn()))
                 || !INTEGRALS.contains(source.types().getOrDefault(query.input(), ""))) {

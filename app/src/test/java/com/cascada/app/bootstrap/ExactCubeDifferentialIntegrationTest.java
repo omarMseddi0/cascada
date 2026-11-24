@@ -344,6 +344,101 @@ class ExactCubeDifferentialIntegrationTest {
         }
     }
 
+    @Test void headAndTailUsePinnedSparkAlongsideFilteredCrossShapeBuckets() {
+        String originalPath = path;
+        path = scratch.resolve("head-tail-facts").toUri().toString();
+        try {
+            spark.sql("""
+                    SELECT pmod(id, 7) * 86400L + pmod(id DIV 7, 32) AS ts,
+                           concat('region-', pmod(id, 13)) AS region,
+                           CASE WHEN pmod(id, 11) = 0 THEN NULL ELSE pmod(id DIV 7, 8) END AS shop,
+                           CASE pmod(id, 3) WHEN 0 THEN 'x' ELSE 'y' END AS device,
+                           CASE WHEN pmod(id, 17) = 0 THEN NULL ELSE CAST(pmod(id, 41) - 20 AS INT) END AS amount
+                    FROM range(2240)
+                    """).write().format("delta").save(path);
+            long end = 6 * DAY + 20;
+            String bounds = " FROM " + SOURCE + " WHERE ts >= 12 AND ts < " + end + " AND ";
+            try (var factory = factory(SCOPE, true)) {
+                var beforeGap = warm(factory, aggregate("AVG", "region, shop", 0, 3, ""), 0, 3);
+                var afterGap = warm(factory, aggregate("AVG", "region, shop, device", 4, 7, ""), 4, 7);
+                var wrong = warm(factory, aggregate("AVG", "region, device", 3, 4, ""), 3, 4);
+                var selected = new ArrayList<>(beforeGap.subList(1, 3));
+                selected.addAll(afterGap.subList(0, 2));
+                var entry = factory.executeLogicalQueryUseCase();
+                var predicates = List.of("2 <= shop AND shop < 5", "shop = 3", "shop <> 3",
+                        "shop <= 2", "shop > 4", "shop IS NULL", "shop IS NOT NULL");
+                for (String filter : predicates) {
+                    String sql = "SELECT region, AVG(amount) AS value" + bounds + filter + " GROUP BY region";
+                    tracked.calls.clear();
+                    var result = entry.query(sql);
+                    check(sql, 0, false, result, "exact-cube");
+                    var trace = result.exactCubeTrace();
+                    assertThat(trace.fragments()).extracting(ExactCubeFragment::bucketKey)
+                            .containsExactlyInAnyOrderElementsOf(selected).doesNotContainAnyElementsOf(wrong);
+                    assertThat(trace.residualSql()).hasSize(3);
+                    long[][] expectedGaps = {{12, DAY}, {3 * DAY, 4 * DAY}, {6 * DAY, end}};
+                    for (int i = 0; i < expectedGaps.length; i++) {
+                        assertThat(trace.residualSql().get(i)).contains("VERSION AS OF 0",
+                                "`ts` >= " + expectedGaps[i][0], "`ts` < " + expectedGaps[i][1]);
+                        for (String predicate : filter.split(" AND ")) {
+                            assertThat(trace.residualSql().get(i)).contains(predicate);
+                        }
+                    }
+                    assertThat(tracked.calls).containsExactlyElementsOf(trace.residualSql());
+                }
+
+                String disjunction = "SELECT region, AVG(amount) AS value" + bounds
+                        + "(shop = 3 OR shop IS NULL) GROUP BY region";
+                tracked.calls.clear();
+                var declined = entry.query(disjunction);
+                check(disjunction, 0, false, declined, "existing");
+                assertThat(declined.exactCubeTrace().fragments()).isEmpty();
+                assertThat(tracked.calls).hasSize(1);
+                System.out.println("HEAD_TAIL_REUSE cases=7 cached=4 spark=head+gap+tail unsafeOr=declined");
+            }
+        } finally {
+            path = originalPath;
+        }
+    }
+
+    @Test void rawProjectionsDeclineEvenWhenACacheContainsANearMatch() {
+        String bounds = " FROM " + SOURCE + " WHERE ts >= 0 AND ts < " + HIGH * DAY;
+        String sql = "SELECT region, amount" + bounds;
+        try (var factory = factory(SCOPE, true)) {
+            warm(factory, aggregate("AVG", "region, device", 0, 1, ""), 0, 1);
+            var canonical = canonicalize(sql);
+            var hash = new com.cascada.cache.application.service.hashing.QueryHashGenerator()
+                    .generateQueryHash(canonical, 300);
+            var warmer = (com.cascada.cache.application.service.WarmingOrchestrator) factory.warmCacheUseCase();
+            assertThat(warmer.warmSinglePattern(hash, canonical, 0, HIGH * DAY - 1, false).bucketsWarmed()).isZero();
+
+            var backend = factory.cacheBackendForShutdown();
+            var fake = ResultFrame.builder().column("region", ColumnType.STRING).column("amount", ColumnType.LONG)
+                    .row("partial-only", 7L).build();
+            for (long day = 0; day < HIGH; day++) {
+                backend.store(com.cascada.cache.domain.key.CacheKeyFactory.buildBucketKey(hash, day * DAY, DAY),
+                        fake, ApplicationSettings.defaults().warming().lookback());
+            }
+
+            var queries = List.of(sql, "SELECT region" + bounds, "SELECT region, device, amount" + bounds,
+                    sql + " AND device = 'x'", "SELECT DISTINCT region, amount" + bounds,
+                    sql + " ORDER BY region NULLS FIRST, amount NULLS FIRST LIMIT 4");
+            for (String query : queries) {
+                tracked.calls.clear();
+                long bindsBefore = tracked.bindCalls.sum();
+                var result = factory.executeLogicalQueryUseCase().query(query);
+                check(query, 0, query.contains("ORDER BY"), result, "existing");
+                assertThat(result.servedThroughCache()).isFalse();
+                assertThat(result.exactCubeTrace().reason()).isEqualTo("unproven-sql-shape");
+                assertThat(tracked.bindCalls.sum()).isEqualTo(bindsBefore);
+                assertThat(tracked.calls).hasSize(1);
+            }
+            var ordinary = factory.executeLogicalQueryUseCase().query(sql).frame();
+            assertThat(ordinary.rows().stream().filter(row -> "late-only".equals(row.get("region"))
+                    && Long.valueOf(2).equals(row.get("amount"))).count()).isEqualTo(2);
+        }
+    }
+
     @Test void twentyDaysCombineSameQueryBucketsTwoBroaderShapesAndDisjointSparkGaps() {
         String original = path;
         path = scratch.resolve("twenty-day-facts").toUri().toString();

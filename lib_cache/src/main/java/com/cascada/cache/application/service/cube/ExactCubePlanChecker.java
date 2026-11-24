@@ -5,7 +5,6 @@ import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.CubeInterval;
-import com.cascada.cache.domain.model.cube.CubeKeyFilterOperator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
@@ -28,8 +27,11 @@ final class ExactCubePlanChecker {
     static boolean mayNarrow(ExactCubeQuery query, CubePopulation population) {
         return !query.keyFilters().isEmpty() && query.keyFilters().stream().allMatch(filter -> {
             String type = population.source().types().get(filter.column());
-            return filter.operator() == CubeKeyFilterOperator.STRING_EQUALS
-                    ? "string".equals(type) : validKeyType(type);
+            return switch (filter.operator()) {
+                case STRING_EQUALS -> "string".equals(type);
+                case IS_NULL, IS_NOT_NULL -> validKeyType(type);
+                default -> validIntegralKeyType(type);
+            };
         });
     }
 
@@ -47,17 +49,20 @@ final class ExactCubePlanChecker {
     }
 
     static boolean validKeyType(String type) {
-        return type != null && Set.of("string", "bigint", "int", "smallint", "tinyint").contains(type);
+        return "string".equals(type) || validIntegralKeyType(type);
+    }
+
+    private static boolean validIntegralKeyType(String type) {
+        return type != null && Set.of("bigint", "int", "smallint", "tinyint").contains(type);
     }
 
     static boolean valid(ExactCubeQuery query, CubePopulation population, ExactCubePlan plan, long width) {
-        if (!query.measures().equals(plan.covers().keySet()) || !aligned(query.interval(), width)) return false;
+        if (!query.measures().equals(plan.covers().keySet())) return false;
         var reads = new HashMap<String, ExactCubeFragment>();
         for (var entry : plan.covers().entrySet()) {
             long cursor = query.interval().start();
             for (var edge : entry.getValue()) {
-                if (edge.interval().start() != cursor || !query.interval().contains(edge.interval())
-                        || !aligned(edge.interval(), width)) return false;
+                if (edge.interval().start() != cursor || !query.interval().contains(edge.interval())) return false;
                 cursor = edge.interval().end();
                 var fragment = edge.fragment();
                 if (fragment == null) continue;

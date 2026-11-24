@@ -23,6 +23,7 @@ public final class ResultFrame {
     private final Object[] columns;
     private final long[][] present;
     private final int rowCount;
+    private final boolean lossyStrings;
     private final List<Map<String, Object>> rowsView;
 
     /** Compatibility constructor for boundary adapters that still receive row maps. */
@@ -32,6 +33,10 @@ public final class ResultFrame {
     }
 
     private ResultFrame(ResultFrame frame) {
+        this(frame, frame.lossyStrings);
+    }
+
+    private ResultFrame(ResultFrame frame, boolean lossyStrings) {
         this.columnNames = frame.columnNames;
         this.columnTypes = frame.columnTypes;
         this.columnIndexes = frame.columnIndexes;
@@ -39,6 +44,7 @@ public final class ResultFrame {
         this.columns = frame.columns;
         this.present = frame.present;
         this.rowCount = frame.rowCount;
+        this.lossyStrings = lossyStrings;
         this.rowsView = new FrameRowsView(this);
     }
 
@@ -58,6 +64,7 @@ public final class ResultFrame {
         this.columns = columns;
         this.present = present;
         this.rowCount = rowCount;
+        this.lossyStrings = false;
         this.rowsView = new FrameRowsView(this);
     }
 
@@ -109,7 +116,17 @@ public final class ResultFrame {
             projectedColumns[column] = columns[source];
             projectedPresence[column] = present[source];
         }
-        return new ResultFrame(outputNames, types, projectedColumns, projectedPresence, rowCount);
+        var projected = new ResultFrame(outputNames, types, projectedColumns, projectedPresence, rowCount);
+        return lossyStrings ? projected.withLossyStrings() : projected;
+    }
+
+    /** Marks text whose source bytes were changed during conversion. The frame is still readable. */
+    public ResultFrame withLossyStrings() {
+        return lossyStrings ? this : new ResultFrame(this, true);
+    }
+
+    public boolean hasLossyStrings() {
+        return lossyStrings;
     }
 
     public int rowCount() {

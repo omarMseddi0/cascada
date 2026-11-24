@@ -1,5 +1,18 @@
 package com.cascada.app.bootstrap;
 
+import com.cascada.cache.adapter.out.cache.ValkeyCacheBackendAdapter;
+import com.cascada.cache.application.port.out.ExactCubeStorePort;
+import com.cascada.cache.application.service.ExecuteLogicalQueryService;
+import com.cascada.cache.application.service.cube.ExactCubeExecution;
+import com.cascada.cache.domain.model.cube.CubeInterval;
+import com.cascada.cache.domain.model.cube.CubeMeasure;
+import com.cascada.cache.domain.model.cube.CubePopulation;
+import com.cascada.sql.adapter.out.calcite.ExactCubeSqlAdapter;
+import java.time.Clock;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 import com.cascada.app.config.CascadaEngineFactory;
 import com.cascada.app.adapter.out.execution.LazyQueryExecutor;
 import com.cascada.app.adapter.in.api.QueryHttpServer;
@@ -186,6 +199,93 @@ class ExactCubeDifferentialIntegrationTest {
         }
     }
 
+    @Test void adversarialSqlAcrossColdPartialAndFullValkeyLayouts() {
+        String originalPath = path;
+        String originalFixture = fixtureSql;
+        path = scratch.resolve("adversarial-facts").toUri().toString();
+        fixtureSql = """
+                WITH samples AS (
+                    SELECT pmod(id * 13 + %d, 12) AS day_no, id,
+                           CASE pmod(id, 11)
+                             WHEN 0 THEN NULL WHEN 1 THEN 'NULL' WHEN 2 THEN ''
+                             WHEN 3 THEN '😀' WHEN 4 THEN '' WHEN 5 THEN 'é'
+                             WHEN 6 THEN concat('e', chr(769)) ELSE concat('r', pmod(id, 17))
+                           END AS region,
+                           CASE pmod(id DIV 12, 4) WHEN 0 THEN 'x' WHEN 1 THEN 'y'
+                                WHEN 2 THEN NULL ELSE '' END AS device,
+                           CASE pmod(id DIV 12, 8) WHEN 0 THEN NULL WHEN 1 THEN -2147483648
+                                WHEN 2 THEN 2147483647 WHEN 3 THEN 0 ELSE CAST(pmod(id, 127) - 63 AS INT)
+                           END AS amount
+                    FROM range(720)
+                ), facts AS (
+                    SELECT day_no * 86400L + pmod(id, 7) AS ts, region, device, amount,
+                           pmod(id, 7) AS shop, pmod(id, 3) AS market
+                    FROM samples WHERE day_no NOT IN (3, 9)
+                )
+                SELECT * FROM facts UNION ALL SELECT * FROM facts WHERE pmod(ts, 3) = 0
+                """.formatted(SEED);
+        spark.sql(fixtureSql).write().format("delta").save(path);
+        var cases = CubeAdversarialSql.cases(SOURCE, DAY);
+        assertThat(cases).hasSize(256);
+        var expected = new HashMap<String, ResultFrame>();
+        var failures = new ArrayList<AssertionError>();
+        var passed = new LinkedHashMap<String, Integer>();
+
+        try (var factory = factory(SCOPE, true)) {
+            var entry = factory.executeLogicalQueryUseCase();
+            for (String layout : List.of("cold", "partial", "full")) {
+                if (layout.equals("partial")) {
+                    warm(factory, aggregate("AVG", "region, device, shop", 0, 5, ""), 0, 5);
+                    warm(factory, aggregate("AVG", "region, device, shop, market", 7, 12, ""), 7, 12);
+                } else if (layout.equals("full")) {
+                    warm(factory, aggregate("AVG", "region, device, market", 5, 7, ""), 5, 7);
+                }
+                int verified = 0;
+                for (var test : cases.entrySet()) {
+                    String sql = test.getKey();
+                    tracked.calls.clear();
+                    QueryResult actual = null;
+                    try {
+                        var sparkResult = expected.computeIfAbsent(sql, statement -> oracle.execute(pinned(statement, 0)));
+                        actual = entry.query(sql);
+                        String route = layout.equals("cold") ? "existing" : "exact-cube";
+                        assertThat(actual.exactCubeTrace().route()).isEqualTo(route);
+                        assertSameFrame(sparkResult, actual.frame(), test.getValue(), layout + " " + sql);
+                        if (!layout.equals("cold")) {
+                            var trace = actual.exactCubeTrace();
+                            assertThat(trace.version()).isZero();
+                            assertThat(trace.fragments()).isNotEmpty();
+                            if (layout.equals("partial")) {
+                                assertThat(trace.residualSql()).singleElement().asString()
+                                        .contains("VERSION AS OF 0", "`ts` >= 432000", "`ts` < 604800");
+                            } else {
+                                assertThat(trace.residualSql()).isEmpty();
+                            }
+                            var statements = new ArrayList<>(trace.residualSql());
+                            if (trace.outerSql() != null) statements.add(trace.outerSql());
+                            assertThat(tracked.calls).containsExactlyElementsOf(statements);
+                        }
+                        verified++;
+                    } catch (Exception | AssertionError failure) {
+                        saveMismatch(sql, 0, actual, new AssertionError("layout=" + layout + " " + failure, failure));
+                        failures.add(new AssertionError(layout + " " + sql, failure));
+                    }
+                }
+                passed.put(layout, verified);
+            }
+        } finally {
+            path = originalPath;
+            fixtureSql = originalFixture;
+        }
+        System.out.printf("ADVERSARIAL_SQL seed=%d distinct=%d passed=%s failures=%d%n",
+                SEED, cases.size(), passed, failures.size());
+        if (!failures.isEmpty()) {
+            var summary = new AssertionError(failures.size() + " adversarial comparisons failed");
+            failures.forEach(summary::addSuppressed);
+            throw summary;
+        }
+    }
+
     @Test void usesTheOriginalAverageBucketForBothOrdinaryAndNestedSql() {
         String producer = aggregate("AVG", "region, device", 0, HIGH, "");
         String consumer = "WITH sliced AS (" + aggregate("AVG", "region", 0, HIGH, " AND device = 'x'")
@@ -353,6 +453,153 @@ class ExactCubeDifferentialIntegrationTest {
             System.out.println("THIRTY_DAY_CUBE own=15 mixedOther=5 mixedSparkDays=10 fullOther=15 fullSparkSql=0");
         } finally {
             path = original;
+        }
+    }
+
+    @Test void concurrentReadersRejectABucketReplacedAfterPlanningWhileDeltaAdvances() throws Exception {
+        String original = path;
+        path = scratch.resolve("concurrent-bucket-fault").toUri().toString();
+        spark.sql(fixtureSql).write().format("delta").save(path);
+        String aggregate = aggregate("AVG", "region", 0, HIGH, "");
+        var queries = List.of(aggregate + " ORDER BY region NULLS FIRST",
+                aggregate + " ORDER BY value DESC NULLS LAST, region NULLS LAST LIMIT 4",
+                "WITH q AS (" + aggregate + ") SELECT region, value FROM q WHERE value IS NOT NULL",
+                "SELECT region, SUM(value) AS amount FROM (" + aggregate + ") q GROUP BY region");
+        var expected = new ArrayList<ResultFrame>();
+        for (String sql : queries) expected.add(oracle.execute(pinned(sql, 0)));
+
+        try (var factory = factory(SCOPE, true);
+             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var keys = warm(factory, aggregate("AVG", "region, device", 0, HIGH, ""), 0, HIGH);
+            String changedKey = keys.getFirst();
+            var backend = (ValkeyCacheBackendAdapter) factory.cacheBackendForShutdown();
+            var delegate = backend.exactCubeStore();
+            var allPlanned = new CompletableFuture<Void>();
+            var releaseReads = new CompletableFuture<Void>();
+            var planned = new AtomicInteger();
+            var gatedStore = new ExactCubeStorePort() {
+                @Override
+                public List<ExactCubeFragment> candidates(CubePopulation population,
+                        CubeInterval interval,
+                        List<String> grain, Set<CubeMeasure> measures) {
+                    return delegate.candidates(population, interval, grain, measures);
+                }
+
+                @Override
+                public void visitBuckets(List<ExactCubeFragment> manifests,
+                        BiConsumer<Integer, Optional<ResultFrame>> visitor) {
+                    assertThat(manifests).extracting(ExactCubeFragment::bucketKey).contains(changedKey);
+                    if (planned.incrementAndGet() == queries.size()) allPlanned.complete(null);
+                    releaseReads.join();
+                    delegate.visitBuckets(manifests, visitor);
+                }
+
+                @Override
+                public boolean storeBucket(String key, ResultFrame frame, Duration ttl, String generation,
+                        CubePopulation population,
+                        CubeInterval interval, List<String> grain, String averageAlias) {
+                    throw new AssertionError("The query route must not publish buckets");
+                }
+            };
+            var catalog = new TableCatalog().register(RegisteredTable.of(SOURCE, path, Map.of("ts", "ts"), "ts"));
+            var exact = new ExactCubeExecution(
+                    new ExactCubeSqlAdapter(Set.of(path), "ts"),
+                    gatedStore, tracked, SCOPE, Clock.systemUTC(), DAY,
+                    CacheExecutionConfiguration.defaults().mergeWorkerCount(), workers);
+            var entry = new ExecuteLogicalQueryService(
+                    new LogicalToPhysicalSqlTranslator(300, catalog), new CalciteCanonicalObjectFactory(),
+                    factory.executeCachedQueryUseCase(), tracked, exact);
+            tracked.calls.clear();
+            var requests = new ArrayList<CompletableFuture<QueryResult>>();
+            for (String sql : queries) {
+                requests.add(CompletableFuture.supplyAsync(() -> entry.query(sql), workers)
+                        .whenComplete((result, failure) -> {
+                            if (!allPlanned.isDone()) {
+                                allPlanned.completeExceptionally(new AssertionError(
+                                        "Request exited before all readers reached the selected buckets", failure));
+                            }
+                        }));
+            }
+            try {
+                allPlanned.join();
+                spark.newSession().sql("INSERT INTO delta.`" + path
+                        + "` VALUES (0L, 'added-during-read', 'x', 1000)").collectAsList();
+                backend.store(changedKey,
+                        ResultFrame.builder().column("replacement", ColumnType.LONG).row(99L).build(), Duration.ofHours(1));
+            } finally {
+                releaseReads.complete(null);
+            }
+            for (int i = 0; i < requests.size(); i++) {
+                var actual = requests.get(i).get();
+                assertThat(actual.exactCubeTrace().route()).isEqualTo("pinned-spark");
+                assertThat(actual.exactCubeTrace().version()).isZero();
+                assertThat(actual.exactCubeTrace().reason()).startsWith("recovery:");
+                assertSameFrame(expected.get(i), actual.frame(), i < 2, queries.get(i));
+            }
+            assertThat(tracked.calls).hasSize(queries.size()).allSatisfy(sql -> assertThat(sql).contains("VERSION AS OF 0"));
+            assertThat(backend.multiGet(List.of(changedKey)).getFirst()).hasValueSatisfying(
+                    frame -> assertThat(frame.columnNames()).containsExactly("replacement"));
+            assertThat(factory.executeLogicalQueryUseCase().query(queries.getFirst()).frame().rows())
+                    .anySatisfy(row -> assertThat(row).containsEntry("region", "added-during-read"));
+        } finally {
+            path = original;
+        }
+    }
+
+    @Test void binaryDistinctStringsThatDecodeToTheSameJavaTextMustStayDistinct() {
+        String originalPath = path;
+        String originalFixture = fixtureSql;
+        path = scratch.resolve("malformed-utf8-facts").toUri().toString();
+        fixtureSql = """
+                SELECT 0L AS ts, CAST(X'FF' AS STRING) AS region, 'x' AS device, 1 AS amount
+                UNION ALL
+                SELECT 0L, '�', 'x', 9
+                UNION ALL
+                SELECT 86400L, '�', 'x', 7
+                """;
+        try {
+            spark.sql(fixtureSql).write().format("delta").save(path);
+            assertThat(oracle.execute(pinned("SELECT DISTINCT hex(CAST(region AS BINARY)) AS bytes FROM " + SOURCE, 0))
+                    .rows()).extracting(row -> row.get("bytes")).containsExactlyInAnyOrder("FF", "EFBFBD");
+            String query = aggregate("AVG", "region", 0, 1, "");
+            String producer = aggregate("AVG", "region, device", 0, 1, "");
+            try (var factory = factory(SCOPE, true)) {
+                var canonical = canonicalize(producer);
+                var hash = new com.cascada.cache.application.service.hashing.QueryHashGenerator().generateQueryHash(canonical, 300);
+                var warmer = (com.cascada.cache.application.service.WarmingOrchestrator) factory.warmCacheUseCase();
+                var report = warmer.warmSinglePattern(hash, canonical, 0, DAY - 1, false);
+                assertThat(report.bucketsWarmed()).isZero();
+                assertThat(report.bucketsSkipped()).isEqualTo(1);
+                String key = com.cascada.cache.domain.key.CacheKeyFactory.buildBucketKey(hash, 0, DAY);
+                assertThat(factory.cacheBackendForShutdown().existsForKeys(List.of(key))).containsExactly(false);
+                var expected = oracle.execute(pinned(query, 0));
+                assertThat(expected.rowCount()).isEqualTo(2);
+                assertThat(expected.hasLossyStrings()).isTrue();
+                var legal = oracle.execute(pinned("SELECT region FROM " + SOURCE
+                        + " WHERE ts = 0 AND hex(CAST(region AS BINARY)) = 'EFBFBD'", 0));
+                assertThat(legal.rowCount()).isEqualTo(1);
+                assertThat(legal.hasLossyStrings()).isFalse();
+
+                var actual = factory.executeLogicalQueryUseCase().query(query);
+                assertThat(actual.exactCubeTrace().route()).isEqualTo("existing");
+                assertSameFrame(expected, actual.frame(), false, query);
+
+                String twoDayProducer = aggregate("AVG", "region, device", 0, 2, "");
+                warm(factory, twoDayProducer, 1, 2);
+                String mixedQuery = aggregate("AVG", "region", 0, 2, "");
+                var mixed = factory.executeLogicalQueryUseCase().query(mixedQuery);
+                check(mixedQuery, 0, false, mixed, "pinned-spark");
+                assertThat(mixed.exactCubeTrace().residualSql()).hasSize(1);
+                assertThat(mixed.exactCubeTrace().reason()).startsWith("recovery:");
+
+                // The ordinary bucket merge also encounters the lossy grouping keys in its gap.
+                try (var ordinary = factory(SCOPE, false)) {
+                    check(twoDayProducer, 0, false, ordinary.executeLogicalQueryUseCase().query(twoDayProducer), null);
+                }
+            }
+        } finally {
+            path = originalPath;
+            fixtureSql = originalFixture;
         }
     }
 
@@ -650,24 +897,21 @@ class ExactCubeDifferentialIntegrationTest {
         try {
             assertThat(actual.exactCubeTrace() == null ? null : actual.exactCubeTrace().route())
                     .as("%s trace=%s", message, actual.exactCubeTrace()).isEqualTo(route);
-            assertThat(actual.frame().columnNames()).as(message).isEqualTo(expected.columnNames());
-            assertThat(actual.frame().columnTypes()).as(message).isEqualTo(expected.columnTypes());
-            assertThat(actual.frame().rowCount()).as(message).isEqualTo(expected.rowCount());
-            if (ordered) {
-                for (int i = 0; i < expected.rowCount(); i++) {
-                    assertThat(actual.frame().rows().get(i)).as("%s first differing row %d", message, i)
-                            .isEqualTo(expected.rows().get(i));
-                }
-            } else {
-                var counts = multiset(actual.frame());
-                for (var row : multiset(expected).entrySet()) {
-                    assertThat(counts.get(row.getKey())).as("%s row %s", message, row.getKey())
-                            .isEqualTo(row.getValue());
-                }
-            }
+            assertSameFrame(expected, actual.frame(), ordered, message);
         } catch (AssertionError mismatch) {
             saveMismatch(sql, version, actual, mismatch);
             throw mismatch;
+        }
+    }
+
+    private static void assertSameFrame(ResultFrame expected, ResultFrame actual, boolean ordered, String context) {
+        assertThat(actual.columnNames()).as(context).isEqualTo(expected.columnNames());
+        assertThat(actual.columnTypes()).as(context).isEqualTo(expected.columnTypes());
+        assertThat(actual.rowCount()).as(context).isEqualTo(expected.rowCount());
+        if (ordered) {
+            assertThat(actual.rows()).as(context).containsExactlyElementsOf(expected.rows());
+        } else {
+            assertThat(multiset(actual)).as(context).isEqualTo(multiset(expected));
         }
     }
 

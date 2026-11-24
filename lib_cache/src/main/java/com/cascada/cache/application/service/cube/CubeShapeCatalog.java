@@ -99,7 +99,7 @@ public final class CubeShapeCatalog {
 
     public void register(TimeRange timeRange, QueryShape shape, ResultFrame frame,
                          String revision, java.util.Optional<java.time.Duration> dependencyTtl) {
-        if (frame.isEmpty()) return;
+        if (frame.isEmpty() || frame.hasLossyStrings()) return;
 
         long registrationGeneration;
         java.time.Instant registrationStarted;

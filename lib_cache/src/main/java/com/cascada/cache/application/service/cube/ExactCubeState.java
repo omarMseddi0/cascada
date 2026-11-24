@@ -41,6 +41,7 @@ final class ExactCubeState {
 
     void add(ResultFrame frame, List<String> grain, List<String> keyColumns, String presenceColumn,
              Map<CubeMeasure, String> valueColumns, List<CubeKeyFilter> filters) {
+        require(!frame.hasLossyStrings());
         var sourceKeys = query.grain().stream().map(key -> keyColumns.get(grain.indexOf(key))).toList();
         int[] filterIndexes = filters.stream().mapToInt(filter ->
                 frame.columnIndex(keyColumns.get(grain.indexOf(filter.column())))).toArray();

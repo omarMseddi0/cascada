@@ -29,6 +29,9 @@ public final class IncrementalFrameMerge {
         if (failure != null) return;
         try {
             java.util.Objects.requireNonNull(frame, "frame");
+            if (frame.hasLossyStrings()) {
+                throw new IllegalArgumentException("cannot merge a frame with lossy string keys");
+            }
             if (schema == null) {
                 ResultFrameBuilder descriptor = ResultFrame.builder();
                 for (String column : frame.columnNames()) descriptor.column(column, frame.columnType(column));

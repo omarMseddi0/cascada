@@ -49,6 +49,7 @@ final class SparkResultFrameMapper {
         }
 
         var cancellation = QueryExecutionScope.current().orElse(null);
+        boolean lossyStrings = false;
         for (InternalRow row : rows) {
             if (cancellation != null) cancellation.requireActive();
             for (int index = 0; index < getters.length; index++) {
@@ -69,7 +70,14 @@ final class SparkResultFrameMapper {
                         builder.appendDecimal(row.getDecimal(index, decimalType.precision(), decimalType.scale())
                                 .toJavaBigDecimal());
                     }
-                    case READ_STRING -> builder.appendString(row.getUTF8String(index).toString());
+                    case READ_STRING -> {
+                        var utf8 = row.getUTF8String(index);
+                        String text = utf8.toString();
+                        // Replacement text is also valid data. Check Spark's source bytes before
+                        // marking the conversion lossy, and avoid a second UTF-8 pass on other strings.
+                        if (!lossyStrings && text.indexOf('\uFFFD') >= 0 && !utf8.isValid()) lossyStrings = true;
+                        builder.appendString(text);
+                    }
                     case READ_BOOLEAN -> builder.appendString(Boolean.toString(row.getBoolean(index)));
                     case READ_EXTERNAL_STRING -> builder.appendString(String.valueOf(
                             externalConverters.get(index).apply(row.get(index, dataType))));
@@ -77,7 +85,8 @@ final class SparkResultFrameMapper {
                 }
             }
         }
-        return builder.build();
+        var frame = builder.build();
+        return lossyStrings ? frame.withLossyStrings() : frame;
     }
 
     private SparkColumnPlan columnPlan(DataType dataType) {

@@ -10,6 +10,8 @@ import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.fixture.ValkeyTestDatabase;
 import io.lettuce.core.RedisClient;
+import io.lettuce.core.codec.ByteArrayCodec;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -85,6 +87,69 @@ class ValkeyExactCubeIndexIntegrationTest {
         } finally {
             client.shutdown();
         }
+    }
+
+    @Test void rejectsSameLengthTamperingAndDoesNotDeleteTheReplacementValue() {
+        var source = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
+        var population = new CubePopulation(source, "ts", "", "amount");
+        var interval = new CubeInterval(0, 86400);
+        var measures = Set.of(CubeMeasure.SUM);
+        var backend = valkey.cache(new PortableFrameSerializer());
+        var store = backend.exactCubeStore();
+        String rawKey = "QC:V4:B86400:tampered:0";
+        var frame = ResultFrame.builder().column("cube_sum", ColumnType.LONG).row(2L).build();
+        assertThat(store.storeBucket(rawKey, frame, Duration.ofMinutes(5), backend.warmingGeneration().orElseThrow(),
+                population, interval, List.of("region"), "mean")).isTrue();
+        var selected = store.candidates(population, interval, List.of("region"), measures);
+        assertThat(selected).hasSize(1);
+
+        var client = RedisClient.create(valkey.uri());
+        try (var connection = client.connect(ByteArrayCodec.INSTANCE)) {
+            var commands = connection.sync();
+            byte[] key = rawKey.getBytes(StandardCharsets.UTF_8);
+            byte[] changed = commands.get(key).clone();
+            changed[changed.length - 1] ^= 1;
+            assertThat(changed).hasSize(selected.getFirst().compressedBytes());
+            commands.set(key, changed);
+            store.visitBuckets(selected, (index, result) -> assertThat(result).isEmpty());
+            assertThat(store.candidates(population, interval, List.of("region"), measures)).isEmpty();
+            assertThat(commands.get(key)).containsExactly(changed);
+        } finally {
+            client.shutdown();
+        }
+    }
+
+    @Test void keepsANearMatchOutOfEachIndependentProvenanceBoundary() {
+        var exact = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
+        var wrongSources = List.of(
+                new ExactCubeSource("facts", "table", 11, "schema", "semantics", "policy", Map.of(), true),
+                new ExactCubeSource("facts", "table", 12, "schema", "semantics", "other-policy", Map.of(), true),
+                new ExactCubeSource("facts", "recreated-table", 12, "schema", "semantics", "policy", Map.of(), true),
+                new ExactCubeSource("facts", "table", 12, "other-schema", "semantics", "policy", Map.of(), true),
+                new ExactCubeSource("facts", "table", 12, "schema", "other-semantics", "policy", Map.of(), true));
+        var interval = new CubeInterval(0, 86400);
+        var grain = List.of("region");
+        var measures = Set.of(CubeMeasure.SUM);
+        var backend = valkey.cache(new PortableFrameSerializer());
+        var store = backend.exactCubeStore();
+        var wanted = new CubePopulation(exact, "ts", "", "amount");
+        var nearMatches = new java.util.ArrayList<CubePopulation>();
+        wrongSources.forEach(source -> nearMatches.add(new CubePopulation(source, "ts", "", "amount")));
+        nearMatches.add(new CubePopulation(exact, "ts", "region IS NULL", "amount"));
+        nearMatches.add(new CubePopulation(exact, "ts", "", "other_amount"));
+        String generation = backend.warmingGeneration().orElseThrow();
+        var frame = ResultFrame.builder().column("cube_sum", ColumnType.LONG).row(2L).build();
+        for (int i = 0; i < nearMatches.size(); i++) {
+            assertThat(store.storeBucket("QC:V4:B86400:near" + i + ":0", frame, Duration.ofMinutes(5),
+                    generation, nearMatches.get(i), interval, grain, "mean")).isTrue();
+        }
+        assertThat(store.candidates(wanted, interval, grain, measures)).isEmpty();
+
+        String wantedKey = "QC:V4:B86400:wanted:0";
+        assertThat(store.storeBucket(wantedKey, frame, Duration.ofMinutes(5), generation,
+                wanted, interval, grain, "mean")).isTrue();
+        assertThat(store.candidates(wanted, interval, grain, measures))
+                .extracting(ExactCubeFragment::bucketKey).containsExactly(wantedKey);
     }
 
     private static long calls(String info, String command) {

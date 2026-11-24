@@ -479,13 +479,14 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                 : sparkExecutor.execute(bucketSql);
         boolean decimalComposite = !canonicalObject.metadata().compositeAliases().isEmpty()
                 && frame.columnTypes().containsValue(ColumnType.DECIMAL);
-        if (decimalComposite || frame.rowCount() > configuration.maximumCachedRows()) {
+        if (frame.hasLossyStrings() || decimalComposite || frame.rowCount() > configuration.maximumCachedRows()) {
             cacheBackend.evict(key);
             if (coverageIndex != null) coverageIndex.markEvicted(queryHash, configuration.bucketSeconds(), bucketStart);
             if (LOGGER.isLoggable(java.util.logging.Level.FINE)) {
-                LOGGER.fine("bucket " + key + " not stored: " + (decimalComposite
-                        ? "decimal composite aggregates are not cacheable"
-                        : frame.rowCount() + " rows, above the cache row cap"));
+                String reason = frame.hasLossyStrings() ? "source string bytes cannot be represented faithfully"
+                        : decimalComposite ? "decimal composite aggregates are not cacheable"
+                        : frame.rowCount() + " rows, above the cache row cap";
+                LOGGER.fine("bucket " + key + " not stored: " + reason);
             }
             return false;
         }

@@ -87,6 +87,7 @@ class ExactCubeDifferentialIntegrationTest {
     private static final long SEED = Long.getLong("cascada.exact.fixture.seed", 147_811L);
     private static final String SOURCE = "fact_data";
     private static final int HIGH = 9;
+    private static final ServerSettings TEST_SERVER = new ServerSettings(0, 0, Duration.ofSeconds(60));
 
     @RegisterExtension final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
     @TempDir static Path scratch;
@@ -341,6 +342,66 @@ class ExactCubeDifferentialIntegrationTest {
         System.out.println("EXACT_CUBE_GRAPH seed=" + SEED + " mixed=9 full=9 cold=9");
     }
 
+    @Test void qualifiesThreeHundredDistinctSqlOperatorCompositions() {
+        qualifySqlCompositions(CubeQualificationSql.reusable(SOURCE), CubeQualificationSql.outsideCube(SOURCE));
+    }
+
+    @Test void qualifiesAdditionalCubeBackedSqlCompositions() {
+        var base = CubeQualificationSql.reusable(SOURCE);
+        var additional = CubeQualificationSql.additionalReusable(SOURCE);
+        assertThat(additional).doesNotContainAnyElementsOf(base);
+        assertThat((base.size() + additional.size()) * CubeQualificationSql.consumers(SOURCE).size())
+                .isEqualTo(300);
+        qualifySqlCompositions(additional, List.of());
+    }
+
+    private void qualifySqlCompositions(List<String> reusable, List<String> outside) {
+        var consumers = CubeQualificationSql.consumers(SOURCE);
+        var statements = new java.util.LinkedHashSet<String>();
+        var failures = new ArrayList<Throwable>();
+        int[] passed = new int[2];
+        try (var factory = factory(SCOPE, true)) {
+            var entry = factory.executeLogicalQueryUseCase();
+            // The same original SUM and COUNT fragments support all eligible consumers.
+            check(aggregate("SUM", "region, device", 0, HIGH, ""), 0, false,
+                    entry.query(aggregate("SUM", "region, device", 0, HIGH, "")), "pinned-build");
+            check(aggregate("COUNT", "region, device", 0, HIGH, ""), 0, false,
+                    entry.query(aggregate("COUNT", "region, device", 0, HIGH, "")), "pinned-build");
+            for (int route = 0; route < passed.length; route++) {
+                var producers = route == 0 ? reusable : outside;
+                String expectedRoute = route == 0 ? "exact-cube" : "existing";
+                for (String producer : producers) {
+                    for (String consumer : consumers) {
+                        String sql = "WITH cube_input AS (" + producer + ") " + consumer;
+                        assertThat(statements.add(sql)).as(sql).isTrue();
+                        tracked.calls.clear();
+                        try {
+                            var result = entry.query(sql);
+                            check(sql, 0, consumer.contains("LIMIT 5 OFFSET 1"), result, expectedRoute);
+                            if (route == 0) {
+                                assertThat(result.exactCubeTrace().fragments()).isNotEmpty();
+                                assertThat(result.exactCubeTrace().residualSql()).isEmpty();
+                                assertThat(tracked.calls).containsExactly(result.exactCubeTrace().outerSql());
+                            }
+                            passed[route]++;
+                        } catch (Exception | AssertionError failure) {
+                            saveMismatch(sql, 0, null, failure);
+                            failures.add(new AssertionError(sql, failure));
+                        }
+                    }
+                }
+            }
+        }
+        assertThat(statements).hasSize((reusable.size() + outside.size()) * consumers.size());
+        System.out.printf("CUBE_SQL_CORPUS distinct=%d reused=%d declined=%d failed=%d%n",
+                statements.size(), passed[0], passed[1], failures.size());
+        if (!failures.isEmpty()) {
+            var summary = new AssertionError(failures.size() + " SQL qualification failures");
+            failures.forEach(summary::addSuppressed);
+            throw summary;
+        }
+    }
+
     @Test void emptyGroupedAndScalarResultsHaveDifferentPresence() {
         String sum = aggregate("SUM", "region, device", 12, 13, "");
         String count = aggregate("COUNT", "region", 12, 13, "");
@@ -487,7 +548,6 @@ class ExactCubeDifferentialIntegrationTest {
     }
 
     @Test void transportLastByteAndConcurrentFullCoverage() throws Exception {
-        var server = new ServerSettings(0, 0, Duration.ofSeconds(60));
         var json = new ObjectMapper();
         var client = HttpClient.newHttpClient();
         String query = aggregate("AVG", "region", 0, HIGH, "") + " ORDER BY value DESC NULLS LAST, region NULLS FIRST LIMIT 10";
@@ -506,9 +566,9 @@ class ExactCubeDifferentialIntegrationTest {
                 receipts.add(result);
                 return result;
             };
-            try (var http = new QueryHttpServer(server, entry);
-                 var direct = new QueryHttpServer(server, sql -> new QueryResult(oracle.execute(pinned(sql, 0)), false));
-                 var grpcService = new QueryGrpcService(entry, server);
+            try (var http = new QueryHttpServer(TEST_SERVER, entry);
+                 var direct = new QueryHttpServer(TEST_SERVER, sql -> new QueryResult(oracle.execute(pinned(sql, 0)), false));
+                 var grpcService = new QueryGrpcService(entry, TEST_SERVER);
                  var threads = Executors.newFixedThreadPool(2)) {
                 http.start();
                 direct.start();
@@ -562,6 +622,105 @@ class ExactCubeDifferentialIntegrationTest {
                 }
             }
         }
+    }
+
+    @Test void benchmarksFourAndSixRealValkeyFragmentsOverMillionsOfStateRows() throws Exception {
+        String originalPath = path;
+        path = scratch.resolve("multi-fragment-facts").toUri().toString();
+        int factRows = 1_200_000;
+        int days = 1536;
+        spark.sql("""
+                SELECT pmod(id, %d) * %d AS ts,
+                       CASE WHEN pmod(id, 11) = 0 THEN NULL ELSE concat('region-', pmod(id, 257)) END AS region,
+                       concat('device-', id) AS device, concat('channel-', id) AS channel, pmod(id, 17) AS publisher,
+                       CASE WHEN pmod(id, 13) = 0 THEN NULL ELSE CAST(pmod(id, 121) - 60 AS INT) END AS amount
+                FROM range(%d)
+                """.formatted(days, DAY, factRows)).write().format("delta").save(path);
+        String query = aggregate("AVG", "region", 0, days, "") + " ORDER BY region NULLS FIRST";
+        var json = new ObjectMapper();
+        var client = HttpClient.newHttpClient();
+        var expected = new ByteArrayOutputStream();
+        QueryResponseEncoder.json(oracle.execute(pinned(query, 0)), expected);
+        var expectedJson = json.readTree(expected.toByteArray());
+        var valkeyClient = RedisClient.create(valkey.uri());
+        try (var connection = valkeyClient.connect(); var factory = factory(SCOPE, true)) {
+            var raw = factory.executeLogicalQueryUseCase();
+            var receipts = new CopyOnWriteArrayList<QueryResult>();
+            var entry = (com.cascada.cache.application.port.in.ExecuteLogicalQueryUseCase) sql -> {
+                var result = raw.query(sql);
+                receipts.add(result);
+                return result;
+            };
+            try (var http = new QueryHttpServer(TEST_SERVER, entry);
+                 var direct = new QueryHttpServer(TEST_SERVER, sql -> new QueryResult(oracle.execute(pinned(sql, 0)), false))) {
+                http.start();
+                direct.start();
+                var body = json.writeValueAsString(Map.of("sql", query));
+                var cubeRequest = request(http.port(), body);
+                var directRequest = request(direct.port(), body);
+                for (int pieces : List.of(2, 3)) {
+                    factory.flushCacheUseCase().flushEverything();
+                    long buildStart = System.nanoTime();
+                    for (int piece = 0; piece < pieces; piece++) {
+                        int low = piece * (days / pieces);
+                        int high = (piece + 1) * (days / pieces);
+                        String sumGrain = List.of("region, device", "region, device, channel",
+                                "region, device, publisher").get(piece);
+                        String countGrain = List.of("region, channel", "region, channel, publisher",
+                                "region, channel, device, publisher").get(piece);
+                        assertThat(raw.query(aggregate("SUM", sumGrain, low, high, ""))
+                                .exactCubeTrace().route()).isEqualTo("pinned-build");
+                        assertThat(raw.query(aggregate("COUNT", countGrain, low, high, ""))
+                                .exactCubeTrace().route()).isEqualTo("pinned-build");
+                    }
+                    double buildMs = (System.nanoTime() - buildStart) / 1_000_000.0;
+                    assertThat(json.readTree(client.send(cubeRequest, HttpResponse.BodyHandlers.ofByteArray()).body()))
+                            .isEqualTo(expectedJson);
+                    assertThat(json.readTree(client.send(directRequest, HttpResponse.BodyHandlers.ofByteArray()).body()))
+                            .isEqualTo(expectedJson);
+                    System.out.printf(java.util.Locale.ROOT, "CUBE_FRAGMENT_BENCH fragments=%d buildMs=%.3f%n",
+                            pieces * 2, buildMs);
+                    sample("pinned-spark", client, directRequest, expectedJson, json, null);
+                    String before = connection.sync().info("commandstats");
+                    sample("fully-covered", client, cubeRequest, expectedJson, json, receipts);
+                    String after = connection.sync().info("commandstats");
+                    assertThat(receipts).allSatisfy(receipt -> {
+                        var trace = receipt.exactCubeTrace();
+                        assertThat(trace.fragments()).hasSize(pieces * 2);
+                        assertThat(trace.fragments().stream().map(ExactCubeFragment::generation).distinct().count())
+                                .isEqualTo(pieces * 2L);
+                        assertThat(trace.fragments().stream()
+                                .map(fragment -> List.of(fragment.grain(), fragment.measures())).distinct().count())
+                                .isEqualTo(pieces * 2L);
+                        for (CubeMeasure measure : CubeMeasure.values()) {
+                            assertThat(trace.fragments().stream().filter(fragment -> fragment.measures().contains(measure))
+                                    .map(ExactCubeFragment::interval).distinct().count()).isEqualTo(pieces);
+                        }
+                        assertThat(trace.fragments().stream().mapToLong(ExactCubeFragment::rows).sum())
+                                .isEqualTo(factRows * 2L);
+                        assertThat(trace.residualSql()).isEmpty();
+                    });
+                    assertThat(commandStat(after, "keys", "calls")).isEqualTo(commandStat(before, "keys", "calls"));
+                    assertThat(commandStat(after, "scan", "calls")).isEqualTo(commandStat(before, "scan", "calls"));
+                    long evalCalls = commandStat(after, "eval", "calls") - commandStat(before, "eval", "calls");
+                    long evalMicros = commandStat(after, "eval", "usec") - commandStat(before, "eval", "usec");
+                    System.out.printf(java.util.Locale.ROOT,
+                            "CUBE_FRAGMENT_VALKEY fragments=%d decodedRowsPerQuery=%d evalCalls=%d evalServerMs=%.3f%n",
+                            pieces * 2, factRows * 2L, evalCalls, evalMicros / 1000.0);
+                }
+            }
+        } finally {
+            valkeyClient.shutdown();
+            path = originalPath;
+        }
+    }
+
+    private static long commandStat(String info, String command, String field) {
+        String prefix = "cmdstat_" + command + ":";
+        return info.lines().filter(line -> line.startsWith(prefix)).findFirst()
+                .stream().flatMap(line -> Arrays.stream(line.substring(prefix.length()).split(",")))
+                .filter(token -> token.startsWith(field + "=")).findFirst()
+                .map(token -> Long.parseLong(token.substring(field.length() + 1))).orElse(0L);
     }
 
     private HttpRequest request(int port, String body) {

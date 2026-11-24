@@ -244,6 +244,50 @@ class ExactCubeDifferentialIntegrationTest {
         }
     }
 
+    @Test void twentyDaysCombineSameQueryBucketsTwoBroaderShapesAndDisjointSparkGaps() {
+        String original = path;
+        path = scratch.resolve("twenty-day-facts").toUri().toString();
+        spark.sql("""
+                SELECT pmod(id, 20) * 86400L AS ts,
+                       CASE WHEN pmod(id, 13) = 0 THEN NULL ELSE concat('region-', pmod(id, 7)) END AS region,
+                       CASE pmod(id DIV 20, 3) WHEN 0 THEN 'x' WHEN 1 THEN 'y' ELSE NULL END AS device,
+                       pmod(id, 11) AS shop,
+                       CASE WHEN pmod(id, 17) = 0 THEN NULL ELSE CAST(pmod(id, 31) - 15 AS INT) END AS amount
+                FROM range(600)
+                """).write().format("delta").save(path);
+        String filter = " AND device = 'x'";
+        String query = aggregate("AVG", "region", 0, 20, filter);
+        try (var factory = factory(SCOPE, true)) {
+            var expectedKeys = new ArrayList<>(warm(factory, query, 0, 5));
+            expectedKeys.addAll(warm(factory, aggregate("AVG", "region, device", 5, 8, ""), 5, 8));
+            expectedKeys.addAll(warm(factory, aggregate("AVG", "region, device", 9, 12, filter), 9, 12));
+            expectedKeys.addAll(warm(factory, aggregate("AVG", "region, device, shop", 13, 16, ""), 13, 16));
+            // These buckets have data for the final gap but have already aggregated away device.
+            var incompatibleKeys = warm(factory, aggregate("AVG", "region, shop", 16, 20, ""), 16, 20);
+
+            tracked.calls.clear();
+            var answer = factory.executeLogicalQueryUseCase().query(query);
+            check(query, 0, false, answer, "exact-cube");
+            var trace = answer.exactCubeTrace();
+            assertThat(trace.fragments()).extracting(ExactCubeFragment::bucketKey)
+                    .containsExactlyInAnyOrderElementsOf(expectedKeys)
+                    .doesNotContainAnyElementsOf(incompatibleKeys);
+            assertThat(trace.residualSql()).hasSize(3);
+            long[][] expectedGaps = {{8, 9}, {12, 13}, {16, 20}};
+            for (int i = 0; i < expectedGaps.length; i++) {
+                assertThat(trace.residualSql().get(i)).contains("VERSION AS OF 0", "SUM(`amount`)", "COUNT(`amount`)",
+                        "`ts` >= " + expectedGaps[i][0] * DAY, "`ts` < " + expectedGaps[i][1] * DAY,
+                        "device = 'x'");
+            }
+            assertThat(tracked.calls).containsExactlyElementsOf(trace.residualSql());
+            System.out.printf(java.util.Locale.ROOT,
+                    "TWENTY_DAY_CUBE cachedBuckets=%d residuals=%d planningMs=%.3f%n",
+                    trace.fragments().size(), trace.residualSql().size(), trace.planningNanos() / 1_000_000.0);
+        } finally {
+            path = original;
+        }
+    }
+
     @Test void ignoresOldBucketProvenanceAfterTheOrdinaryKeyIsOverwritten() {
         String producer = aggregate("AVG", "region, device", 0, 1, "");
         String consumer = aggregate("AVG", "region", 0, 1, "");

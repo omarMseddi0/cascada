@@ -22,6 +22,8 @@ import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -120,11 +122,14 @@ public final class ExactCubeExecution {
         String failureReason = null;
         try {
             var candidates = new ArrayList<>(store.candidates(population, query.interval(), query.grain(), query.measures()));
-            if (candidates.isEmpty() && ExactCubePlanChecker.mayNarrow(query, population)) {
-                var grain = new java.util.LinkedHashSet<>(query.grain());
-                grain.addAll(query.predicateTypes().keySet());
-                candidates.addAll(store.candidates(ExactCubePlanChecker.unfiltered(population), query.interval(),
-                        List.copyOf(grain), query.measures()));
+            if (ExactCubePlanChecker.mayNarrow(query, population)) {
+                var gaps = uncoveredRanges(query, population, candidates);
+                if (!gaps.isEmpty()) {
+                    var grain = new LinkedHashSet<>(query.grain());
+                    grain.addAll(query.predicateTypes().keySet());
+                    candidates.addAll(store.candidates(ExactCubePlanChecker.unfiltered(population), gaps,
+                            List.copyOf(grain), query.measures()));
+                }
             }
             var selected = ExactCubePlanner.select(query, population, candidates, bucketSeconds);
             planningNanos = System.nanoTime() - planningStarted;
@@ -139,6 +144,24 @@ public final class ExactCubeExecution {
             return direct(query, source, failureReason, reads, submitted, planningNanos);
         }
         return existing(failureReason, existingRoute);
+    }
+
+    private List<CubeInterval> uncoveredRanges(ExactCubeQuery query, CubePopulation population,
+                                               List<ExactCubeFragment> candidates) {
+        // An ordinary indexed AVG bucket contains both ingredients. Only a compatible candidate
+        // supplying all requested ingredients can suppress the broader-population lookup.
+        var covered = candidates.stream()
+                .filter(fragment -> fragment.measures().containsAll(query.measures())
+                        && ExactCubePlanChecker.compatible(query, population, fragment, bucketSeconds))
+                .map(ExactCubeFragment::interval).sorted(Comparator.comparingLong(CubeInterval::start)).toList();
+        var gaps = new ArrayList<CubeInterval>();
+        long cursor = query.interval().start();
+        for (var interval : covered) {
+            if (cursor < interval.start()) gaps.add(new CubeInterval(cursor, interval.start()));
+            cursor = Math.max(cursor, interval.end());
+        }
+        if (cursor < query.interval().end()) gaps.add(new CubeInterval(cursor, query.interval().end()));
+        return gaps;
     }
 
     private QueryResult compose(ExactCubeQuery query, CubePopulation population, ExactCubePlan plan,

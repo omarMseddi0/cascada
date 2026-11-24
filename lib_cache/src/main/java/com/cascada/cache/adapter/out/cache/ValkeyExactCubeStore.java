@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -45,28 +46,31 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
             """;
     private static final String CANDIDATES = """
             local result = {}
-            local width = tonumber(ARGV[3])
-            for first = 1, #KEYS, width do
-                local last = first + width - 1
-                local selected = first
-                local smallest = redis.call('ZCOUNT', KEYS[first], ARGV[1], ARGV[2])
-                for i = first + 1, last do
-                    if smallest == 0 then break end
-                    local size = redis.call('ZCOUNT', KEYS[i], ARGV[1], ARGV[2])
-                    if size < smallest then selected = i; smallest = size end
-                end
-                if smallest > 0 then
-                    local window = redis.call('ZRANGEBYSCORE', KEYS[selected], ARGV[1], ARGV[2])
-                    for _, descriptor in ipairs(window) do
-                        local matches = true
-                        for i = first, last do
-                            if i ~= selected and not redis.call('ZSCORE', KEYS[i], descriptor) then
-                                matches = false
-                                break
+            local width = tonumber(ARGV[1])
+            for range = 2, #ARGV, 2 do
+                local low, high = ARGV[range], ARGV[range + 1]
+                for first = 1, #KEYS, width do
+                    local last = first + width - 1
+                    local selected = first
+                    local smallest = redis.call('ZCOUNT', KEYS[first], low, high)
+                    for i = first + 1, last do
+                        if smallest == 0 then break end
+                        local size = redis.call('ZCOUNT', KEYS[i], low, high)
+                        if size < smallest then selected = i; smallest = size end
+                    end
+                    if smallest > 0 then
+                        local window = redis.call('ZRANGEBYSCORE', KEYS[selected], low, high)
+                        for _, descriptor in ipairs(window) do
+                            local matches = true
+                            for i = first, last do
+                                if i ~= selected and not redis.call('ZSCORE', KEYS[i], descriptor) then
+                                    matches = false
+                                    break
+                                end
                             end
-                        end
-                        if matches then
-                            result[#result + 1] = descriptor
+                            if matches then
+                                result[#result + 1] = descriptor
+                            end
                         end
                     end
                 end
@@ -97,29 +101,40 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
     @Override
     public List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval,
                                              List<String> grain, Set<CubeMeasure> measures) {
+        return candidates(population, List.of(interval), grain, measures);
+    }
+
+    @Override
+    public List<ExactCubeFragment> candidates(CubePopulation population, List<CubeInterval> intervals,
+                                             List<String> grain, Set<CubeMeasure> measures) {
         QueryCancellation.requireCurrentActive();
+        if (intervals.isEmpty() || measures.isEmpty()) return List.of();
         String current = fence.get();
         String index = index(population, current);
-        // Scores are doubles. Widen by the rounding unit and check exact endpoints below.
-        double start = interval.start(), end = interval.end();
-        byte[] low = bytes(Double.toString(start - Math.max(1, Math.ulp(start))));
-        byte[] high = bytes(Double.toString(end + Math.max(1, Math.ulp(end))));
+        var rangesByStart = new TreeMap<Long, CubeInterval>();
+        var args = new ArrayList<byte[]>();
+        args.add(bytes(Integer.toString(Math.max(1, grain.size()))));
+        for (var interval : intervals) {
+            rangesByStart.put(interval.start(), interval);
+            // Scores are doubles. Widen by the rounding unit and check exact endpoints below.
+            double start = interval.start(), end = interval.end();
+            args.add(bytes(Double.toString(start - Math.max(1, Math.ulp(start)))));
+            args.add(bytes(Double.toString(end + Math.max(1, Math.ulp(end)))));
+        }
         var keys = new ArrayList<byte[]>();
         for (CubeMeasure measure : CubeMeasure.values()) {
             if (!measures.contains(measure)) continue;
             if (grain.isEmpty()) keys.add(posting(index, measure, ""));
             else grain.forEach(column -> keys.add(posting(index, measure, column)));
         }
-        if (keys.isEmpty()) return List.of();
         List<byte[]> descriptors = commands.eval(CANDIDATES, ScriptOutputType.MULTI,
-                keys.toArray(byte[][]::new), low, high,
-                bytes(Integer.toString(Math.max(1, grain.size()))));
+                keys.toArray(byte[][]::new), args.toArray(byte[][]::new));
         var manifests = new LinkedHashSet<ExactCubeFragment>();
         for (byte[] descriptor : descriptors) {
             var fragment = parseManifest(population, descriptor, current);
-            if (fragment != null && interval.contains(fragment.interval()) && fragment.grain().containsAll(grain)) {
-                manifests.add(fragment);
-            }
+            if (fragment == null || !fragment.grain().containsAll(grain)) continue;
+            var range = rangesByStart.floorEntry(fragment.interval().start());
+            if (range != null && range.getValue().contains(fragment.interval())) manifests.add(fragment);
         }
         return List.copyOf(manifests);
     }

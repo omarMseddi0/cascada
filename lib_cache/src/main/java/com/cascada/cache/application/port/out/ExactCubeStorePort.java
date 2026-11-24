@@ -15,6 +15,12 @@ public interface ExactCubeStorePort {
     List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval,
                                        List<String> grain, Set<CubeMeasure> measures);
 
+    /** Look up candidate buckets in disjoint time ranges. */
+    default List<ExactCubeFragment> candidates(CubePopulation population, List<CubeInterval> intervals,
+                                               List<String> grain, Set<CubeMeasure> measures) {
+        return intervals.stream().flatMap(interval -> candidates(population, interval, grain, measures).stream()).toList();
+    }
+
     void visitBuckets(List<ExactCubeFragment> manifests, BiConsumer<Integer, Optional<ResultFrame>> visitor);
 
     /** Atomically writes the ordinary bucket and adds metadata that references that same value. */

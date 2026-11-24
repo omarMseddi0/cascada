@@ -7,6 +7,7 @@ import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
+import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.fixture.ValkeyTestDatabase;
 import io.lettuce.core.RedisClient;
 import java.time.Duration;
@@ -53,6 +54,34 @@ class ValkeyExactCubeIndexIntegrationTest {
             assertThat(store.candidates(population, range, List.of("unknown"), measure)).isEmpty();
             assertThat(calls(commands.info("commandstats"), "keys")).isEqualTo(keysBefore);
             assertThat(calls(commands.info("commandstats"), "scan")).isEqualTo(scansBefore);
+        } finally {
+            client.shutdown();
+        }
+    }
+
+    @Test void looksUpDisjointTimeRangesInOneValkeyIndexRequest() {
+        var source = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
+        var population = new CubePopulation(source, "ts", "", "amount");
+        var backend = valkey.cache(new PortableFrameSerializer());
+        var store = backend.exactCubeStore();
+        String generation = backend.warmingGeneration().orElseThrow();
+        var grain = List.of("region", "device");
+        var frame = ResultFrame.builder().column("cube_sum", ColumnType.LONG).row(2L).build();
+        for (long day = 0; day < 3; day++) {
+            long start = day * 86400L;
+            assertThat(store.storeBucket("QC:V4:B86400:family:" + start, frame, Duration.ofMinutes(5),
+                    generation, population, new CubeInterval(start, start + 86400L), grain, "mean")).isTrue();
+        }
+
+        var client = RedisClient.create(valkey.uri());
+        try (var connection = client.connect()) {
+            var commands = connection.sync();
+            long evalBefore = calls(commands.info("commandstats"), "eval");
+            var first = new CubeInterval(0, 86400);
+            var last = new CubeInterval(172800, 259200);
+            assertThat(store.candidates(population, List.of(first, last), grain, Set.of(CubeMeasure.SUM)))
+                    .extracting(ExactCubeFragment::interval).containsExactly(first, last);
+            assertThat(calls(commands.info("commandstats"), "eval")).isEqualTo(evalBefore + 1);
         } finally {
             client.shutdown();
         }

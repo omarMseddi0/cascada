@@ -137,6 +137,44 @@ class CoverageIndexedEngineTest {
     }
 
     @Test
+    void completeReadUsesAuthoritativePresenceWhenAnotherProcessWarmedBuckets() {
+        CanonicalQueryObject query = globalAggregateOverThreeDays();
+        QueryHash hash = hashGenerator.generateQueryHash(query, 300);
+        var store = valkey.cache(serializer);
+        store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
+        store.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20), Duration.ofDays(1));
+        store.store(CacheKeyFactory.buildBucketKey(hash, 2 * DAY, DAY), appFrame("netflix", 30), Duration.ofDays(1));
+        var coverage = new InMemoryCoverageIndexAdapter();
+        coverage.markCached(hash, DAY, 0L);
+        var backend = new CountingBackend(store);
+        var engine = new CacheExecutionEngine(backend, sql -> { throw new AssertionError(sql); },
+                (sql, gap) -> { throw new AssertionError(sql); }, CacheExecutionConfiguration.defaults(), coverage);
+
+        assertThat(engine.tryReadComplete(query, hash)).hasValueSatisfying(frame ->
+                assertThat(((Number) frame.rows().getFirst().get("bytes")).doubleValue()).isEqualTo(60));
+        assertThat(backend.existsCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void completeReadDoesNotReturnPartialDataWhenBitmapContainsAnEvictedBucket() {
+        CanonicalQueryObject query = globalAggregateOverThreeDays();
+        QueryHash hash = hashGenerator.generateQueryHash(query, 300);
+        var store = valkey.cache(serializer);
+        store.store(CacheKeyFactory.buildBucketKey(hash, 0L, DAY), appFrame("netflix", 10), Duration.ofDays(1));
+        store.store(CacheKeyFactory.buildBucketKey(hash, DAY, DAY), appFrame("netflix", 20), Duration.ofDays(1));
+        var coverage = new InMemoryCoverageIndexAdapter();
+        coverage.markCached(hash, DAY, 0L);
+        coverage.markCached(hash, DAY, DAY);
+        coverage.markCached(hash, DAY, 2 * DAY);
+        var backend = new CountingBackend(store);
+        var engine = new CacheExecutionEngine(backend, sql -> { throw new AssertionError(sql); },
+                (sql, gap) -> { throw new AssertionError(sql); }, CacheExecutionConfiguration.defaults(), coverage);
+
+        assertThat(engine.tryReadComplete(query, hash)).isEmpty();
+        assertThat(backend.existsCalls.get()).isZero();
+    }
+
+    @Test
     void stalePresentBitIsRepairedBySurgicalSingleBucketRefetchNotFullRecompute() {
         CanonicalQueryObject canonical = globalAggregateOverThreeDays();
         QueryHash hash = hashGenerator.generateQueryHash(canonical, 300);

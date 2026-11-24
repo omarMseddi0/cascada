@@ -200,7 +200,15 @@ class ExactCubeDifferentialIntegrationTest {
             var keys = warm(factory, producer, 0, HIGH);
             assertThat(commands.keys("QC:V4:B*")).containsExactlyInAnyOrderElementsOf(keys);
             tracked.calls.clear();
+            long bindsBefore = tracked.bindCalls.sum();
+            var direct = entry.query(producer);
+            check(producer, 0, false, direct, "same-query-cache");
+            assertThat(direct.servedThroughCache()).isTrue();
+            assertThat(tracked.bindCalls.sum()).isEqualTo(bindsBefore);
+            assertThat(tracked.calls).isEmpty();
+
             var result = entry.query(consumer);
+            assertThat(tracked.bindCalls.sum()).isEqualTo(bindsBefore + 1);
             check(consumer, 0, true, result, "exact-cube");
             assertThat(result.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
                     .containsExactlyInAnyOrderElementsOf(keys);
@@ -215,6 +223,24 @@ class ExactCubeDifferentialIntegrationTest {
                 check(producer, 0, false, normal.executeLogicalQueryUseCase().query(producer), null);
                 assertThat(tracked.calls).isEmpty();
             }
+        }
+    }
+
+    @Test void incompleteSameQueryCoverageStillComposesUsingAnotherShape() {
+        String query = aggregate("AVG", "region", 0, 2, "");
+        try (var factory = factory(SCOPE, true)) {
+            String directBucket = warm(factory, query, 0, 1).getFirst();
+            String otherShape = warm(factory, aggregate("AVG", "region, device", 0, 2, ""), 1, 2).getFirst();
+
+            tracked.calls.clear();
+            long bindsBefore = tracked.bindCalls.sum();
+            var result = factory.executeLogicalQueryUseCase().query(query);
+            check(query, 0, false, result, "exact-cube");
+            assertThat(result.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
+                    .containsExactlyInAnyOrder(directBucket, otherShape);
+            assertThat(result.exactCubeTrace().residualSql()).isEmpty();
+            assertThat(tracked.bindCalls.sum()).isEqualTo(bindsBefore + 1);
+            assertThat(tracked.calls).isEmpty();
         }
     }
 
@@ -565,6 +591,7 @@ class ExactCubeDifferentialIntegrationTest {
 
     private static final class TrackingExecutor implements PinnedQueryExecutorPort {
         final List<String> calls = new CopyOnWriteArrayList<>();
+        final LongAdder bindCalls = new LongAdder();
         final AtomicReference<Runnable> beforePinned = new AtomicReference<>();
         final AtomicReference<Runnable> afterBind = new AtomicReference<>();
         private final SparkDeltaQueryExecutor spark;
@@ -574,6 +601,7 @@ class ExactCubeDifferentialIntegrationTest {
         }
 
         @Override public Optional<ExactCubeSource> bind(String path, String scope) {
+            bindCalls.increment();
             var source = spark.bind(path, scope);
             Runnable hook = afterBind.getAndSet(null);
             if (hook != null) hook.run();

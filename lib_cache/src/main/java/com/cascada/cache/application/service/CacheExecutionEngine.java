@@ -123,6 +123,44 @@ public final class CacheExecutionEngine {
                 Objects.requireNonNull(mergeExecutor, "mergeExecutor"));
     }
 
+    /** Read only this query hash, and only if its buckets cover the entire requested window. */
+    public Optional<ResultFrame> tryReadComplete(CanonicalQueryObject query, QueryHash queryHash) {
+        requireActive();
+        try {
+            var range = query.timeRange();
+            var buckets = timeBucketCalculator.getCompletedBuckets(range.startTimestampSeconds(),
+                    range.endTimestampSeconds(), clock.instant().getEpochSecond());
+            if (buckets.body().isEmpty() || buckets.head().isPresent() || buckets.tail().isPresent()) {
+                return Optional.empty();
+            }
+            List<String> keys = bucketKeys(queryHash, buckets.body());
+            // Positive bitmap hits still go through the ordinary reader, which detects vanished
+            // buckets. A partial bitmap cannot rule out buckets warmed by another process.
+            boolean allKnown = knownPresence(queryHash, buckets.body()).filter(CacheExecutionEngine::allPresent).isPresent();
+            if (!allKnown && !allPresent(backendPresence(keys))) return Optional.empty();
+
+            var merge = frameMergeService.incremental(query);
+            var vanished = new ArrayList<Long>();
+            readCachedFrames(keys, buckets.body(), merge, vanished);
+            return vanished.isEmpty() ? Optional.of(merge.finish()) : Optional.empty();
+        } catch (RuntimeException unavailable) {
+            propagateCancellation(unavailable);
+            return Optional.empty();
+        }
+    }
+
+    private static boolean allPresent(List<Boolean> mask) {
+        return mask.stream().allMatch(Boolean.TRUE::equals);
+    }
+
+    private List<String> bucketKeys(QueryHash queryHash, List<Long> starts) {
+        var keys = new ArrayList<String>(starts.size());
+        for (long bucketStart : starts) {
+            keys.add(CacheKeyFactory.buildBucketKey(queryHash, bucketStart, configuration.bucketSeconds()));
+        }
+        return keys;
+    }
+
     public ResultFrame execute(CanonicalQueryObject canonicalObject, QueryHash queryHash) {
         requireActive();
         String revision = readCubeRevision(canonicalObject);
@@ -148,10 +186,7 @@ public final class CacheExecutionEngine {
         }
         List<Long> completedBucketStarts = buckets.body();
 
-        List<String> requiredKeys = new ArrayList<>(completedBucketStarts.size());
-        for (long bucketStart : completedBucketStarts) {
-            requiredKeys.add(CacheKeyFactory.buildBucketKey(queryHash, bucketStart, configuration.bucketSeconds()));
-        }
+        List<String> requiredKeys = bucketKeys(queryHash, completedBucketStarts);
 
         // Fast path 1: nothing cacheable -> run the physical SQL directly.
         if (requiredKeys.isEmpty()) {
@@ -317,6 +352,10 @@ public final class CacheExecutionEngine {
      * guard in {@link #execute} corrects any stale present-bit, so this can never lose data.
      */
     private List<Boolean> resolvePresence(QueryHash queryHash, List<Long> bodyDays, List<String> requiredKeys) {
+        return knownPresence(queryHash, bodyDays).orElseGet(() -> backendPresence(requiredKeys));
+    }
+
+    private Optional<List<Boolean>> knownPresence(QueryHash queryHash, List<Long> bodyDays) {
         if (coverageIndex != null) {
             try {
                 Optional<BucketCoverageBitmap> bitmap = coverageIndex.load(queryHash, configuration.bucketSeconds());
@@ -324,7 +363,7 @@ public final class CacheExecutionEngine {
                     List<Boolean> mask = bitmap.get().presenceMask(bodyDays);
                     if (mask != null && mask.size() == bodyDays.size()
                             && mask.stream().noneMatch(Objects::isNull)) {
-                        return mask;
+                        return Optional.of(mask);
                     }
                 }
             } catch (RuntimeException ignored) {
@@ -332,6 +371,10 @@ public final class CacheExecutionEngine {
                 // The index is advisory. A failed/corrupt index falls through to backend EXISTS.
             }
         }
+        return Optional.empty();
+    }
+
+    private List<Boolean> backendPresence(List<String> requiredKeys) {
         List<Boolean> mask = cacheBackend.existsForKeys(requiredKeys);
         if (mask == null || mask.size() != requiredKeys.size() || mask.stream().anyMatch(Objects::isNull)) {
             throw new IllegalStateException("cache returned an invalid presence mask");

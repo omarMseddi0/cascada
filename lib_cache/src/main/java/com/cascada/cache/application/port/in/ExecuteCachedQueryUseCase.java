@@ -2,6 +2,7 @@ package com.cascada.cache.application.port.in;
 
 import com.cascada.cache.application.model.query.QueryResult;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
+import java.util.Optional;
 
 /**
  * <b>Primary (driving) port</b> — "answer this query, using the cache when it is safe to".
@@ -25,5 +26,10 @@ public interface ExecuteCachedQueryUseCase {
      * @return the result frame plus whether it was served through the cache path
      */
     QueryResult execute(CanonicalQueryObject canonicalObject);
+
+    /** Read a complete same-query bucket hit without executing Spark or planning cross-shape reuse. */
+    default Optional<QueryResult> tryReadComplete(CanonicalQueryObject canonicalObject) {
+        return Optional.empty();
+    }
 
 }

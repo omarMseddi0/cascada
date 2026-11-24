@@ -4,6 +4,7 @@ import com.cascada.cache.application.port.in.ExecuteCachedQueryUseCase;
 import com.cascada.cache.application.port.in.WarmCacheUseCase;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
 import com.cascada.cache.application.model.query.QueryResult;
+import com.cascada.cache.application.model.query.ExactCubeTrace;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.model.query.CanonicalQueryObject;
@@ -11,6 +12,7 @@ import com.cascada.cache.domain.safety.BypassReason;
 import com.cascada.cache.domain.model.safety.CacheConfiguration;
 import com.cascada.identity.domain.model.QueryHash;
 import java.util.List;
+import java.util.Optional;
 import java.util.logging.Logger;
 
 /**
@@ -63,9 +65,27 @@ public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCas
         return new QueryResult(cacheExecutionEngine.execute(canonicalObject, queryHash), true);
     }
 
+    @Override
+    public Optional<QueryResult> tryReadComplete(CanonicalQueryObject canonicalObject) {
+        if (!safetyRuleRegistry.findAllBypassReasons(canonicalObject, cacheConfiguration).isEmpty()) {
+            return Optional.empty();
+        }
+        QueryHash queryHash = queryHashGenerator.generateQueryHash(canonicalObject, cacheConfiguration.fixedStepSeconds());
+        return cacheExecutionEngine.tryReadComplete(canonicalObject, queryHash).map(frame -> {
+            recordForWarming(queryHash, canonicalObject);
+            return new QueryResult(frame, true,
+                    new ExactCubeTrace("same-query-cache", "complete-bucket-coverage", -1, List.of(), List.of(), null, 0));
+        });
+    }
+
     private QueryHash recordForWarming(CanonicalQueryObject canonicalObject) {
         QueryHash queryHash =
                 queryHashGenerator.generateQueryHash(canonicalObject, cacheConfiguration.fixedStepSeconds());
+        recordForWarming(queryHash, canonicalObject);
+        return queryHash;
+    }
+
+    private void recordForWarming(QueryHash queryHash, CanonicalQueryObject canonicalObject) {
         if (warmer != null) {
             try {
                 warmer.recordQuery(queryHash, canonicalObject);
@@ -75,6 +95,5 @@ public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCas
                         + observationFailure.getClass().getSimpleName() + ")");
             }
         }
-        return queryHash;
     }
 }

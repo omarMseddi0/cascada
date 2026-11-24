@@ -19,9 +19,6 @@ final class ExactCubeSql {
         var grain = query.grain().stream().map(ExactCubeSql::quote).toList();
         for (int i = 0; i < grain.size(); i++) {
             String key = grain.get(i);
-            if (source.types().get(query.grain().get(i)).equals("string")) {
-                key = "hex(CAST(" + key + " AS BINARY))";
-            }
             select.add(key + " AS cube_k" + i);
         }
         select.add("COUNT(*) AS cube_rows");
@@ -39,7 +36,7 @@ final class ExactCubeSql {
         return query.outerSql().replace(query.sourceToken(), relation(source));
     }
 
-    private static String relation(ExactCubeSource source) {
+    static String relation(ExactCubeSource source) {
         return "delta." + quote(source.path()) + " VERSION AS OF " + source.version();
     }
 

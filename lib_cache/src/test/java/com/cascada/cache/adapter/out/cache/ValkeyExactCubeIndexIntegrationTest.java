@@ -9,8 +9,6 @@ import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import com.cascada.cache.fixture.ValkeyTestDatabase;
 import io.lettuce.core.RedisClient;
-import io.lettuce.core.ScanArgs;
-import io.lettuce.core.ScriptOutputType;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -25,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ValkeyExactCubeIndexIntegrationTest {
     @RegisterExtension final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
-    @Test void selectsRarePostingsAndReturnsAllMatchingDescriptors() {
+    @Test void indexesAndReadsTheSameOrdinaryBucket() {
         var source = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
         var population = new CubePopulation(source, "ts", "", "amount");
         var range = new CubeInterval(0, 86400);
@@ -33,49 +31,28 @@ class ValkeyExactCubeIndexIntegrationTest {
         var ttl = Duration.ofMinutes(5);
         var state = ResultFrame.builder().column("cube_rows", ColumnType.LONG)
                 .column("cube_sum", ColumnType.LONG).row(1L, 2L).build();
-        var store = valkey.cache(new PortableFrameSerializer()).exactCubeStore();
-        String fence = store.publicationFence();
-        int width = Integer.getInteger("cascada.exact.index.fixture.descriptors", 4096);
-        for (int i = 0; i < width; i++) {
-            store.publish(population, range, List.of("region", "device"), measure, state, ttl, fence);
-        }
-        store.publish(population, range, List.of("region", "store"), measure, state, ttl, fence);
-        store.publish(population, range, List.of("region", "store"), Set.of(CubeMeasure.COUNT), state, ttl, fence);
+        var backend = valkey.cache(new PortableFrameSerializer());
+        var store = backend.exactCubeStore();
+        String fence = backend.warmingGeneration().orElseThrow();
+        String common = "QC:V4:B86400:common:0";
+        String rare = "QC:V4:B86400:rare:0";
+        assertThat(store.storeBucket(common, state, ttl, fence, population, range, List.of("region", "device"), "mean")).isTrue();
+        assertThat(store.storeBucket(rare, state, ttl, fence, population, range, List.of("region", "store"), "mean")).isTrue();
         var client = RedisClient.create(valkey.uri());
         try (var connection = client.connect()) {
             var commands = connection.sync();
-            int stale = Integer.getInteger("cascada.exact.index.fixture.staleDescriptors", 0);
-            if (stale > 0) {
-                var posting = commands.scan(ScanArgs.Builder.matches("QC:V4:exact:*:SUM:region").limit(10_000));
-                assertThat(posting.getKeys()).hasSize(1);
-                String key = posting.getKeys().getFirst();
-                String insert = """
-                        for i = tonumber(ARGV[1]), tonumber(ARGV[2]) do
-                            local id = string.format('%08x-0000-4000-8000-%012x', i, i)
-                            redis.call('ZADD', KEYS[1], 0, ARGV[3] .. '/' .. id ..
-                              '|0|86400|region,device|SUM|1|64|64|' .. string.rep('0', 64))
-                        end
-                        return 1
-                        """;
-                for (int start = 1; start <= stale; start += 4096) {
-                    commands.eval(insert, ScriptOutputType.INTEGER, new String[] {key},
-                            Integer.toString(start), Integer.toString(Math.min(stale, start + 4095)), fence);
-                }
-                assertThat(commands.zcard(key)).isEqualTo((long) width + stale + 1);
-            }
+            assertThat(commands.keys("QC:V4:B*")).containsExactlyInAnyOrder(common, rare);
+            assertThat(commands.keys("QC:V4:exact:v1:frame:*")).isEmpty();
             long keysBefore = calls(commands.info("commandstats"), "keys");
             long scansBefore = calls(commands.info("commandstats"), "scan");
             var shortlist = store.candidates(population, range, List.of("region", "store"), measure);
-            assertThat(shortlist).singleElement().satisfies(fragment -> {
-                assertThat(fragment.grain()).containsExactly("region", "store");
-                assertThat(fragment.measures()).containsExactly(CubeMeasure.SUM);
-                assertThat(store.read(fragment)).isPresent();
-            });
-            assertThat(store.candidates(population, range, List.of("region"), measure)).hasSize(width + stale + 1);
+            assertThat(shortlist).singleElement().satisfies(fragment -> assertThat(fragment.bucketKey()).isEqualTo(rare));
+            store.visitBuckets(shortlist, (index, result) -> assertThat(result).hasValueSatisfying(
+                    frame -> assertThat(frame.longAt(0, 1)).isEqualTo(2)));
+            assertThat(store.candidates(population, range, List.of("region"), measure)).hasSize(2);
             assertThat(store.candidates(population, range, List.of("unknown"), measure)).isEmpty();
             assertThat(calls(commands.info("commandstats"), "keys")).isEqualTo(keysBefore);
             assertThat(calls(commands.info("commandstats"), "scan")).isEqualTo(scansBefore);
-            System.out.println("EXACT_CUBE_VALKEY indexed=" + (width + stale + 1) + " rare=1 broad=" + (width + stale + 1));
         } finally {
             client.shutdown();
         }

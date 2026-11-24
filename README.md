@@ -31,7 +31,7 @@ The reactor targets Java 21, Spark 4.1.1, Scala 2.13, and Delta Lake 4.1.0. The 
 
 Set `CASCADA_EXACT_CUBE_ENABLED=true` to opt in. The exact route uses Valkey manifests scoped to a registered Delta table, its pinned version, SQL semantics, and the configured `CASCADA_EXACT_CUBE_ACCESS_SCOPE`. The default scope assumes all query callers have the same table visibility.
 
-Supported prior queries publish complete integral `SUM` and `COUNT(column)` state. A later ordinary SQL request can roll the state up or combine it with a version-pinned Spark residual, including to reconstruct `AVG`. A supported aggregate can also supply a typed relation inside a CTE, join, or subquery. Filter narrowing requires the relevant key to survive in the stored grain. The original query runs through the appropriate Spark or existing cache route when a proof fails.
+The normal warmer stores each bucket payload once. Eligible integral AVG buckets also get index metadata pointing to that bucket key and its verified Delta snapshot. The ordinary AVG route and cross-shape composition read the same stored SUM and COUNT ingredients. Composition uses the normal Valkey bucket reader and the shared partitioned frame accumulator. It can also supply a typed relation inside a CTE, join, or subquery. Filter narrowing requires the relevant key to survive in the stored grain. Existing bucket values are compressed whole frames, so row filtering is applied after decoding the selected buckets.
 
 For the qualification suite, use JDK 21 and an isolated disposable Valkey database:
 
@@ -40,7 +40,7 @@ export CASCADA_TEST_VALKEY_URI=redis://127.0.0.1:6379/15
 mvn -Plocal-spark -Dcascada.spark.integration=true -Dcascada.cache.spark.integration=true test
 ```
 
-The exact-cube tests emit route, residual, source-version, and HTTP last-byte measurements. Set `-Dcascada.exact.index.fixture.staleDescriptors=1000000` to exercise dense Valkey metadata and `-Dcascada.exact.fixture.rows=1000000` to run the exact-cube fixture with skewed input. The million-descriptor fixture stores synthetic manifest entries alongside real published payloads.
+The exact-cube tests emit route, residual, source-version, and HTTP last-byte measurements. The four- and six-shape benchmark warms ordinary buckets and checks their key identities and the result against pinned Spark.
 
 ## Configuration and API
 

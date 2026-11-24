@@ -95,6 +95,23 @@ public final class ResultFrame {
         return column == null ? null : valueAt(row, column);
     }
 
+    /** A column-only view over the same immutable data, with caller-supplied output names. */
+    public ResultFrame project(List<String> sourceNames, List<String> outputNames) {
+        if (sourceNames.size() != outputNames.size()) throw new IllegalArgumentException("projection width mismatch");
+        Object[] projectedColumns = new Object[sourceNames.size()];
+        long[][] projectedPresence = new long[sourceNames.size()][];
+        Map<String, ColumnType> types = new LinkedHashMap<>();
+        for (int column = 0; column < sourceNames.size(); column++) {
+            int source = columnIndex(sourceNames.get(column));
+            if (types.put(outputNames.get(column), indexedTypes[source]) != null) {
+                throw new IllegalArgumentException("duplicate output column");
+            }
+            projectedColumns[column] = columns[source];
+            projectedPresence[column] = present[source];
+        }
+        return new ResultFrame(outputNames, types, projectedColumns, projectedPresence, rowCount);
+    }
+
     public int rowCount() {
         return rowCount;
     }

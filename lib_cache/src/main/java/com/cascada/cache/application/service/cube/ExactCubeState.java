@@ -8,105 +8,109 @@ import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.CubeKeyFilter;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.StandardCharsets;
+import com.cascada.cache.application.service.merge.SparkValues;
+import com.cascada.cache.application.service.merge.TypedFrameAccumulator;
+import com.cascada.cache.domain.merge.AggregateFunction;
+import java.util.concurrent.Executor;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
 
-/** Checked integral aggregate state. String keys use Spark's binary UTF-8 bytes. */
+/** Checked integral state reduced using the normal bucket merge workers. */
 final class ExactCubeState {
-    // INT_MIN * this bound fits in both LONG and the exact integer range of IEEE-754 DOUBLE.
     private static final long MAX_PRESENT = 1L << 22;
     private final ExactCubeQuery query;
     private final ExactCubeSource source;
-    private final Map<CubeMeasure, Map<List<Object>, CubeAccumulator>> measures = new EnumMap<>(CubeMeasure.class);
+    private final int workers;
+    private final Executor mergeExecutor;
+    private final List<String> dimensions;
+    private final Map<List<CubeMeasure>, TypedFrameAccumulator> accumulators = new HashMap<>();
 
-    ExactCubeState(ExactCubeQuery query, ExactCubeSource source) {
+    ExactCubeState(ExactCubeQuery query, ExactCubeSource source, int workers, Executor mergeExecutor) {
         this.query = query;
         this.source = source;
-        query.measures().forEach(measure -> measures.put(measure, new HashMap<>()));
+        this.workers = workers;
+        this.mergeExecutor = mergeExecutor;
+        this.dimensions = java.util.stream.IntStream.range(0, query.grain().size())
+                .mapToObj(index -> "cube_k" + index).toList();
     }
 
-    void add(ResultFrame frame, List<String> grain, Set<CubeMeasure> columns, Set<CubeMeasure> use) {
-        add(frame, grain, columns, use, List.of());
-    }
-
-    void add(ResultFrame frame, List<String> grain, Set<CubeMeasure> columns, Set<CubeMeasure> use,
-             List<CubeKeyFilter> filters) {
-        var expected = new ArrayList<String>();
-        for (int i = 0; i < grain.size(); i++) {
-            expected.add("cube_k" + i);
-            require(frame.columnNames().size() > i && frame.columnTypeAt(i) == keyType(grain.get(i)));
+    void add(ResultFrame frame, List<String> grain, List<String> keyColumns, String presenceColumn,
+             Map<CubeMeasure, String> valueColumns, List<CubeKeyFilter> filters) {
+        var sourceKeys = query.grain().stream().map(key -> keyColumns.get(grain.indexOf(key))).toList();
+        int[] filterIndexes = filters.stream().mapToInt(filter ->
+                frame.columnIndex(keyColumns.get(grain.indexOf(filter.column())))).toArray();
+        var measures = valueColumns.keySet().stream().sorted().toList();
+        String certificate = "cube_rows";
+        var inputs = new ArrayList<>(sourceKeys);
+        inputs.add(presenceColumn);
+        var outputs = new ArrayList<>(dimensions);
+        outputs.add(certificate);
+        for (CubeMeasure measure : measures) {
+            inputs.add(valueColumns.get(measure));
+            outputs.add(measure.stateLabel());
         }
-        expected.add("cube_rows");
-        columns.stream().sorted().map(CubeMeasure::stateLabel).forEach(expected::add);
-        require(frame.columnNames().equals(expected));
-        for (int i = grain.size(); i < expected.size(); i++) require(frame.columnTypeAt(i) == ColumnType.LONG);
-        require(!grain.isEmpty() || frame.rowCount() == 1);
-        int[] keyIndexes = query.grain().stream().mapToInt(grain::indexOf).toArray();
-        var used = use.toArray(CubeMeasure[]::new);
-        int[] measureIndexes = Arrays.stream(used).mapToInt(measure -> frame.columnIndex(measure.stateLabel())).toArray();
-        int[] filterIndexes = filters.stream().mapToInt(filter -> grain.indexOf(filter.column())).toArray();
-        var filterValues = filters.stream().map(filter -> filter.literal() == null ? null
-                : HexFormat.of().withUpperCase().formatHex(filter.literal().getBytes(StandardCharsets.UTF_8))).toList();
-        Set<List<Object>> fineKeys = new HashSet<>();
-        for (int row = 0; row < frame.rowCount(); row++) {
-            QueryCancellation.requireCurrentActive();
-            Object[] fineKey = new Object[grain.size()];
-            for (int k = 0; k < fineKey.length; k++) {
-                Object value = frame.valueAt(row, k);
-                if (value instanceof String string) validateHex(string);
-                fineKey[k] = value;
-            }
-            require(fineKeys.add(Arrays.asList(fineKey)));
-            boolean include = true;
-            for (int i = 0; i < filterIndexes.length && include; i++) {
-                Object value = fineKey[filterIndexes[i]];
-                include = switch (filters.get(i).operator()) {
-                    case STRING_EQUALS -> filterValues.get(i).equals(value);
-                    case IS_NULL -> value == null;
-                    case IS_NOT_NULL -> value != null;
-                };
-            }
-            if (!include) continue;
-            Object[] coarseKey = new Object[keyIndexes.length];
-            for (int k = 0; k < coarseKey.length; k++) coarseKey[k] = fineKey[keyIndexes[k]];
-            List<Object> key = Arrays.asList(coarseKey);
-            require(!frame.isNullAt(row, grain.size()));
-            long present = frame.longAt(row, grain.size());
-            require(present >= (grain.isEmpty() ? 0 : 1) && present <= MAX_PRESENT);
-
-            for (int i = 0; i < used.length; i++) {
-                CubeMeasure measure = used[i];
-                int column = measureIndexes[i];
-                boolean hasValue = !frame.isNullAt(row, column);
-                long value = hasValue ? frame.longAt(row, column) : 0;
-                if (measure == CubeMeasure.COUNT) {
-                    require(hasValue && value >= 0 && value <= present);
-                } else if (hasValue) {
-                    long bound = present << 31;
-                    require(present > 0 && value >= -bound && value <= bound);
+        ResultFrame selected = frame.project(inputs, outputs);
+        if (!filters.isEmpty()) {
+            var builder = ResultFrame.builder();
+            for (String name : selected.columnNames()) builder.column(name, selected.columnType(name));
+            for (int row = 0; row < selected.rowCount(); row++) {
+                QueryCancellation.requireCurrentActive();
+                boolean keep = true;
+                for (int i = 0; i < filters.size() && keep; i++) {
+                    var filter = filters.get(i);
+                    int column = filterIndexes[i];
+                    keep = switch (filter.operator()) {
+                        case IS_NULL -> frame.isNullAt(row, column);
+                        case IS_NOT_NULL -> !frame.isNullAt(row, column);
+                        case STRING_EQUALS -> !frame.isNullAt(row, column)
+                                && filter.literal().equals(frame.stringAt(row, column));
+                    };
                 }
-                Map<List<Object>, CubeAccumulator> groups = measures.get(measure);
-                var aggregate = groups.computeIfAbsent(key, ignored -> new CubeAccumulator());
-                aggregate.presence += present;
-                require(aggregate.presence <= MAX_PRESENT);
-                aggregate.value = Math.addExact(aggregate.value, value);
-                aggregate.nonNull |= hasValue;
+                if (keep) {
+                    for (int column = 0; column < selected.columnNames().size(); column++) {
+                        builder.appendCell(selected, row, column);
+                    }
+                }
             }
+            selected = builder.build();
         }
+        var accumulator = accumulators.get(measures);
+        if (accumulator == null) {
+            var functions = new HashMap<String, AggregateFunction>();
+            functions.put(certificate, AggregateFunction.SUM);
+            measures.forEach(measure -> functions.put(measure.stateLabel(), AggregateFunction.SUM));
+            accumulator = new TypedFrameAccumulator(selected, dimensions, functions, null, 1, workers, mergeExecutor);
+            accumulators.put(measures, accumulator);
+        }
+        accumulator.accept(selected);
     }
 
     ResultFrame finish() {
+        Map<CubeMeasure, Map<List<Object>, CubeAccumulator>> measures = new EnumMap<>(CubeMeasure.class);
+        for (var entry : accumulators.entrySet()) {
+            var merged = entry.getValue().finish();
+            int presence = merged.columnIndex("cube_rows");
+            for (CubeMeasure measure : entry.getKey()) {
+                int value = merged.columnIndex(measure.stateLabel());
+                var states = measures.computeIfAbsent(measure, ignored -> new HashMap<>());
+                for (int row = 0; row < merged.rowCount(); row++) {
+                    var key = new ArrayList<Object>(dimensions.size());
+                    for (int column = 0; column < dimensions.size(); column++) key.add(merged.valueAt(row, column));
+                    var state = states.computeIfAbsent(key, ignored -> new CubeAccumulator());
+                    state.presence = Math.addExact(state.presence, merged.longAt(row, presence));
+                    require(state.presence >= 0 && state.presence <= MAX_PRESENT);
+                    if (!merged.isNullAt(row, value)) {
+                        state.nonNull = true;
+                        state.value = Math.addExact(state.value, merged.longAt(row, value));
+                    }
+                }
+            }
+        }
         if (query.grain().isEmpty()) {
             for (var groups : measures.values()) groups.computeIfAbsent(List.of(), key -> new CubeAccumulator());
         }
@@ -123,7 +127,7 @@ final class ExactCubeState {
             CubeAccumulator sum = sums == null ? null : sums.get(key);
             CubeAccumulator count = counts == null ? null : counts.get(key);
             require(sum == null || count == null
-                    || sum.presence == count.presence && sum.nonNull == (count.value != 0));
+                    || sum.nonNull == (count.value != 0));
             if (size == 0) continue;
             Object[] row = new Object[query.projections().size()];
             for (int i = 0; i < row.length; i++) {
@@ -157,7 +161,7 @@ final class ExactCubeState {
         }
         for (int row = 0; row < size; row++) {
             for (Object value : rows.get(row)) {
-                builder.appendValue(value instanceof String string ? decode(string) : value);
+                builder.appendValue(value);
             }
         }
         return builder.build();
@@ -175,7 +179,7 @@ final class ExactCubeState {
             int result = switch (a) {
                 case Long value -> value.compareTo((Long) b);
                 case Double value -> value.compareTo((Double) b);
-                case String value -> value.compareTo((String) b);
+                case String value -> SparkValues.compareStrings(value, (String) b);
                 default -> throw new IllegalStateException("unsupported cube sort key");
             };
             if (result != 0) return sort.descending() ? -result : result;
@@ -185,22 +189,6 @@ final class ExactCubeState {
 
     private ColumnType keyType(String column) {
         return source.types().get(column).equals("string") ? ColumnType.STRING : ColumnType.LONG;
-    }
-
-    private static void validateHex(String value) {
-        require((value.length() & 1) == 0);
-        for (int i = 0; i < value.length(); i++) {
-            char digit = value.charAt(i);
-            require(digit >= '0' && digit <= '9' || digit >= 'A' && digit <= 'F');
-        }
-    }
-
-    private static String decode(String hex) {
-        try {
-            return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(HexFormat.of().parseHex(hex))).toString();
-        } catch (CharacterCodingException | IllegalArgumentException invalid) {
-            throw new IllegalStateException("invalid or oversized cube key", invalid);
-        }
     }
 
     private static void require(boolean condition) {

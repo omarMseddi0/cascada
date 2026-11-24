@@ -14,5 +14,7 @@ public interface ExactCubeSqlPort {
 
     String stateStatement(ExactCubeQuery query, ExactCubeSource source, CubeInterval range, Set<CubeMeasure> measures);
 
+    String pinnedBucketStatement(String sql, ExactCubeSource source);
+
     String outerStatement(ExactCubeQuery query, ExactCubeSource source);
 }

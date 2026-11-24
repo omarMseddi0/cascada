@@ -122,21 +122,22 @@ public final class CascadaEngineFactory implements AutoCloseable {
         }
         this.cubeCatalog = new CubeShapeCatalog();
         GapQueryRewriterPort gapQueryRewriter = createGapQueryRewriter();
-        this.warmingOrchestrator = createWarmingOrchestrator(gapQueryRewriter, validatedConfiguration);
-        CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
-                gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks,
-                Clock.systemUTC(), mergeTasks);
-        this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
-                validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor,
-                applicationSettings.warming().enabled() ? warmingOrchestrator : null);
         // The current registered-source deployment grants the same table visibility to every SQL caller.
         // Deployments with different effective policies must configure separate scope identities.
         ExactCubeExecution exactCube = exactCubeEnabled && queryExecutor instanceof PinnedQueryExecutorPort pinned
                 && accessScope != null && !accessScope.isBlank()
                 ? new ExactCubeExecution(new ExactCubeSqlAdapter(batchPaths(),
                         settings.cacheExecution().timeColumnName()), cacheBackend.exactCubeStore(), pinned,
-                        accessScope, Clock.systemUTC(), settings.cacheExecution().bucketSeconds(), applicationSettings.warming().lookback())
+                        accessScope, Clock.systemUTC(), settings.cacheExecution().bucketSeconds(),
+                        settings.cacheExecution().mergeWorkerCount(), mergeTasks)
                 : null;
+        this.warmingOrchestrator = createWarmingOrchestrator(gapQueryRewriter, validatedConfiguration, exactCube);
+        CacheExecutionEngine executionEngine = new CacheExecutionEngine(cacheBackend, queryExecutor,
+                gapQueryRewriter, settings.cacheExecution(), coverageIndex, cubeCatalog, cacheTasks,
+                Clock.systemUTC(), mergeTasks);
+        this.cachedQueryUseCase = new ExecuteCachedQueryService(SafetyRuleRegistry.defaultRegistry(),
+                validatedConfiguration, new QueryHashGenerator(), executionEngine, queryExecutor,
+                applicationSettings.warming().enabled() ? warmingOrchestrator : null);
         this.logicalQueryUseCase = new ExecuteLogicalQueryService(createTranslator(), createCanonicalizer(),
                 cachedQueryUseCase, queryExecutor, exactCube);
         this.administrationService = new CacheAdministrationService(cacheBackend, coverageIndex, cubeCatalog);
@@ -150,7 +151,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
     }
 
     private WarmingOrchestrator createWarmingOrchestrator(GapQueryRewriterPort gapQueryRewriter,
-                                                          CacheConfiguration safetyConfiguration) {
+                                                          CacheConfiguration safetyConfiguration, ExactCubeExecution exactCube) {
         WarmingSettings warming = applicationSettings.warming();
         return new WarmingOrchestrator(cacheBackend, queryExecutor, gapQueryRewriter,
                 new WarmingQueue(warming.maximumPatterns()), popularityTracker, coverageIndex, createCanonicalizer(),
@@ -158,7 +159,7 @@ public final class CascadaEngineFactory implements AutoCloseable {
                 new WarmingConfiguration(settings.cacheExecution().bucketSeconds(), settings.warmingTopNQueries(),
                         warming.maximumPatterns(), warming.lookback(), applicationSettings.cacheSafety().maximumCachedRows(),
                         settings.cacheExecution().fixedStepSeconds()),
-                Clock.systemUTC(), safetyConfiguration);
+                Clock.systemUTC(), safetyConfiguration, exactCube);
     }
 
     private ValkeyCacheBackendAdapter createCacheBackend() {

@@ -4,6 +4,7 @@ import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.application.port.out.ExactCubeStorePort;
 import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.key.CacheKeyConstants;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.CubeInterval;
@@ -21,19 +22,21 @@ import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BiConsumer;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
-/** Immutable payloads become visible only through the scoped manifest index. */
+/** Scoped shape index referring to the ordinary bucket payloads. */
 final class ValkeyExactCubeStore implements ExactCubeStorePort {
     static final String PREFIX = "QC:V4:exact:v1:";
-    private static final String POSTINGS = ":postings:v2:";
+    private static final String POSTINGS = ":bucket-postings:";
     private static final String PUBLISH = """
             if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
-            if not redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3], 'NX') then return 0 end
-            for i = 3, #KEYS do
+            redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+            redis.call('SET', KEYS[3], ARGV[6])
+            for i = 4, #KEYS do
                 redis.call('ZADD', KEYS[i], ARGV[4], ARGV[5])
                 redis.call('PEXPIRE', KEYS[i], ARGV[3], 'GT')
                 if redis.call('PTTL', KEYS[i]) == -1 then redis.call('PEXPIRE', KEYS[i], ARGV[3]) end
@@ -70,52 +73,32 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
             end
             return result
             """;
-    private static final String READ = """
-            if redis.call('GET', KEYS[2]) ~= ARGV[1] then return false end
-            local published = false
-            for i = 3, #KEYS do
-                if redis.call('ZSCORE', KEYS[i], ARGV[3]) then published = true; break end
-            end
-            if not published then return false end
-            if redis.call('STRLEN', KEYS[1]) ~= tonumber(ARGV[2]) then
-                for i = 3, #KEYS do redis.call('ZREM', KEYS[i], ARGV[3]) end
-                return false
-            end
-            return redis.call('GET', KEYS[1])
+    private static final String FORGET_REFERENCE = """
+            for i = 4, #KEYS do redis.call('ZREM', KEYS[i], ARGV[1]) end
+            return 1
             """;
-    private static final String FORGET = """
-            for i = 2, #KEYS do redis.call('ZREM', KEYS[i], ARGV[1]) end
-            return redis.call('DEL', KEYS[1])
-            """;
-
+    private final ValkeyCacheBackendAdapter backend;
     private final RedisCommands<byte[], byte[]> commands;
     private final CacheValueSerializerPort serializer;
     private final Supplier<String> fence;
     private final byte[] fenceKey;
+    private final byte[] revisionKey;
 
-    ValkeyExactCubeStore(RedisCommands<byte[], byte[]> commands, CacheValueSerializerPort serializer,
-                         Supplier<String> fence, String fenceKey) {
+    ValkeyExactCubeStore(ValkeyCacheBackendAdapter backend, RedisCommands<byte[], byte[]> commands,
+                         CacheValueSerializerPort serializer, Supplier<String> fence, String fenceKey, String revisionKey) {
+        this.backend = backend;
         this.commands = commands;
         this.serializer = serializer;
         this.fence = fence;
         this.fenceKey = bytes(fenceKey);
-    }
-
-    @Override
-    public String publicationFence() {
-        return fence.get();
-    }
-
-    @Override
-    public List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval) {
-        return candidates(population, interval, List.of(), EnumSet.allOf(CubeMeasure.class));
+        this.revisionKey = bytes(revisionKey);
     }
 
     @Override
     public List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval,
                                              List<String> grain, Set<CubeMeasure> measures) {
         QueryCancellation.requireCurrentActive();
-        String current = publicationFence();
+        String current = fence.get();
         String index = index(population, current);
         // Scores are doubles. Widen by the rounding unit and check exact endpoints below.
         double start = interval.start(), end = interval.end();
@@ -142,50 +125,40 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
     }
 
     @Override
-    public Optional<ResultFrame> read(ExactCubeFragment manifest) {
-        QueryCancellation.requireCurrentActive();
-        int separator = manifest.generation().indexOf('/');
-        if (separator < 0 || manifest.compressedBytes() <= 0
-                || manifest.decodedBytes() <= 0) return Optional.empty();
-        String generationFence = manifest.generation().substring(0, separator);
-        byte[] payload = commands.eval(READ, ScriptOutputType.VALUE,
-                manifestKeys(manifest, generationFence, true),
-                bytes(generationFence), bytes(Integer.toString(manifest.compressedBytes())),
-                bytes(descriptor(manifest)));
-        return decode(manifest, generationFence, payload);
-    }
-
-    private Optional<ResultFrame> decode(ExactCubeFragment manifest, String generationFence, byte[] payload) {
-        if (payload == null) return Optional.empty();
-        if (payload.length < Integer.BYTES || payload.length != manifest.compressedBytes()
-                || !digest(payload).equals(manifest.digest())
-                || ByteBuffer.wrap(payload).getInt() != manifest.decodedBytes()) {
-            forget(manifest, generationFence);
-            return Optional.empty();
+    public void visitBuckets(List<ExactCubeFragment> manifests, BiConsumer<Integer, Optional<ResultFrame>> visitor) {
+        String generation = fence.get() + "/";
+        if (manifests.stream().anyMatch(manifest -> !manifest.generation().startsWith(generation))) {
+            throw new IllegalStateException("bucket generation changed before read");
         }
-        try {
-            return Optional.of(serializer.deserialize(payload));
-        } catch (RuntimeException corrupt) {
-            QueryCancellation.rethrowIfCancelled(corrupt);
-            forget(manifest, generationFence);
-            return Optional.empty();
-        }
+        backend.visitVerifiedKeys(manifests.stream().map(ExactCubeFragment::bucketKey).toList(), (i, payload) -> {
+            var manifest = manifests.get(i);
+            return payload.length == manifest.compressedBytes() && digest(payload).equals(manifest.digest());
+        }, (i, result) -> {
+            if (result.isEmpty()) {
+                var manifest = manifests.get(i);
+                String token = manifest.generation();
+                String bucketFence = token.substring(0, token.indexOf('/'));
+                commands.eval(FORGET_REFERENCE, ScriptOutputType.INTEGER, manifestKeys(manifest, bucketFence),
+                        bytes(descriptor(manifest)));
+            }
+            visitor.accept(i, result);
+        });
     }
 
     @Override
-    public void publish(CubePopulation population, CubeInterval interval, List<String> grain, Set<CubeMeasure> measures,
-                        ResultFrame state, Duration ttl, String publicationFence) {
+    public boolean storeBucket(String key, ResultFrame frame, Duration ttl, String generation,
+                               CubePopulation population, CubeInterval interval, List<String> grain, String averageAlias) {
         QueryCancellation.requireCurrentActive();
-        byte[] payload = serializer.serialize(state);
+        if (!CacheKeyConstants.isBucketKey(key)) throw new IllegalArgumentException("expected an ordinary bucket key");
+        byte[] payload = serializer.serialize(frame);
         int expanded = ByteBuffer.wrap(payload).getInt();
-        if (expanded <= 0) return;
-        String generation = publicationFence + "/" + UUID.randomUUID();
-        var manifest = new ExactCubeFragment(generation, population, interval, grain, measures,
-                state.rowCount(), payload.length, expanded, digest(payload));
-        commands.eval(PUBLISH, ScriptOutputType.INTEGER,
-                manifestKeys(manifest, publicationFence, true),
-                bytes(publicationFence), payload, bytes(Long.toString(ttl.toMillis())),
-                bytes(Long.toString(interval.start())), bytes(descriptor(manifest)));
+        var manifest = new ExactCubeFragment(generation + "/" + UUID.randomUUID(), population, interval, grain,
+                EnumSet.allOf(CubeMeasure.class), frame.rowCount(), payload.length, expanded, digest(payload),
+                key, averageAlias);
+        Long stored = commands.eval(PUBLISH, ScriptOutputType.INTEGER, manifestKeys(manifest, generation),
+                bytes(generation), payload, bytes(Long.toString(ttl.toMillis())),
+                bytes(Long.toString(interval.start())), bytes(descriptor(manifest)), bytes(UUID.randomUUID().toString()));
+        return Long.valueOf(1L).equals(stored);
     }
 
     private static String index(CubePopulation population, String fence) {
@@ -197,16 +170,12 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
         return PREFIX + "index:" + digest(bytes(key.toString())) + POSTINGS;
     }
 
-    private void forget(ExactCubeFragment manifest, String fence) {
-        commands.eval(FORGET, ScriptOutputType.INTEGER,
-                manifestKeys(manifest, fence, false), bytes(descriptor(manifest)));
-    }
-
-    private byte[][] manifestKeys(ExactCubeFragment manifest, String fence, boolean includeFence) {
+    private byte[][] manifestKeys(ExactCubeFragment manifest, String fence) {
         String index = index(manifest.population(), fence);
         var keys = new ArrayList<byte[]>();
-        keys.add(frame(manifest.generation()));
-        if (includeFence) keys.add(fenceKey);
+        keys.add(bytes(manifest.bucketKey()));
+        keys.add(fenceKey);
+        keys.add(revisionKey);
         for (CubeMeasure measure : manifest.measures().stream().sorted().toList()) {
             keys.add(posting(index, measure, ""));
             manifest.grain().forEach(column -> keys.add(posting(index, measure, column)));
@@ -218,21 +187,18 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
         return bytes(index + measure.name() + ":" + column);
     }
 
-    private static byte[] frame(String generation) {
-        return bytes(PREFIX + "frame:" + generation);
-    }
-
     private static String descriptor(ExactCubeFragment fragment) {
         return String.join("|", fragment.generation(), Long.toString(fragment.interval().start()),
                 Long.toString(fragment.interval().end()), String.join(",", fragment.grain()),
                 fragment.measures().stream().sorted().map(Enum::name).collect(Collectors.joining(",")),
                 Integer.toString(fragment.rows()), Integer.toString(fragment.compressedBytes()),
-                Integer.toString(fragment.decodedBytes()), fragment.digest());
+                Integer.toString(fragment.decodedBytes()), fragment.digest(), fragment.bucketKey(), fragment.averageAlias());
     }
 
     private static ExactCubeFragment parseManifest(CubePopulation population, byte[] descriptor, String fence) {
         String[] fields = new String(descriptor, StandardCharsets.UTF_8).split("[|]", -1);
-        if (fields.length != 9 || !fields[0].startsWith(fence + "/") || !fields[8].matches("[a-f0-9]{64}")) return null;
+        if (fields.length != 11 || !fields[0].startsWith(fence + "/") || !fields[8].matches("[a-f0-9]{64}")
+                || !CacheKeyConstants.isBucketKey(fields[9])) return null;
         try {
             UUID.fromString(fields[0].substring(fence.length() + 1));
             var measures = EnumSet.noneOf(CubeMeasure.class);
@@ -240,7 +206,7 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
             List<String> grain = fields[3].isEmpty() ? List.of() : List.of(fields[3].split(","));
             return new ExactCubeFragment(fields[0], population,
                     new CubeInterval(Long.parseLong(fields[1]), Long.parseLong(fields[2])), grain, measures,
-                    Integer.parseInt(fields[5]), Integer.parseInt(fields[6]), Integer.parseInt(fields[7]), fields[8]);
+                    Integer.parseInt(fields[5]), Integer.parseInt(fields[6]), Integer.parseInt(fields[7]), fields[8], fields[9], fields[10]);
         } catch (IllegalArgumentException | ArithmeticException corrupt) {
             return null;
         }

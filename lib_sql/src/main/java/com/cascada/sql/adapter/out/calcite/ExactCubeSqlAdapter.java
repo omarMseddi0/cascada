@@ -68,6 +68,13 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
     }
 
     @Override
+    public String pinnedBucketStatement(String sql, ExactCubeSource source) {
+        String token = SqlTrees.unusedSentinel(sql, "CASCADA_BUCKET_PIN");
+        return new ExactCubeRelations(CalciteSql.parseQuery(sql), token).statement(source.path(), null, null)
+                .replace(token, ExactCubeSql.relation(source));
+    }
+
+    @Override
     public String outerStatement(ExactCubeQuery query, ExactCubeSource source) {
         return ExactCubeSql.outer(query, source);
     }

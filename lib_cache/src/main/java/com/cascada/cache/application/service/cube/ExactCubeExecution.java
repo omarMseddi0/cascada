@@ -2,6 +2,12 @@ package com.cascada.cache.application.service.cube;
 
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.model.query.ExactCubePlan;
+import com.cascada.cache.application.model.query.BucketCubeBinding;
+import com.cascada.cache.domain.frame.ResultFrame;
+import com.cascada.cache.domain.merge.AverageIngredients;
+import com.cascada.cache.domain.model.cube.CubeOperation;
+import java.util.EnumMap;
+import java.util.concurrent.Executor;
 import com.cascada.cache.application.model.query.ExactCubeTrace;
 import com.cascada.cache.application.model.query.QueryResult;
 import com.cascada.cache.application.port.out.ExactCubeSqlPort;
@@ -34,17 +40,19 @@ public final class ExactCubeExecution {
     private final String accessScope;
     private final Clock clock;
     private final long bucketSeconds;
-    private final Duration ttl;
+    private final int mergeWorkers;
+    private final Executor mergeExecutor;
 
     public ExactCubeExecution(ExactCubeSqlPort sql, ExactCubeStorePort store, PinnedQueryExecutorPort executor,
-                              String accessScope, Clock clock, long bucketSeconds, Duration ttl) {
+                              String accessScope, Clock clock, long bucketSeconds, int mergeWorkers, Executor mergeExecutor) {
         this.sql = sql;
         this.store = store;
         this.executor = executor;
         this.accessScope = accessScope;
         this.clock = clock;
         this.bucketSeconds = bucketSeconds;
-        this.ttl = ttl;
+        this.mergeWorkers = mergeWorkers;
+        this.mergeExecutor = mergeExecutor;
     }
 
     public QueryResult execute(String physicalSql, Supplier<QueryResult> fallback) {
@@ -64,7 +72,7 @@ public final class ExactCubeExecution {
         var population = new CubePopulation(source, query.timeColumn(), query.predicate(), query.input());
         String rejection = rejection(query, source);
         if (rejection != null) return direct(query, source, rejection, List.of(), List.of(), 0);
-        return executeBound(query, population);
+        return executeBound(query, population, fallback);
     }
 
     private static QueryResult existing(String reason, Supplier<QueryResult> fallback) {
@@ -103,7 +111,7 @@ public final class ExactCubeExecution {
         return null;
     }
 
-    private QueryResult executeBound(ExactCubeQuery query, CubePopulation population) {
+    private QueryResult executeBound(ExactCubeQuery query, CubePopulation population, Supplier<QueryResult> existingRoute) {
         var source = population.source();
         var reads = new ArrayList<ExactCubeFragment>();
         var submitted = new ArrayList<String>();
@@ -123,20 +131,14 @@ public final class ExactCubeExecution {
             if (selected.isPresent()) {
                 return compose(query, population, selected.get(), reads, submitted, planningNanos);
             }
-            boolean alreadyPublished = candidates.stream().anyMatch(fragment ->
-                    fragment.population().equals(population) && fragment.interval().equals(query.interval())
-                            && fragment.grain().equals(query.grain())
-                            && fragment.measures().containsAll(query.measures()));
-            if (!alreadyPublished && query.outerSql() == null && query.limit() == null) {
-                return build(query, population, planningNanos);
-            }
             failureReason = candidates.isEmpty() ? "no-manifest" : "no-beneficial-verified-cover";
         } catch (Exception failure) {
             QueryCancellation.rethrowIfCancelled(failure);
             failureReason = "recovery:" + failure.getClass().getSimpleName();
             LOGGER.fine(() -> "Exact cube restarted at Delta version " + source.version() + ": " + failure.getMessage());
+            return direct(query, source, failureReason, reads, submitted, planningNanos);
         }
-        return direct(query, source, failureReason, reads, submitted, planningNanos);
+        return existing(failureReason, existingRoute);
     }
 
     private QueryResult compose(ExactCubeQuery query, CubePopulation population, ExactCubePlan plan,
@@ -144,7 +146,7 @@ public final class ExactCubeExecution {
         if (!ExactCubePlanChecker.valid(query, population, plan, bucketSeconds)) {
             throw new IllegalStateException("invalid cube cover");
         }
-        var state = new ExactCubeState(query, population.source());
+        var state = new ExactCubeState(query, population.source(), mergeWorkers, mergeExecutor);
         var cache = new LinkedHashMap<ExactCubeFragment, EnumSet<CubeMeasure>>();
         var residuals = new LinkedHashMap<CubeInterval, EnumSet<CubeMeasure>>();
         for (CubeMeasure measure : query.measures().stream().sorted().toList()) {
@@ -156,21 +158,30 @@ public final class ExactCubeExecution {
                 }
             }
         }
-        for (var entry : cache.entrySet()) {
-            QueryCancellation.requireCurrentActive();
-            var fragment = entry.getKey();
-            var frame = store.read(fragment).orElseThrow(() ->
-                    new IllegalStateException("missing or corrupt generation " + fragment.generation()));
+        var fragments = List.copyOf(cache.keySet());
+        store.visitBuckets(fragments, (index, value) -> {
+            var fragment = fragments.get(index);
+            var frame = value.orElseThrow(() ->
+                    new IllegalStateException("missing or changed bucket " + fragment.bucketKey()));
             reads.add(fragment);
-            if (frame.rowCount() != fragment.rows()) throw new IllegalStateException("manifest row count mismatch");
-            state.add(frame, fragment.grain(), fragment.measures(), entry.getValue(),
+            if (frame.rowCount() != fragment.rows()) throw new IllegalStateException("bucket row count mismatch");
+            String alias = fragment.averageAlias();
+            var columns = new EnumMap<CubeMeasure, String>(CubeMeasure.class);
+            for (CubeMeasure measure : cache.get(fragment)) {
+                columns.put(measure, measure == CubeMeasure.SUM
+                        ? AverageIngredients.sumColumn(alias) : AverageIngredients.countColumn(alias));
+            }
+            state.add(frame, fragment.grain(), fragment.grain(), AverageIngredients.countColumn(alias), columns,
                     fragment.population().equals(population) ? List.of() : query.keyFilters());
-        }
+        });
         var source = population.source();
         for (var entry : residuals.entrySet()) {
             String residual = sql.stateStatement(query, source, entry.getKey(), entry.getValue());
             submitted.add(residual);
-            state.add(executor.executePinned(source, residual), query.grain(), entry.getValue(), entry.getValue());
+            var columns = new EnumMap<CubeMeasure, String>(CubeMeasure.class);
+            for (CubeMeasure measure : entry.getValue()) columns.put(measure, measure.stateLabel());
+            var keys = java.util.stream.IntStream.range(0, query.grain().size()).mapToObj(i -> "cube_k" + i).toList();
+            state.add(executor.executePinned(source, residual), query.grain(), keys, "cube_rows", columns, List.of());
         }
         var result = state.finish();
         String outer = null;
@@ -187,22 +198,32 @@ public final class ExactCubeExecution {
         return new QueryResult(result, true, trace("exact-cube", "verified", source, reads, submitted, outer, planningNanos));
     }
 
-    private QueryResult build(ExactCubeQuery query, CubePopulation population, long planningNanos) {
-        String fence = store.publicationFence();
-        var source = population.source();
-        String statement = sql.stateStatement(query, source, query.interval(), query.measures());
-        var frame = executor.executePinned(source, statement);
-        var state = new ExactCubeState(query, source);
-        state.add(frame, query.grain(), query.measures(), query.measures());
-        var answer = state.finish();
-        try {
-            store.publish(population, query.interval(), query.grain(), query.measures(), frame, ttl, fence);
-        } catch (Exception unavailable) {
-            QueryCancellation.rethrowIfCancelled(unavailable);
-            LOGGER.fine(() -> "Exact cube publication skipped: " + unavailable.getClass().getSimpleName());
+    /** Only ordinary AVG buckets with the original grouping columns can be indexed. */
+    public Optional<BucketCubeBinding> bindWarmBucket(String physicalSql) {
+        var recognized = sql.recognize(physicalSql);
+        if (recognized.isEmpty()) return Optional.empty();
+        var query = recognized.get();
+        if (query.outerSql() != null || !query.groupAliases().isEmpty()) return Optional.empty();
+        var averages = query.projections().stream().filter(p -> p.operation() == CubeOperation.AVG).toList();
+        if (averages.size() != 1 || !query.grain().stream().allMatch(key -> query.projections().stream()
+                .anyMatch(p -> p.operation() == CubeOperation.KEY && p.column().equals(key) && p.label().equals(key)))) {
+            return Optional.empty();
         }
-        return new QueryResult(answer, false, trace("pinned-build", "no-manifest", source, List.of(),
-                List.of(), null, planningNanos));
+        return executor.bind(query.path(), accessScope).filter(source -> rejection(query, source) == null)
+                .map(source -> new BucketCubeBinding(
+                        new CubePopulation(source, query.timeColumn(), query.predicate(), query.input()),
+                        query.grain(), averages.getFirst().label()));
+    }
+
+    public ResultFrame executeWarmBucket(String bucketSql, BucketCubeBinding binding) {
+        var source = binding.population().source();
+        return executor.executePinned(source, sql.pinnedBucketStatement(bucketSql, source));
+    }
+
+    public boolean storeWarmBucket(String key, ResultFrame frame, Duration ttl, String generation,
+                                   long start, long end, BucketCubeBinding binding) {
+        return store.storeBucket(key, frame, ttl, generation, binding.population(),
+                new CubeInterval(start, Math.incrementExact(end)), binding.grain(), binding.averageAlias());
     }
 
     private QueryResult direct(ExactCubeQuery query, ExactCubeSource source, String reason,

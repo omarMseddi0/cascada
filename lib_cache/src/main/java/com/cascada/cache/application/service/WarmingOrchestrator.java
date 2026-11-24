@@ -1,5 +1,7 @@
 package com.cascada.cache.application.service;
 
+import com.cascada.cache.application.model.query.BucketCubeBinding;
+import com.cascada.cache.application.service.cube.ExactCubeExecution;
 import com.cascada.cache.application.model.warming.ResolvedWarmingQuery;
 import com.cascada.cache.application.model.config.WarmingConfiguration;
 import com.cascada.cache.application.execution.QueryCancellation;
@@ -15,6 +17,7 @@ import com.cascada.cache.application.model.warming.PatternWarmingResult;
 import com.cascada.cache.application.model.warming.WarmingReport;
 import com.cascada.cache.application.model.warming.ValidationCheck;
 import com.cascada.cache.application.service.cube.CubeShapeCatalog;
+import com.cascada.cache.application.service.cube.ExactCubeExecution;
 import com.cascada.cache.application.service.hashing.QueryHashGenerator;
 import com.cascada.cache.application.service.safety.SafetyRuleRegistry;
 import com.cascada.cache.domain.model.safety.CacheConfiguration;
@@ -66,6 +69,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
 
     private static final Logger LOGGER = Logger.getLogger(WarmingOrchestrator.class.getName());
 
+    private final ExactCubeExecution exactCube;
     private final BucketCachePort cacheBackend;
     private final CacheAdministrationPort cacheAdministration;
     private final QueryExecutorPort sparkExecutor;
@@ -132,6 +136,18 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                                SqlCanonicalizerPort canonicalizer, DataChangeDetector dataChangeDetector,
                                CubeShapeCatalog cubeCatalog, WarmingConfiguration configuration, Clock clock,
                                CacheConfiguration cacheConfiguration) {
+        this(cacheBackend, sparkExecutor, gapQueryRewriter, warmingQueue, popularityTracker, coverageIndex,
+                canonicalizer, dataChangeDetector, cubeCatalog, configuration, clock, cacheConfiguration, null);
+    }
+
+    public WarmingOrchestrator(BucketCachePort cacheBackend, QueryExecutorPort sparkExecutor,
+                               GapQueryRewriterPort gapQueryRewriter, WarmingQueue warmingQueue,
+                               QueryPopularityPort popularityTracker, CoverageIndexPort coverageIndex,
+                               SqlCanonicalizerPort canonicalizer, DataChangeDetector dataChangeDetector,
+                               CubeShapeCatalog cubeCatalog, WarmingConfiguration configuration, Clock clock,
+                               CacheConfiguration cacheConfiguration,
+                               ExactCubeExecution exactCube) {
+        this.exactCube = exactCube;
         this.cacheBackend = cacheBackend;
         this.cacheAdministration = cacheBackend instanceof CacheAdministrationPort administration
                 ? administration : null;
@@ -457,7 +473,10 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
         String bucketSql = gapQueryRewriter.buildStorageQuery(canonicalObject.physicalSql(),
                 new GapPlan(Optional.empty(), List.of(), Optional.of(new TimeRange(bucketStart, bucketEnd))),
                 configuration.fixedStepSeconds());
-        ResultFrame frame = sparkExecutor.execute(bucketSql);
+        var binding = exactCube == null || generation.isEmpty() ? Optional.<BucketCubeBinding>empty()
+                : exactCube.bindWarmBucket(canonicalObject.physicalSql());
+        ResultFrame frame = binding.isPresent() ? exactCube.executeWarmBucket(bucketSql, binding.get())
+                : sparkExecutor.execute(bucketSql);
         boolean decimalComposite = !canonicalObject.metadata().compositeAliases().isEmpty()
                 && frame.columnTypes().containsValue(ColumnType.DECIMAL);
         if (decimalComposite || frame.rowCount() > configuration.maximumCachedRows()) {
@@ -471,7 +490,11 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
             return false;
         }
         if (generation.isPresent()) {
-            if (!cacheBackend.storeForGeneration(key, frame, configuration.bucketTimeToLive(), generation.get())) {
+            boolean stored = binding.isPresent()
+                    ? exactCube.storeWarmBucket(key, frame, configuration.bucketTimeToLive(), generation.get(),
+                        bucketStart, bucketEnd, binding.get())
+                    : cacheBackend.storeForGeneration(key, frame, configuration.bucketTimeToLive(), generation.get());
+            if (!stored) {
                 throw new ConcurrentModificationException("cache invalidated while the Spark bucket was being computed");
             }
         } else {

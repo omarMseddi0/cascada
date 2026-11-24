@@ -175,6 +175,11 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
 
     @Override
     public void visitKeys(List<String> keys, java.util.function.BiConsumer<Integer, Optional<ResultFrame>> visitor) {
+        visitVerifiedKeys(keys, (index, payload) -> true, visitor);
+    }
+
+    void visitVerifiedKeys(List<String> keys, java.util.function.BiPredicate<Integer, byte[]> verified,
+                           java.util.function.BiConsumer<Integer, Optional<ResultFrame>> visitor) {
         if (keys.isEmpty()) {
             return;
         }
@@ -232,7 +237,8 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
                     }
                     decodePipeline.visit(chunk.startIndex(), values.size(), index -> {
                         KeyValue<byte[], byte[]> keyValue = values.get(index);
-                        return keyValue.hasValue() ? keyValue.getValue() : null;
+                        return keyValue.hasValue() && verified.test(chunk.startIndex() + index, keyValue.getValue())
+                                ? keyValue.getValue() : null;
                     }, serializer::deserialize, (index, outcome) -> {
                         if (outcome.corruption() != null) {
                             String key = keys.get(index);
@@ -306,8 +312,8 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     }
 
     public ExactCubeStorePort exactCubeStore() {
-        return new ValkeyExactCubeStore(connection.sync(), serializer,
-                () -> warmingGeneration().orElseThrow(), WARMING_GENERATION_KEY);
+        return new ValkeyExactCubeStore(this, connection.sync(), serializer,
+                () -> warmingGeneration().orElseThrow(), WARMING_GENERATION_KEY, REVISION_KEY);
     }
 
     @Override public Optional<Duration> remainingTimeToLive(List<String> keys) {

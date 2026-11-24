@@ -306,7 +306,7 @@ public final class ValkeyCacheBackendAdapter implements CacheBackendPort, AutoCl
     }
 
     public ExactCubeStorePort exactCubeStore() {
-        return new ValkeyExactCubeStore(connection.sync(), serializer,
+        return new ValkeyExactCubeStore(connection.sync(), connection.async(), commandTimeout, serializer,
                 () -> warmingGeneration().orElseThrow(), WARMING_GENERATION_KEY);
     }
 

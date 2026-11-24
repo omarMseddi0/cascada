@@ -13,7 +13,16 @@ import java.util.Set;
 public interface ExactCubeStorePort {
     List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval);
 
+    default List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval,
+                                              List<String> grain, Set<CubeMeasure> measures) {
+        return candidates(population, interval);
+    }
+
     Optional<ResultFrame> read(ExactCubeFragment manifest);
+
+    default List<Optional<ResultFrame>> readBatch(List<ExactCubeFragment> manifests) {
+        return manifests.stream().map(this::read).toList();
+    }
 
     void publish(CubePopulation population, CubeInterval interval, List<String> grain, Set<CubeMeasure> measures,
                  ResultFrame state, Duration ttl, String publicationFence);

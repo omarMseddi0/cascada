@@ -24,8 +24,9 @@ final class ScopedLogicalSqlTranslator {
 
     String translate(SqlNode root) {
         String sql = CalciteSql.unparse(query(root, Set.of(), Map.of()));
-        for (var entry : paths.entrySet()) sql = sql.replace(entry.getKey(), entry.getValue());
-        return sql;
+        var tokens = java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(sentinelPrefix) + "_[0-9]+");
+        return tokens.matcher(sql).replaceAll(match -> java.util.regex.Matcher.quoteReplacement(
+                paths.getOrDefault(match.group(), match.group())));
     }
 
     private SqlNode query(SqlNode root, Set<String> ctes, Map<String, RegisteredTable> parents) {
@@ -89,7 +90,8 @@ final class ScopedLogicalSqlTranslator {
                             List.of(id.names.get(id.names.size() - 2), physical), id.getParserPosition())).orElse(id);
                 }
                 Set<String> physical = new LinkedHashSet<>();
-                sources.values().forEach(table -> table.physicalColumnFor(column).ifPresent(physical::add));
+                sources.values().stream().filter(Objects::nonNull)
+                        .forEach(table -> table.physicalColumnFor(column).ifPresent(physical::add));
                 if (physical.size() > 1)
                     throw new UnsupportedSqlException("ambiguous logical column '" + column + "'; qualify its source");
                 return physical.isEmpty() ? id : new SqlIdentifier(physical.iterator().next(), id.getParserPosition());
@@ -146,11 +148,14 @@ final class ScopedLogicalSqlTranslator {
             alias = as.operand(1);
         }
         if (relation instanceof SqlIdentifier table) {
-            if (!table.isSimple()) return node; // already-physical Delta or an explicitly qualified source
+            if (!table.isSimple()) {
+                if (alias != null) sources.put(key(alias.getSimple()), null);
+                return node;
+            }
             String name = table.getSimple();
             if (ctes.contains(key(name))) {
                 RegisteredTable passthrough = wildcardRelations.get(key(name));
-                if (passthrough != null && !explicitColumns) sources.put(key(alias == null ? name : alias.getSimple()), passthrough);
+                sources.put(key(alias == null ? name : alias.getSimple()), explicitColumns ? null : passthrough);
                 return node;
             }
             RegisteredTable registered = catalog.findByLogicalName(name).orElseThrow(() ->
@@ -158,14 +163,14 @@ final class ScopedLogicalSqlTranslator {
             String sentinel = sentinelPrefix + "_" + paths.size();
             paths.put(sentinel, SqlTrees.deltaSource(registered.deltaPath()));
             SqlIdentifier binding = alias == null ? table : alias;
-            if (!explicitColumns) sources.put(key(binding.getSimple()), registered);
+            sources.put(key(binding.getSimple()), explicitColumns ? null : registered);
             SqlNode physical = new SqlIdentifier(sentinel, SqlParserPos.ZERO);
             return alias == null ? SqlStdOperatorTable.AS.createCall(node.getParserPosition(), physical, binding)
                     : replaceAliasedSource((SqlCall) node, physical);
         }
         RegisteredTable passthrough = passthroughTable(relation);
         SqlNode nested = query(relation, ctes, parents);
-        if (passthrough != null && !explicitColumns) sources.put(key(alias == null ? "__derived" : alias.getSimple()), passthrough);
+        sources.put(key(alias == null ? "__derived" : alias.getSimple()), explicitColumns ? null : passthrough);
         return alias == null ? nested : replaceAliasedSource((SqlCall) node, nested);
     }
 

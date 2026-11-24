@@ -27,6 +27,21 @@ mvn -Pdistribution -pl app -am package -DskipTests
 
 The reactor targets Java 21, Spark 4.1.1, Scala 2.13, and Delta Lake 4.1.0. The distribution expects the deployment image to supply Spark and the compatible Gluten/Velox Delta bundle described in the [Dockerfile](Dockerfile). The `local-spark` Maven profile supplies Spark and Delta dependencies for local development.
 
+## Exact cube composition
+
+Set `CASCADA_EXACT_CUBE_ENABLED=true` to opt in. The exact route uses Valkey manifests scoped to a registered Delta table, its pinned version, SQL semantics, and the configured `CASCADA_EXACT_CUBE_ACCESS_SCOPE`. The default scope assumes all query callers have the same table visibility.
+
+Supported prior queries publish complete integral `SUM` and `COUNT(column)` state. A later ordinary SQL request can roll the state up or combine it with a version-pinned Spark residual, including to reconstruct `AVG`. A supported aggregate can also supply a typed relation inside a CTE, join, or subquery. Filter narrowing requires the relevant key to survive in the stored grain. The original query runs through the appropriate Spark or existing cache route when a proof or resource budget fails.
+
+For the qualification suite, use JDK 21 and an isolated disposable Valkey database:
+
+```sh
+export CASCADA_TEST_VALKEY_URI=redis://127.0.0.1:6379/15
+mvn -Plocal-spark -Dcascada.spark.integration=true -Dcascada.cache.spark.integration=true test
+```
+
+The exact-cube tests emit route, residual, source-version, and HTTP last-byte measurements. Set `-Dcascada.exact.index.fixture.staleDescriptors=1000000` to exercise dense Valkey metadata and `-Dcascada.exact.fixture.rows=1000000` to run the exact-cube fixture with skewed input. The million-descriptor fixture stores synthetic manifest entries alongside real published payloads.
+
 ## Configuration and API
 
 The server loads deployment settings from the JSON file specified by `CASCADA_CONFIG_PATH`, with supported environment variables overriding settings. These include `CASCADA_RUN_MODE`, `CASCADA_MAIN_TABLE_NAME`, `CASCADA_MAIN_TABLE_PATH`, `CASCADA_CACHE_BACKEND`, `CASCADA_HTTP_PORT`, and `CASCADA_GRPC_PORT`. Spark properties can also be supplied through `SPARK_CONFIG_PATH`; see the configuration readers in `app` and the [example Spark configuration](config/spark-gluten-local.json) for details. A suitable Delta table and Spark runtime are needed to execute queries.

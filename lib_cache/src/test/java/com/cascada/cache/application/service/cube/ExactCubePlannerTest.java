@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 final class ExactCubePlannerTest {
     private static final CubePopulation POPULATION = new CubePopulation(
             new ExactCubeSource("path", "table", 0, "schema", "semantics", "scope",
-                    Map.of("region", "string", "device", "bigint")), "ts", "", "amount");
+                    Map.of("region", "string", "device", "bigint"), true), "ts", "", "amount");
     private static final CubeInterval WINDOW = new CubeInterval(0, 9);
 
     @Test void independentCoverageAndSharedReadPricing() {
@@ -83,6 +83,66 @@ final class ExactCubePlannerTest {
         }
     }
 
+    @Test void jointCoverMatchesExhaustiveOracleAcrossEveryThreeBucketCatalog() {
+        var window = new CubeInterval(0, 3);
+        var query = query(Set.of(SUM, COUNT), List.of("region"), window);
+        var intervals = new ArrayList<CubeInterval>();
+        for (long start = 0; start < 3; start++) {
+            for (long end = start + 1; end <= 3; end++) intervals.add(new CubeInterval(start, end));
+        }
+        int catalogs = 1 << (intervals.size() * 2);
+        for (int layout = 0; layout < catalogs; layout++) {
+            var fragments = new ArrayList<ExactCubeFragment>();
+            for (int i = 0; i < intervals.size(); i++) {
+                int mask = (layout >> (i * 2)) & 3;
+                if (mask == 0) continue;
+                var interval = intervals.get(i);
+                var measures = mask == 3 ? Set.of(SUM, COUNT) : Set.of(mask == 1 ? SUM : COUNT);
+                int bytes = 1 + ((layout * 19 + i * 3) % 23) * 851_447;
+                fragments.add(fragment("f-" + i, interval.start(), interval.end(), List.of("region"), measures, bytes));
+            }
+            double expected = 4.0;
+            for (var first : allCovers(fragments, SUM, 0)) {
+                for (var second : allCovers(fragments, COUNT, 0)) {
+                    expected = Math.min(expected, coverCost(first, second));
+                }
+            }
+            var plan = ExactCubePlanner.select(query, POPULATION, fragments, 1);
+            double actual = plan.map(selected -> coverCost(selected.covers().get(SUM), selected.covers().get(COUNT)))
+                    .orElse(4.0);
+            assertThat(actual).as("catalog %s", layout).isCloseTo(expected,
+                    org.assertj.core.data.Offset.offset(0.000000001));
+        }
+    }
+
+    private static List<List<CubeCoverEdge>> allCovers(List<ExactCubeFragment> fragments, CubeMeasure measure, long start) {
+        if (start == 3) return List.of(List.of());
+        var edges = new ArrayList<CubeCoverEdge>();
+        for (long end = start + 1; end <= 3; end++) edges.add(new CubeCoverEdge(new CubeInterval(start, end), null));
+        for (var fragment : fragments) {
+            if (fragment.interval().start() == start && fragment.measures().contains(measure)) {
+                edges.add(new CubeCoverEdge(fragment.interval(), fragment));
+            }
+        }
+        var covers = new ArrayList<List<CubeCoverEdge>>();
+        for (var edge : edges) {
+            for (var remaining : allCovers(fragments, measure, edge.interval().end())) {
+                var cover = new ArrayList<CubeCoverEdge>();
+                cover.add(edge);
+                cover.addAll(remaining);
+                covers.add(cover);
+            }
+        }
+        return covers;
+    }
+
+    private static double coverCost(List<CubeCoverEdge> first, List<CubeCoverEdge> second) {
+        var edges = new java.util.HashSet<>(first);
+        edges.addAll(second);
+        return edges.stream().mapToDouble(edge -> edge.fragment() == null
+                ? 1 + edge.interval().end() - edge.interval().start() : cacheCost(edge.fragment())).sum();
+    }
+
     @Test void denseMillionDescriptorInputCanUseACover() {
         var fragment = fragment("dense", 0, 9, List.of("region"), Set.of(SUM), 10);
         var dense = Collections.nCopies(1_000_000, fragment);
@@ -119,12 +179,13 @@ final class ExactCubePlannerTest {
     }
 
     private static double cacheCost(ExactCubeFragment fragment) {
-        return 0.02 + fragment.decodedBytes() / (double) (8 * 1024 * 1024);
+        return 0.02 + fragment.decodedBytes() / (8.0 * 1024 * 1024)
+                + fragment.compressedBytes() / (64.0 * 1024 * 1024) + fragment.rows() / 1_000_000.0;
     }
 
     private static ExactCubeQuery query(Set<CubeMeasure> measures, List<String> grain, CubeInterval interval) {
-        return new ExactCubeQuery("path", "ts", interval, "", grain, "amount", measures, List.of(), List.of(),
-                null, null, null);
+        return new ExactCubeQuery("path", "ts", interval, "", Map.of(), List.of(), grain, Set.of(), "amount", measures, List.of(), List.of(),
+                null, null, null, "", "");
     }
 
     private static ExactCubeFragment fragment(String id, long start, long end, List<String> grain,

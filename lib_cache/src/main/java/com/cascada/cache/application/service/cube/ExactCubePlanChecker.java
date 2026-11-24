@@ -5,6 +5,7 @@ import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.CubeInterval;
+import com.cascada.cache.domain.model.cube.CubeKeyFilterOperator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
@@ -13,7 +14,8 @@ final class ExactCubePlanChecker {
     private ExactCubePlanChecker() {}
 
     static boolean compatible(ExactCubeQuery query, CubePopulation population, ExactCubeFragment fragment, long width) {
-        return fragment.population().equals(population) && !fragment.measures().isEmpty()
+        return (fragment.population().equals(population) || narrowed(query, population, fragment))
+                && !fragment.measures().isEmpty()
                 && query.interval().contains(fragment.interval()) && aligned(fragment.interval(), width)
                 && fragment.grain().containsAll(query.grain())
                 && new HashSet<>(fragment.grain()).size() == fragment.grain().size()
@@ -21,6 +23,23 @@ final class ExactCubePlanChecker {
                 && fragment.rows() >= 0
                 && fragment.compressedBytes() > 0
                 && fragment.decodedBytes() > 0;
+    }
+
+    static boolean mayNarrow(ExactCubeQuery query, CubePopulation population) {
+        return !query.keyFilters().isEmpty() && query.keyFilters().stream().allMatch(filter -> {
+            String type = population.source().types().get(filter.column());
+            return filter.operator() == CubeKeyFilterOperator.STRING_EQUALS
+                    ? "string".equals(type) : validKeyType(type);
+        });
+    }
+
+    private static boolean narrowed(ExactCubeQuery query, CubePopulation population, ExactCubeFragment fragment) {
+        return mayNarrow(query, population) && fragment.population().equals(unfiltered(population))
+                && fragment.grain().containsAll(query.predicateTypes().keySet());
+    }
+
+    static CubePopulation unfiltered(CubePopulation population) {
+        return new CubePopulation(population.source(), population.timeColumn(), "", population.input());
     }
 
     static boolean aligned(CubeInterval interval, long width) {

@@ -6,14 +6,13 @@ import com.cascada.cache.application.model.query.ExactCubeTrace;
 import com.cascada.cache.application.model.query.QueryResult;
 import com.cascada.cache.application.port.out.ExactCubeSqlPort;
 import com.cascada.cache.application.port.out.ExactCubeStorePort;
-import com.cascada.cache.application.port.out.LatestQueryExecutorPort;
+import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
-import com.cascada.cache.exception.CubeSourceChangedException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -22,22 +21,29 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 
-/** Coordinates the opt-in exact cube route over the current Delta state. */
+/** Coordinates the opt-in, snapshot-bound route at logical SQL admission. */
 public final class ExactCubeExecution {
     private static final Logger LOGGER = Logger.getLogger(ExactCubeExecution.class.getName());
+    private static final int MAX_ENUMERATED_EDGES = 50_000;
+    private static final int CACHE_MEMORY_UNITS = 64;
+    private static final int MIB = 1 << 20;
+    private static final int MAX_FETCH_BATCH = 4;
+    private static final int MAX_FETCH_DECODED_BYTES = 8 * MIB;
     private static final Set<String> INTEGRALS = Set.of("tinyint", "smallint", "int");
     private final ExactCubeSqlPort sql;
     private final ExactCubeStorePort store;
-    private final LatestQueryExecutorPort executor;
+    private final PinnedQueryExecutorPort executor;
     private final String accessScope;
     private final Clock clock;
     private final long bucketSeconds;
     private final Duration ttl;
+    private final Semaphore cacheMemory = new Semaphore(CACHE_MEMORY_UNITS);
 
-    public ExactCubeExecution(ExactCubeSqlPort sql, ExactCubeStorePort store, LatestQueryExecutorPort executor,
+    public ExactCubeExecution(ExactCubeSqlPort sql, ExactCubeStorePort store, PinnedQueryExecutorPort executor,
                               String accessScope, Clock clock, long bucketSeconds, Duration ttl) {
         this.sql = sql;
         this.store = store;
@@ -52,20 +58,20 @@ public final class ExactCubeExecution {
         var recognized = sql.recognize(physicalSql);
         if (recognized.isEmpty()) return existing("unproven-sql-shape", fallback);
         ExactCubeQuery query = recognized.get();
-        Optional<ExactCubeSource> observed;
+        Optional<ExactCubeSource> binding;
         try {
-            observed = executor.currentSource(query.path(), accessScope);
+            binding = executor.bind(query.path(), accessScope);
         } catch (Exception unavailable) {
             QueryCancellation.rethrowIfCancelled(unavailable);
-            LOGGER.fine(() -> "Exact cube declined during source metadata lookup: " + unavailable.getClass().getSimpleName());
-            return existing("source-metadata-unavailable", fallback);
+            LOGGER.fine(() -> "Exact cube declined during snapshot admission: " + unavailable.getClass().getSimpleName());
+            return existing("snapshot-admission-unavailable", fallback);
         }
-        if (observed.isEmpty()) return existing("source-metadata-unavailable", fallback);
-        var source = observed.get();
+        if (binding.isEmpty()) return existing("unbound-source", fallback);
+        var source = binding.get();
         var population = new CubePopulation(source, query.timeColumn(), query.predicate(), query.input());
         String rejection = rejection(query, source);
-        if (rejection != null) return direct(physicalSql, rejection, List.of(), List.of(), 0);
-        return executeObserved(physicalSql, query, population);
+        if (rejection != null) return direct(query, source, rejection, List.of(), List.of(), 0);
+        return executeBound(query, population);
     }
 
     private static QueryResult existing(String reason, Supplier<QueryResult> fallback) {
@@ -85,42 +91,86 @@ public final class ExactCubeExecution {
                 || !INTEGRALS.contains(source.types().getOrDefault(query.input(), ""))) {
             return "unproven-integral-type";
         }
+        for (var predicate : query.predicateTypes().entrySet()) {
+            String type = source.types().get(predicate.getKey());
+            String required = predicate.getValue();
+            if (type == null || !required.isEmpty() && !required.equals(type)
+                    && !(required.equals("integral") && (INTEGRALS.contains(type) || "bigint".equals(type)))) {
+                return "unproven-predicate-type";
+            }
+        }
+        if (!query.groupAliases().isEmpty() && (!source.groupByAliases()
+                || query.groupAliases().stream().anyMatch(alias ->
+                    source.types().keySet().stream().anyMatch(alias::equalsIgnoreCase)))) {
+            return "unproven-group-alias";
+        }
         if (query.grain().stream().anyMatch(name -> !ExactCubePlanChecker.validKeyType(source.types().get(name)))) {
             return "unproven-group-key-type";
         }
         return null;
     }
 
-    private QueryResult executeObserved(String physicalSql, ExactCubeQuery query, CubePopulation population) {
+    private QueryResult executeBound(ExactCubeQuery query, CubePopulation population) {
+        var source = population.source();
         var reads = new ArrayList<ExactCubeFragment>();
         var submitted = new ArrayList<String>();
         long planningStarted = System.nanoTime();
         long planningNanos = 0;
-        String failureReason;
+        String failureReason = null;
         try {
-            var candidates = store.candidates(population, query.interval());
-            var selected = ExactCubePlanner.select(query, population, candidates, bucketSeconds);
-            planningNanos = System.nanoTime() - planningStarted;
-            if (selected.isPresent()) {
-                return compose(query, population, selected.get(), reads, submitted, planningNanos);
+            var candidates = new ArrayList<>(store.candidates(population, query.interval(), query.grain(), query.measures()));
+            if (candidates.isEmpty() && ExactCubePlanChecker.mayNarrow(query, population)) {
+                var grain = new java.util.LinkedHashSet<>(query.grain());
+                grain.addAll(query.predicateTypes().keySet());
+                candidates.addAll(store.candidates(ExactCubePlanChecker.unfiltered(population), query.interval(),
+                        List.copyOf(grain), query.measures()));
             }
-            boolean alreadyPublished = candidates.stream().anyMatch(fragment ->
-                    fragment.interval().equals(query.interval()) && fragment.grain().equals(query.grain())
-                            && fragment.measures().containsAll(query.measures()));
-            if (!alreadyPublished && query.outerSql() == null && query.limit() == null) {
-                return build(query, population, planningNanos);
+            var missing = new ArrayList<ExactCubeFragment>(1);
+            for (int attempt = 0; attempt < 2; attempt++) {
+                var selected = ExactCubePlanner.select(query, population, candidates, bucketSeconds, MAX_ENUMERATED_EDGES);
+                planningNanos += System.nanoTime() - planningStarted;
+                if (selected.isEmpty()) break;
+                int units = Math.toIntExact((decodedBytes(selected.get()) + MIB - 1) / MIB);
+                if (!cacheMemory.tryAcquire(units)) {
+                    failureReason = "cache-decode-budget";
+                    break;
+                }
+                try {
+                    var answer = compose(query, population, selected.get(), reads, submitted, missing, planningNanos);
+                    if (answer != null) return answer;
+                } finally {
+                    cacheMemory.release(units);
+                }
+                candidates.removeAll(missing);
+                planningStarted = System.nanoTime();
             }
-            failureReason = candidates.isEmpty() ? "no-manifest" : "no-beneficial-verified-cover";
+            if (failureReason == null && !missing.isEmpty()) failureReason = "recovery:missing-generation";
+            if (failureReason == null) {
+                boolean alreadyPublished = candidates.stream().anyMatch(fragment ->
+                        fragment.population().equals(population) && fragment.interval().equals(query.interval())
+                                && fragment.grain().equals(query.grain())
+                                && fragment.measures().containsAll(query.measures()));
+                if (!alreadyPublished && query.outerSql() == null && query.limit() == null) {
+                    return build(query, population, planningNanos);
+                }
+                failureReason = candidates.isEmpty() ? "no-manifest" : "no-beneficial-verified-cover";
+            }
         } catch (Exception failure) {
             QueryCancellation.rethrowIfCancelled(failure);
             failureReason = "recovery:" + failure.getClass().getSimpleName();
-            LOGGER.fine(() -> "Exact cube restarted against latest Delta data: " + failure.getMessage());
+            LOGGER.fine(() -> "Exact cube restarted at Delta version " + source.version() + ": " + failure.getMessage());
         }
-        return direct(physicalSql, failureReason, reads, submitted, planningNanos);
+        return direct(query, source, failureReason, reads, submitted, planningNanos);
+    }
+
+    private static long decodedBytes(ExactCubePlan plan) {
+        return plan.covers().values().stream().flatMap(List::stream).map(edge -> edge.fragment())
+                .filter(java.util.Objects::nonNull).distinct().mapToLong(ExactCubeFragment::decodedBytes).sum();
     }
 
     private QueryResult compose(ExactCubeQuery query, CubePopulation population, ExactCubePlan plan,
-                                List<ExactCubeFragment> reads, List<String> submitted, long planningNanos) {
+                                List<ExactCubeFragment> reads, List<String> submitted,
+                                List<ExactCubeFragment> missing, long planningNanos) {
         if (!ExactCubePlanChecker.valid(query, population, plan, bucketSeconds)) {
             throw new IllegalStateException("invalid cube cover");
         }
@@ -136,72 +186,88 @@ public final class ExactCubeExecution {
                 }
             }
         }
-        for (var entry : cache.entrySet()) {
-            var fragment = entry.getKey();
+        var fragments = new ArrayList<>(cache.keySet());
+        for (int offset = 0; offset < fragments.size();) {
             QueryCancellation.requireCurrentActive();
-            var frame = store.read(fragment).orElseThrow(() ->
-                    new IllegalStateException("missing or corrupt generation " + fragment.generation()));
-            reads.add(fragment);
-            if (frame.rowCount() != fragment.rows()) throw new IllegalStateException("manifest row count mismatch");
-            state.add(frame, fragment.grain(), fragment.measures(), entry.getValue());
+            int end = offset + 1;
+            long batchBytes = fragments.get(offset).decodedBytes();
+            while (end < fragments.size() && end - offset < MAX_FETCH_BATCH
+                    && batchBytes + fragments.get(end).decodedBytes() <= MAX_FETCH_DECODED_BYTES) {
+                batchBytes += fragments.get(end++).decodedBytes();
+            }
+            var batch = fragments.subList(offset, end);
+            var frames = store.readBatch(batch);
+            if (frames.size() != batch.size()) throw new IllegalStateException("invalid fragment batch size");
+            int previousMisses = missing.size();
+            for (int i = 0; i < batch.size(); i++) {
+                if (frames.get(i).isPresent()) reads.add(batch.get(i));
+                else missing.add(batch.get(i));
+            }
+            if (missing.size() != previousMisses) return null;
+            for (int i = 0; i < batch.size(); i++) {
+                var fragment = batch.get(i);
+                var frame = frames.get(i);
+                if (frame.get().rowCount() != fragment.rows()) throw new IllegalStateException("manifest row count mismatch");
+                state.add(frame.get(), fragment.grain(), fragment.measures(), cache.get(fragment),
+                        fragment.population().equals(population) ? List.of() : query.keyFilters());
+            }
+            offset = end;
         }
         var source = population.source();
         for (var entry : residuals.entrySet()) {
             String residual = sql.stateStatement(query, source, entry.getKey(), entry.getValue());
             submitted.add(residual);
-            state.add(executor.execute(residual), query.grain(), entry.getValue(), entry.getValue());
+            state.add(executor.executePinned(source, residual), query.grain(), entry.getValue(), entry.getValue());
         }
-        requireCurrentSource(source);
         var result = state.finish();
         String outer = null;
         if (query.outerSql() != null) {
-            outer = sql.outerStatement(query, source, result);
-            result = executor.execute(outer);
-            requireCurrentSource(source);
+            outer = sql.outerStatement(query, source);
+            var types = query.projections().stream().map(projection -> switch (projection.operation()) {
+                case KEY -> source.types().get(projection.column());
+                case SUM, COUNT -> "bigint";
+                case AVG -> "double";
+            }).toList();
+            result = executor.executeWithAggregate(source, outer, query.outerRelation(), result, types);
         }
-        return new QueryResult(result, true, trace("exact-cube", "verified", source.version(), reads, submitted, outer, planningNanos));
+        QueryCancellation.requireCurrentActive();
+        return new QueryResult(result, true, trace("exact-cube", missing.isEmpty() ? "verified" : "verified-after-miss",
+                source, reads, submitted, outer, planningNanos));
     }
 
     private QueryResult build(ExactCubeQuery query, CubePopulation population, long planningNanos) {
         String fence = store.publicationFence();
         var source = population.source();
         String statement = sql.stateStatement(query, source, query.interval(), query.measures());
-        var frame = executor.execute(statement);
+        var frame = executor.executePinned(source, statement);
         var state = new ExactCubeState(query, source);
         state.add(frame, query.grain(), query.measures(), query.measures());
         var answer = state.finish();
-        requireCurrentSource(source);
         try {
             store.publish(population, query.interval(), query.grain(), query.measures(), frame, ttl, fence);
         } catch (Exception unavailable) {
             QueryCancellation.rethrowIfCancelled(unavailable);
             LOGGER.fine(() -> "Exact cube publication skipped: " + unavailable.getClass().getSimpleName());
         }
-        return new QueryResult(answer, false, trace("latest-build", "no-manifest", source.version(), List.of(),
+        return new QueryResult(answer, false, trace("pinned-build", "no-manifest", source, List.of(),
                 List.of(), null, planningNanos));
     }
 
-    private void requireCurrentSource(ExactCubeSource observed) {
-        QueryCancellation.requireCurrentActive();
-        if (executor.currentSource(observed.path(), observed.accessScope()).filter(observed::equals).isEmpty()) {
-            throw new CubeSourceChangedException();
-        }
+    private QueryResult direct(ExactCubeQuery query, ExactCubeSource source, String reason,
+                               List<ExactCubeFragment> reads, List<String> submitted, long planningNanos) {
+        String statement = sql.pinnedStatement(query, source);
+        var result = executor.executePinned(source, statement);
+        return new QueryResult(result, false, trace("pinned-spark", reason, source, reads, submitted, null, planningNanos));
     }
 
-    private QueryResult direct(String physicalSql, String reason, List<ExactCubeFragment> reads,
-                               List<String> submitted, long planningNanos) {
-        var result = executor.execute(physicalSql);
-        return new QueryResult(result, false, trace("latest-spark", reason, -1, reads, submitted, null, planningNanos));
-    }
-
-    private static ExactCubeTrace trace(String route, String reason, long observedVersion,
+    private static ExactCubeTrace trace(String route, String reason, ExactCubeSource source,
                                          List<ExactCubeFragment> reads, List<String> submitted,
                                          String outer, long planningNanos) {
-        LOGGER.fine(() -> "Exact cube route=" + route + " reason=" + reason + " version=" + observedVersion
+        LOGGER.fine(() -> "Exact cube route=" + route + " reason=" + reason + " version=" + source.version()
                 + " generations=" + reads.stream().map(ExactCubeFragment::generation).toList()
                 + " compressed_bytes=" + reads.stream().mapToLong(ExactCubeFragment::compressedBytes).sum()
                 + " decoded_bytes=" + reads.stream().mapToLong(ExactCubeFragment::decodedBytes).sum()
                 + " residuals=" + submitted.size() + " planning_ns=" + planningNanos);
-        return new ExactCubeTrace(route, reason, observedVersion, reads, submitted, outer, planningNanos);
+        return new ExactCubeTrace(route, reason, source.version(), reads, submitted, outer, planningNanos);
     }
 }

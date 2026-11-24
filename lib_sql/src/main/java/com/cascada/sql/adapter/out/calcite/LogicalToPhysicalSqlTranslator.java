@@ -108,7 +108,9 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
                 projectionAliases, registeredTable);
         String sentinel = SqlTrees.unusedSentinel(logicalSql, DELTA_TABLE_SENTINEL_PREFIX);
         replaceTableWithSentinel(select, from, sentinel);
-        SqlNode renamedRoot = parsed.accept(renamer(registeredTable, aliasReferences));
+        String qualifier = from.getKind() == SqlKind.AS
+                ? SqlTrees.lastName(((SqlCall) from).operand(1)) : logicalTableName;
+        SqlNode renamedRoot = parsed.accept(renamer(registeredTable, aliasReferences, qualifier));
         applyTimeBucketingIfGrouped(extractSelect(renamedRoot), registeredTable);
 
         return CalciteSql.unparse(renamedRoot).replace(sentinel, SqlTrees.deltaSource(registeredTable.deltaPath()));
@@ -135,7 +137,7 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
 
     // --- column renaming -------------------------------------------------------------------------
 
-    private SqlShuttle renamer(RegisteredTable table, Set<SqlIdentifier> aliasReferences) {
+    private SqlShuttle renamer(RegisteredTable table, Set<SqlIdentifier> aliasReferences, String qualifier) {
         return new SqlShuttle() {
             @Override
             public SqlNode visit(SqlCall call) {
@@ -150,7 +152,8 @@ public final class LogicalToPhysicalSqlTranslator implements LogicalSqlTranslato
 
             @Override
             public SqlNode visit(SqlIdentifier identifier) {
-                if (aliasReferences.contains(identifier)) {
+                if (aliasReferences.contains(identifier) || identifier.names.size() > 1
+                        && (identifier.names.size() != 2 || !identifier.names.getFirst().equals(qualifier))) {
                     return identifier;
                 }
                 String simple = lastName(identifier);

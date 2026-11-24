@@ -6,6 +6,7 @@ import com.cascada.cache.domain.frame.ColumnType;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
+import com.cascada.cache.domain.model.cube.CubeKeyFilter;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -18,6 +19,7 @@ import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Set;
 
 /** Checked integral aggregate state. String keys use Spark's binary UTF-8 bytes. */
@@ -35,6 +37,11 @@ final class ExactCubeState {
     }
 
     void add(ResultFrame frame, List<String> grain, Set<CubeMeasure> columns, Set<CubeMeasure> use) {
+        add(frame, grain, columns, use, List.of());
+    }
+
+    void add(ResultFrame frame, List<String> grain, Set<CubeMeasure> columns, Set<CubeMeasure> use,
+             List<CubeKeyFilter> filters) {
         var expected = new ArrayList<String>();
         for (int i = 0; i < grain.size(); i++) {
             expected.add("cube_k" + i);
@@ -46,6 +53,11 @@ final class ExactCubeState {
         for (int i = grain.size(); i < expected.size(); i++) require(frame.columnTypeAt(i) == ColumnType.LONG);
         require(!grain.isEmpty() || frame.rowCount() == 1);
         int[] keyIndexes = query.grain().stream().mapToInt(grain::indexOf).toArray();
+        var used = use.toArray(CubeMeasure[]::new);
+        int[] measureIndexes = Arrays.stream(used).mapToInt(measure -> frame.columnIndex(measure.stateLabel())).toArray();
+        int[] filterIndexes = filters.stream().mapToInt(filter -> grain.indexOf(filter.column())).toArray();
+        var filterValues = filters.stream().map(filter -> filter.literal() == null ? null
+                : HexFormat.of().withUpperCase().formatHex(filter.literal().getBytes(StandardCharsets.UTF_8))).toList();
         Set<List<Object>> fineKeys = new HashSet<>();
         for (int row = 0; row < frame.rowCount(); row++) {
             QueryCancellation.requireCurrentActive();
@@ -56,6 +68,16 @@ final class ExactCubeState {
                 fineKey[k] = value;
             }
             require(fineKeys.add(Arrays.asList(fineKey)));
+            boolean include = true;
+            for (int i = 0; i < filterIndexes.length && include; i++) {
+                Object value = fineKey[filterIndexes[i]];
+                include = switch (filters.get(i).operator()) {
+                    case STRING_EQUALS -> filterValues.get(i).equals(value);
+                    case IS_NULL -> value == null;
+                    case IS_NOT_NULL -> value != null;
+                };
+            }
+            if (!include) continue;
             Object[] coarseKey = new Object[keyIndexes.length];
             for (int k = 0; k < coarseKey.length; k++) coarseKey[k] = fineKey[keyIndexes[k]];
             List<Object> key = Arrays.asList(coarseKey);
@@ -63,8 +85,9 @@ final class ExactCubeState {
             long present = frame.longAt(row, grain.size());
             require(present >= (grain.isEmpty() ? 0 : 1) && present <= MAX_PRESENT);
 
-            for (CubeMeasure measure : use) {
-                int column = frame.columnIndex(measure.stateLabel());
+            for (int i = 0; i < used.length; i++) {
+                CubeMeasure measure = used[i];
+                int column = measureIndexes[i];
                 boolean hasValue = !frame.isNullAt(row, column);
                 long value = hasValue ? frame.longAt(row, column) : 0;
                 if (measure == CubeMeasure.COUNT) {
@@ -89,14 +112,19 @@ final class ExactCubeState {
         }
         var groups = measures.values().iterator().next().keySet();
         require(measures.values().stream().allMatch(map -> map.keySet().equals(groups)));
-        var rows = new ArrayList<Object[]>(groups.size());
+        int size = query.limit() == null ? groups.size() : Math.min(groups.size(), query.limit());
+        var top = size > 0 && size <= groups.size() / 4
+                ? new PriorityQueue<Object[]>(size, (left, right) -> compare(right, left)) : null;
+        var rows = new ArrayList<Object[]>(top == null && size > 0 ? groups.size() : size);
+        var sums = measures.get(CubeMeasure.SUM);
+        var counts = measures.get(CubeMeasure.COUNT);
         for (var key : groups) {
-            var sums = measures.get(CubeMeasure.SUM);
-            var counts = measures.get(CubeMeasure.COUNT);
+            QueryCancellation.requireCurrentActive();
             CubeAccumulator sum = sums == null ? null : sums.get(key);
             CubeAccumulator count = counts == null ? null : counts.get(key);
             require(sum == null || count == null
                     || sum.presence == count.presence && sum.nonNull == (count.value != 0));
+            if (size == 0) continue;
             Object[] row = new Object[query.projections().size()];
             for (int i = 0; i < row.length; i++) {
                 var projection = query.projections().get(i);
@@ -107,10 +135,17 @@ final class ExactCubeState {
                     case AVG -> SparkAverage.average(sum.nonNull ? sum.value : null, count.value);
                 };
             }
-            rows.add(row);
+            if (top == null) {
+                rows.add(row);
+            } else if (top.size() < size) {
+                top.add(row);
+            } else if (compare(row, top.element()) < 0) {
+                top.remove();
+                top.add(row);
+            }
         }
+        if (top != null) rows.addAll(top);
         if (!query.order().isEmpty()) rows.sort(this::compare);
-        int size = query.limit() == null ? rows.size() : Math.min(rows.size(), query.limit());
         var builder = ResultFrame.builder().expectedRows(size);
         for (var projection : query.projections()) {
             ColumnType type = switch (projection.operation()) {
@@ -153,8 +188,11 @@ final class ExactCubeState {
     }
 
     private static void validateHex(String value) {
-        require(value.equals(value.toUpperCase(java.util.Locale.ROOT)));
-        decode(value);
+        require((value.length() & 1) == 0);
+        for (int i = 0; i < value.length(); i++) {
+            char digit = value.charAt(i);
+            require(digit >= '0' && digit <= '9' || digit >= 'A' && digit <= 'F');
+        }
     }
 
     private static String decode(String hex) {

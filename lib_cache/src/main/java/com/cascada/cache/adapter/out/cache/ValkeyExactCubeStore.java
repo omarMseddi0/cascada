@@ -1,6 +1,7 @@
 package com.cascada.cache.adapter.out.cache;
 
 import com.cascada.cache.application.execution.QueryCancellation;
+import com.cascada.cache.application.execution.QueryExecutionScope;
 import com.cascada.cache.application.port.out.CacheValueSerializerPort;
 import com.cascada.cache.application.port.out.ExactCubeStorePort;
 import com.cascada.cache.domain.frame.ResultFrame;
@@ -8,8 +9,9 @@ import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
-import io.lettuce.core.Range;
+import io.lettuce.core.RedisFuture;
 import io.lettuce.core.ScriptOutputType;
+import io.lettuce.core.api.async.RedisAsyncCommands;
 import io.lettuce.core.api.sync.RedisCommands;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -19,38 +21,98 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /** Immutable payloads become visible only through the scoped manifest index. */
 final class ValkeyExactCubeStore implements ExactCubeStorePort {
     static final String PREFIX = "QC:V4:exact:v1:";
+    private static final String POSTINGS = ":postings:v2:";
+    private static final int CANDIDATES_PER_MEASURE = 128;
     private static final String PUBLISH = """
-            if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 0 end
+            if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
             if not redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3], 'NX') then return 0 end
-            redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
-            redis.call('PEXPIRE', KEYS[2], ARGV[3])
+            for i = 3, #KEYS do
+                redis.call('ZADD', KEYS[i], ARGV[4], ARGV[5])
+                redis.call('PEXPIRE', KEYS[i], ARGV[3], 'GT')
+                if redis.call('PTTL', KEYS[i]) == -1 then redis.call('PEXPIRE', KEYS[i], ARGV[3]) end
+            end
             return 1
+            """;
+    private static final String CANDIDATES = """
+            local result = {}
+            local width = tonumber(ARGV[4])
+            local limit = tonumber(ARGV[3])
+            for first = 1, #KEYS, width do
+                local last = first + width - 1
+                local selected = first
+                local smallest = redis.call('ZCOUNT', KEYS[first], ARGV[1], ARGV[2])
+                for i = first + 1, last do
+                    if smallest == 0 then break end
+                    local size = redis.call('ZCOUNT', KEYS[i], ARGV[1], ARGV[2])
+                    if size < smallest then selected = i; smallest = size end
+                end
+                if smallest > 0 then
+                    local window = redis.call('ZRANGEBYSCORE', KEYS[selected], ARGV[1], ARGV[2],
+                        'LIMIT', 0, width == 1 and limit or limit * 4)
+                    local found = 0
+                    for _, descriptor in ipairs(window) do
+                        local matches = true
+                        for i = first, last do
+                            if i ~= selected and not redis.call('ZSCORE', KEYS[i], descriptor) then
+                                matches = false
+                                break
+                            end
+                        end
+                        if matches then
+                            result[#result + 1] = descriptor
+                            found = found + 1
+                            if found == limit then break end
+                        end
+                    end
+                end
+            end
+            return result
             """;
     private static final String READ = """
             if redis.call('GET', KEYS[2]) ~= ARGV[1] then return false end
-            if redis.call('ZSCORE', KEYS[3], ARGV[3]) == false then return false end
-            if redis.call('STRLEN', KEYS[1]) ~= tonumber(ARGV[2]) then return false end
+            local published = false
+            for i = 3, #KEYS do
+                if redis.call('ZSCORE', KEYS[i], ARGV[3]) then published = true; break end
+            end
+            if not published then return false end
+            if redis.call('STRLEN', KEYS[1]) ~= tonumber(ARGV[2]) then
+                for i = 3, #KEYS do redis.call('ZREM', KEYS[i], ARGV[3]) end
+                return false
+            end
             return redis.call('GET', KEYS[1])
+            """;
+    private static final String FORGET = """
+            for i = 2, #KEYS do redis.call('ZREM', KEYS[i], ARGV[1]) end
+            return redis.call('DEL', KEYS[1])
             """;
 
     private final RedisCommands<byte[], byte[]> commands;
+    private final RedisAsyncCommands<byte[], byte[]> async;
+    private final Duration commandTimeout;
     private final CacheValueSerializerPort serializer;
     private final Supplier<String> fence;
     private final byte[] fenceKey;
 
-    ValkeyExactCubeStore(RedisCommands<byte[], byte[]> commands, CacheValueSerializerPort serializer,
-                         Supplier<String> fence, String fenceKey) {
+    ValkeyExactCubeStore(RedisCommands<byte[], byte[]> commands, RedisAsyncCommands<byte[], byte[]> async,
+                         Duration commandTimeout, CacheValueSerializerPort serializer, Supplier<String> fence,
+                         String fenceKey) {
         this.commands = commands;
+        this.async = async;
+        this.commandTimeout = commandTimeout;
         this.serializer = serializer;
         this.fence = fence;
         this.fenceKey = bytes(fenceKey);
@@ -63,18 +125,37 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
 
     @Override
     public List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval) {
+        return candidates(population, interval, List.of(), EnumSet.allOf(CubeMeasure.class));
+    }
+
+    @Override
+    public List<ExactCubeFragment> candidates(CubePopulation population, CubeInterval interval,
+                                             List<String> grain, Set<CubeMeasure> measures) {
         QueryCancellation.requireCurrentActive();
         String current = publicationFence();
-        // Scores are doubles. Widen by the rounding unit and verify the original endpoints.
+        String index = index(population, current);
+        // Scores are doubles. Widen by the rounding unit and check exact endpoints below.
         double start = interval.start(), end = interval.end();
-        List<byte[]> descriptors = commands.zrangebyscore(index(population, current),
-                Range.create(start - Math.max(1, Math.ulp(start)), end + Math.max(1, Math.ulp(end))));
-        List<ExactCubeFragment> manifests = new ArrayList<>(descriptors.size());
+        byte[] low = bytes(Double.toString(start - Math.max(1, Math.ulp(start))));
+        byte[] high = bytes(Double.toString(end + Math.max(1, Math.ulp(end))));
+        var keys = new ArrayList<byte[]>();
+        for (CubeMeasure measure : CubeMeasure.values()) {
+            if (!measures.contains(measure)) continue;
+            if (grain.isEmpty()) keys.add(posting(index, measure, ""));
+            else grain.forEach(column -> keys.add(posting(index, measure, column)));
+        }
+        if (keys.isEmpty()) return List.of();
+        List<byte[]> descriptors = commands.eval(CANDIDATES, ScriptOutputType.MULTI,
+                keys.toArray(byte[][]::new), low, high, bytes(Integer.toString(CANDIDATES_PER_MEASURE)),
+                bytes(Integer.toString(Math.max(1, grain.size()))));
+        var manifests = new LinkedHashSet<ExactCubeFragment>();
         for (byte[] descriptor : descriptors) {
             var fragment = parseManifest(population, descriptor, current);
-            if (fragment != null) manifests.add(fragment);
+            if (fragment != null && interval.contains(fragment.interval()) && fragment.grain().containsAll(grain)) {
+                manifests.add(fragment);
+            }
         }
-        return manifests;
+        return List.copyOf(manifests);
     }
 
     @Override
@@ -85,13 +166,72 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
                 || manifest.decodedBytes() <= 0) return Optional.empty();
         String generationFence = manifest.generation().substring(0, separator);
         byte[] payload = commands.eval(READ, ScriptOutputType.VALUE,
-                new byte[][] {frame(manifest.generation()), fenceKey, index(manifest.population(), generationFence)},
+                manifestKeys(manifest, generationFence, true),
                 bytes(generationFence), bytes(Integer.toString(manifest.compressedBytes())),
                 bytes(descriptor(manifest)));
-        if (payload == null || payload.length < Integer.BYTES || payload.length != manifest.compressedBytes()
+        return decode(manifest, generationFence, payload);
+    }
+
+    @Override
+    public List<Optional<ResultFrame>> readBatch(List<ExactCubeFragment> manifests) {
+        if (manifests.size() == 1) return List.of(read(manifests.getFirst()));
+        QueryCancellation.requireCurrentActive();
+        var pending = new ArrayList<RedisFuture<byte[]>>(manifests.size());
+        try (var ignored = QueryExecutionScope.current()
+                .map(scope -> scope.onCancel(() -> cancel(pending))).orElse(null)) {
+            synchronized (pending) {
+                for (var manifest : manifests) {
+                    QueryCancellation.requireCurrentActive();
+                    String generationFence = generationFence(manifest);
+                    pending.add(async.eval(READ, ScriptOutputType.VALUE, manifestKeys(manifest, generationFence, true),
+                            bytes(generationFence), bytes(Integer.toString(manifest.compressedBytes())),
+                            bytes(descriptor(manifest))));
+                }
+            }
+            var frames = new ArrayList<Optional<ResultFrame>>(manifests.size());
+            long deadline = System.nanoTime() + commandTimeout.toNanos();
+            for (int i = 0; i < manifests.size(); i++) {
+                QueryCancellation.requireCurrentActive();
+                var manifest = manifests.get(i);
+                byte[] payload = pending.get(i).get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                frames.add(decode(manifest, generationFence(manifest), payload));
+            }
+            return frames;
+        } catch (InterruptedException | ExecutionException | TimeoutException failure) {
+            QueryCancellation.rethrowIfCancelled(failure);
+            throw new IllegalStateException("Valkey fragment pipeline failed", failure);
+        } finally {
+            cancel(pending);
+        }
+    }
+
+    private static void cancel(List<RedisFuture<byte[]>> pending) {
+        synchronized (pending) {
+            pending.forEach(future -> {
+                if (!future.isDone()) future.cancel(false);
+            });
+        }
+    }
+
+    private static String generationFence(ExactCubeFragment manifest) {
+        return manifest.generation().substring(0, manifest.generation().indexOf('/'));
+    }
+
+    private Optional<ResultFrame> decode(ExactCubeFragment manifest, String generationFence, byte[] payload) {
+        if (payload == null) return Optional.empty();
+        if (payload.length < Integer.BYTES || payload.length != manifest.compressedBytes()
                 || !digest(payload).equals(manifest.digest())
-                || ByteBuffer.wrap(payload).getInt() != manifest.decodedBytes()) return Optional.empty();
-        return Optional.of(serializer.deserialize(payload));
+                || ByteBuffer.wrap(payload).getInt() != manifest.decodedBytes()) {
+            forget(manifest, generationFence);
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(serializer.deserialize(payload));
+        } catch (RuntimeException corrupt) {
+            QueryCancellation.rethrowIfCancelled(corrupt);
+            forget(manifest, generationFence);
+            return Optional.empty();
+        }
     }
 
     @Override
@@ -105,18 +245,39 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
         var manifest = new ExactCubeFragment(generation, population, interval, grain, measures,
                 state.rowCount(), payload.length, expanded, digest(payload));
         commands.eval(PUBLISH, ScriptOutputType.INTEGER,
-                new byte[][] {frame(generation), index(population, publicationFence), fenceKey},
+                manifestKeys(manifest, publicationFence, true),
                 bytes(publicationFence), payload, bytes(Long.toString(ttl.toMillis())),
                 bytes(Long.toString(interval.start())), bytes(descriptor(manifest)));
     }
 
-    private static byte[] index(CubePopulation population, String fence) {
+    private static String index(CubePopulation population, String fence) {
         var source = population.source();
         var fields = List.of(fence, source.path(), source.tableId(), Long.toString(source.version()), source.schema(),
                 source.semantics(), source.accessScope(), population.timeColumn(), population.predicate(), population.input());
         StringBuilder key = new StringBuilder();
         fields.forEach(field -> key.append(field.length()).append(':').append(field));
-        return bytes(PREFIX + "index:" + digest(bytes(key.toString())));
+        return PREFIX + "index:" + digest(bytes(key.toString())) + POSTINGS;
+    }
+
+    private void forget(ExactCubeFragment manifest, String fence) {
+        commands.eval(FORGET, ScriptOutputType.INTEGER,
+                manifestKeys(manifest, fence, false), bytes(descriptor(manifest)));
+    }
+
+    private byte[][] manifestKeys(ExactCubeFragment manifest, String fence, boolean includeFence) {
+        String index = index(manifest.population(), fence);
+        var keys = new ArrayList<byte[]>();
+        keys.add(frame(manifest.generation()));
+        if (includeFence) keys.add(fenceKey);
+        for (CubeMeasure measure : manifest.measures().stream().sorted().toList()) {
+            keys.add(posting(index, measure, ""));
+            manifest.grain().forEach(column -> keys.add(posting(index, measure, column)));
+        }
+        return keys.toArray(byte[][]::new);
+    }
+
+    private static byte[] posting(String index, CubeMeasure measure, String column) {
+        return bytes(index + measure.name() + ":" + column);
     }
 
     private static byte[] frame(String generation) {

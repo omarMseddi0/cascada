@@ -2,9 +2,9 @@ package com.cascada.cache.domain.model.cube;
 
 import java.util.Map;
 
-/** Current Delta metadata for fragment freshness. The schema includes mapping metadata. */
+/** Admission-time Delta metadata. The schema fingerprint includes mapping metadata. */
 public record ExactCubeSource(String path, String tableId, long version, String schema,
-                              String semantics, String accessScope, Map<String, String> types) {
+                              String semantics, String accessScope, Map<String, String> types, boolean groupByAliases) {
     public ExactCubeSource {
         types = Map.copyOf(types);
     }

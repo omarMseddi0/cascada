@@ -1,6 +1,5 @@
 package com.cascada.cache.application.port.out;
 
-import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
@@ -11,7 +10,9 @@ import java.util.Optional;
 public interface ExactCubeSqlPort {
     Optional<ExactCubeQuery> recognize(String physicalSql);
 
+    String pinnedStatement(ExactCubeQuery query, ExactCubeSource source);
+
     String stateStatement(ExactCubeQuery query, ExactCubeSource source, CubeInterval range, Set<CubeMeasure> measures);
 
-    String outerStatement(ExactCubeQuery query, ExactCubeSource source, ResultFrame aggregate);
+    String outerStatement(ExactCubeQuery query, ExactCubeSource source);
 }

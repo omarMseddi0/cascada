@@ -28,6 +28,12 @@ public final class ExactCubePlanner {
 
     public static Optional<ExactCubePlan> select(ExactCubeQuery query, CubePopulation population,
                                                  List<ExactCubeFragment> candidates, long bucketSeconds) {
+        return select(query, population, candidates, bucketSeconds, Long.MAX_VALUE);
+    }
+
+    static Optional<ExactCubePlan> select(ExactCubeQuery query, CubePopulation population,
+                                          List<ExactCubeFragment> candidates, long bucketSeconds, long edgeBudget) {
+        long work = 0;
         var ingredients = query.measures().stream().sorted().toList();
         if (ingredients.isEmpty()) return Optional.empty();
         long end = query.interval().end();
@@ -38,6 +44,7 @@ public final class ExactCubePlanner {
         // Keep distinct measure sets so a shared read is still available to the optimizer.
         var byStart = new HashMap<Long, Map<CubeInterval, Map<Set<CubeMeasure>, ExactCubeFragment>>>();
         for (var fragment : candidates) {
+            if (++work > edgeBudget) return Optional.empty();
             QueryCancellation.requireCurrentActive();
             if (!ExactCubePlanChecker.compatible(query, population, fragment, bucketSeconds)
                     || Collections.disjoint(fragment.measures(), query.measures())) continue;
@@ -47,7 +54,7 @@ public final class ExactCubePlanner {
             byStart.computeIfAbsent(interval.start(), ignored -> new HashMap<>())
                     .computeIfAbsent(interval, ignored -> new HashMap<>())
                     .merge(fragment.measures(), fragment,
-                            (a, b) -> a.decodedBytes() <= b.decodedBytes() ? a : b);
+                            (a, b) -> fragmentCost(a) <= fragmentCost(b) ? a : b);
         }
         if (byStart.isEmpty()) return Optional.empty();
 
@@ -73,11 +80,13 @@ public final class ExactCubePlanner {
             long at = Math.min(first, second);
             for (var group : byStart.getOrDefault(at, Map.of()).values()) {
                 for (var fragment : group.values()) {
+                    if (++work > edgeBudget) return Optional.empty();
                     advance(step, new CubeCoverEdge(fragment.interval(), fragment), ingredients,
-                            0.02 + fragment.decodedBytes() * (0.125 / (1024 * 1024)), directCost, best, queue);
+                            fragmentCost(fragment), directCost, best, queue);
                 }
             }
             for (long stop : starts.tailSet(at, false)) {
+                if (++work > edgeBudget) return Optional.empty();
                 var interval = new CubeInterval(at, stop);
                 double cost = scanCost(interval, bucketSeconds);
                 if (step.cost() + cost >= directCost) break;
@@ -128,6 +137,12 @@ public final class ExactCubePlanner {
         covers.put(ingredients.getFirst(), List.copyOf(first.reversed()));
         if (ingredients.size() == 2) covers.put(ingredients.getLast(), List.copyOf(second.reversed()));
         return new ExactCubePlan(Map.copyOf(covers));
+    }
+
+    // Relative to the fixed cost of submitting one Spark scan.
+    private static double fragmentCost(ExactCubeFragment fragment) {
+        return 0.02 + fragment.compressedBytes() / (64.0 * 1024 * 1024)
+                + fragment.decodedBytes() / (8.0 * 1024 * 1024) + fragment.rows() / 1_000_000.0;
     }
 
     private static double scanCost(CubeInterval interval, long bucketSeconds) {

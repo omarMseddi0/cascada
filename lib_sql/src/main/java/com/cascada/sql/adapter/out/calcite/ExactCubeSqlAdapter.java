@@ -3,8 +3,9 @@ package com.cascada.sql.adapter.out.calcite;
 import com.cascada.cache.application.port.out.ExactCubeSqlPort;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
-import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.cube.CubeInterval;
+import com.cascada.cache.domain.model.cube.CubeKeyFilter;
+import com.cascada.cache.domain.model.cube.CubeKeyFilterOperator;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.CubeOperation;
 import com.cascada.cache.domain.model.cube.CubeProjection;
@@ -12,15 +13,17 @@ import com.cascada.cache.domain.model.cube.CubeSort;
 import com.cascada.sql.exception.UnsupportedSqlException;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.SqlCharStringLiteral;
 import org.apache.calcite.sql.SqlIdentifier;
-import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
@@ -29,18 +32,13 @@ import org.apache.calcite.sql.SqlNumericLiteral;
 import org.apache.calcite.sql.SqlOrderBy;
 import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.SqlSelectKeyword;
-import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.calcite.sql.type.SqlTypeName;
 
 /** Proves one aggregate over a registered relation, optionally directly below an outer SELECT. */
 public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
     private static final Set<SqlKind> PREDICATES = EnumSet.of(SqlKind.AND, SqlKind.OR, SqlKind.NOT,
             SqlKind.EQUALS, SqlKind.NOT_EQUALS, SqlKind.GREATER_THAN, SqlKind.GREATER_THAN_OR_EQUAL,
             SqlKind.LESS_THAN, SqlKind.LESS_THAN_OR_EQUAL, SqlKind.IS_NULL, SqlKind.IS_NOT_NULL);
-    private static final Set<SqlKind> OUTER_OPERATORS = EnumSet.of(SqlKind.AS, SqlKind.DESCENDING,
-            SqlKind.NULLS_FIRST, SqlKind.NULLS_LAST, SqlKind.PLUS, SqlKind.MINUS, SqlKind.TIMES,
-            SqlKind.DIVIDE, SqlKind.SUM, SqlKind.COUNT, SqlKind.AVG, SqlKind.MIN, SqlKind.MAX,
-            SqlKind.CASE, SqlKind.COALESCE);
-    private static final Set<String> OUTER_FUNCTIONS = Set.of("SUM", "COUNT", "AVG", "MIN", "MAX", "COALESCE");
     private final Set<String> paths;
     private final String timeColumn;
 
@@ -60,63 +58,117 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
     }
 
     @Override
+    public String pinnedStatement(ExactCubeQuery query, ExactCubeSource source) {
+        return ExactCubeSql.direct(query, source);
+    }
+
+    @Override
     public String stateStatement(ExactCubeQuery query, ExactCubeSource source, CubeInterval range, Set<CubeMeasure> measures) {
         return ExactCubeSql.state(query, source, range, measures);
     }
 
     @Override
-    public String outerStatement(ExactCubeQuery query, ExactCubeSource source, ResultFrame aggregate) {
-        return ExactCubeSql.outer(query, source, aggregate);
+    public String outerStatement(ExactCubeQuery query, ExactCubeSource source) {
+        return ExactCubeSql.outer(query, source);
     }
 
     private ExactCubeQuery extract(String physicalSql) {
         SqlNode root = CalciteSql.parseQuery(physicalSql);
-        SqlSelect outer = select(root);
-        SqlSelect inner = outer;
-        SqlCall derived = null;
-        if (outer.getFrom() instanceof SqlCall alias && alias.getKind() == SqlKind.AS
-                && alias.operandCount() == 2 && alias.operand(0) instanceof SqlSelect subquery) {
-            require(plainOuter(outer, root));
-            derived = alias;
-            inner = subquery;
+        SqlNode body = root instanceof SqlOrderBy order ? order.query : root;
+        String sourceToken = SqlTrees.unusedSentinel(physicalSql, "CASCADA_PINNED_SOURCE");
+        String outerToken = SqlTrees.unusedSentinel(physicalSql, "CASCADA_COMPLETE_AGGREGATE");
+
+        var relations = new ExactCubeRelations(root, sourceToken);
+        // Try the top-level aggregate first so ordinary hits need no graph traversal.
+        if (body instanceof SqlSelect select) {
+            var direct = candidate(root, relations, select, true, sourceToken, outerToken);
+            if (direct != null) return direct;
         }
+        for (SqlSelect select : relations.aggregates()) {
+            var nested = candidate(root, relations, select, select == body, sourceToken, outerToken);
+            if (nested != null) return nested;
+        }
+        throw new IllegalArgumentException("no independent aggregate relation");
+    }
+
+    private ExactCubeQuery candidate(SqlNode root, ExactCubeRelations relations, SqlSelect inner, boolean direct,
+                                     String sourceToken, String outerToken) {
+        try {
+            return aggregate(root, relations, inner, direct, sourceToken, outerToken);
+        } catch (IllegalArgumentException | ArithmeticException | UnsupportedSqlException ineligible) {
+            return null;
+        }
+    }
+
+    private ExactCubeQuery aggregate(SqlNode root, ExactCubeRelations relations, SqlSelect inner, boolean direct,
+                                     String sourceToken, String outerToken) {
         require(coreSelect(inner) && !inner.isDistinct() && inner.getHaving() == null);
-        SqlNode source = SqlTrees.stripAlias(inner.getFrom());
-        require(source instanceof SqlIdentifier);
-        require(inner.getFrom() == source || ((SqlCall) inner.getFrom()).operandCount() == 2);
-        SqlIdentifier from = (SqlIdentifier) source;
-        require(from.names.size() == 2 && from.names.getFirst().equalsIgnoreCase("delta")
-                && paths.contains(from.names.getLast()));
+        SqlNode from = inner.getFrom();
+        SqlNode unaliased = SqlTrees.stripAlias(from);
+        require(from != null && (from == unaliased || ((SqlCall) from).operandCount() == 2));
+        String qualifier = from == unaliased ? null : simple(((SqlCall) from).operand(1));
+        var conjuncts = new ArrayList<SqlNode>();
+        String path = relations.sourcePath(inner, (filter, filterQualifier) -> {
+            var layer = new ArrayList<SqlNode>();
+            flatten(filter, layer);
+            var binder = new org.apache.calcite.sql.util.SqlShuttle() {
+                @Override public SqlNode visit(SqlIdentifier id) {
+                    return new SqlIdentifier(column(id, filterQualifier), id.getParserPosition());
+                }
+            };
+            for (SqlNode term : layer) {
+                require(predicate(term));
+                conjuncts.add(term.accept(binder));
+            }
+        });
+        require(paths.contains(path));
         var predicates = new TreeSet<String>();
+        var keyFilters = new HashSet<CubeKeyFilter>();
+        boolean allKeyFilters = true;
+        var predicateTypes = new HashMap<String, String>();
         Long lower = null;
         Long upper = null;
-        var conjuncts = new ArrayList<SqlNode>();
-        flatten(inner.getWhere(), conjuncts);
         for (SqlNode node : conjuncts) {
             if (node instanceof SqlCall call && call.operandCount() == 2
-                    && call.operand(0) instanceof SqlIdentifier id && id.isSimple()
-                    && id.getSimple().equals(timeColumn)) {
+                    && call.operand(0) instanceof SqlIdentifier id && column(id, qualifier).equals(timeColumn)) {
                 if (call.getKind() == SqlKind.GREATER_THAN_OR_EQUAL || call.getKind() == SqlKind.GREATER_THAN) {
-                    require(lower == null);
                     long value = number(call.operand(1));
-                    lower = call.getKind() == SqlKind.GREATER_THAN ? Math.incrementExact(value) : value;
+                    long start = call.getKind() == SqlKind.GREATER_THAN ? Math.incrementExact(value) : value;
+                    lower = lower == null ? start : Math.max(lower, start);
                     continue;
                 }
                 if (call.getKind() == SqlKind.LESS_THAN || call.getKind() == SqlKind.LESS_THAN_OR_EQUAL) {
-                    require(upper == null);
                     long value = number(call.operand(1));
-                    upper = call.getKind() == SqlKind.LESS_THAN_OR_EQUAL ? Math.incrementExact(value) : value;
+                    long end = call.getKind() == SqlKind.LESS_THAN_OR_EQUAL ? Math.incrementExact(value) : value;
+                    upper = upper == null ? end : Math.min(upper, end);
                     continue;
                 }
             }
-            require(predicate(node));
+            predicateTypes(node, predicateTypes);
             predicates.add(CalciteSql.unparse(node));
+            var keyFilter = keyFilter(node);
+            if (keyFilter == null) allKeyFilters = false;
+            else keyFilters.add(keyFilter);
         }
         require(lower != null && upper != null);
+        var projectedKeys = new HashMap<String, String>();
+        for (SqlNode item : inner.getSelectList()) {
+            if (item.getKind() == SqlKind.AS && SqlTrees.unaliased(item) instanceof SqlIdentifier id) {
+                String alias = SqlTrees.outputName(item);
+                String original = column(id, qualifier);
+                if (!alias.equals(original)) projectedKeys.put(alias, original);
+            }
+        }
+        var groupAliases = new HashSet<String>();
         var grain = new ArrayList<String>();
         if (inner.getGroup() != null) {
+            require(inner.getGroup().size() <= 16);
             for (SqlNode key : inner.getGroup()) {
-                String name = simple(key);
+                String name = column(key, qualifier);
+                if (((SqlIdentifier) key).isSimple() && projectedKeys.containsKey(name)) {
+                    groupAliases.add(name);
+                    name = projectedKeys.get(name);
+                }
                 require(!name.equals(timeColumn) && !grain.contains(name));
                 grain.add(name);
             }
@@ -131,7 +183,7 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
             CubeOperation operation;
             String column;
             if (expression instanceof SqlIdentifier) {
-                column = simple(expression);
+                column = column(expression, qualifier);
                 require(grain.contains(column));
                 operation = CubeOperation.KEY;
             } else {
@@ -140,7 +192,7 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
                 require(aggregate.getFunctionQuantifier() == null && aggregate.operandCount() == 1);
                 operation = CubeOperation.valueOf(aggregate.getOperator().getName().toUpperCase(Locale.ROOT));
                 require(operation != CubeOperation.KEY);
-                column = simple(aggregate.operand(0));
+                column = column(aggregate.operand(0), qualifier);
                 require(input == null || input.equals(column));
                 input = column;
                 if (operation != CubeOperation.COUNT) measures.add(CubeMeasure.SUM);
@@ -153,7 +205,7 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
         SqlNodeList sort = inner.getOrderList();
         SqlNode fetch = inner.getFetch();
         require(inner.getOffset() == null);
-        if (derived == null && root instanceof SqlOrderBy ordered) {
+        if (direct && root instanceof SqlOrderBy ordered) {
             require(ordered.offset == null);
             fetch = ordered.fetch;
             sort = ordered.orderList;
@@ -161,45 +213,19 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
         List<CubeSort> order = sorts(sort, projections);
         Integer limit = fetch == null ? null : Math.toIntExact(number(fetch));
         require(limit == null || limit >= 0 && !order.isEmpty());
-        require(derived == null || (order.isEmpty() && limit == null));
+        require(direct || (order.isEmpty() && limit == null));
 
-        String outerToken = SqlTrees.unusedSentinel(physicalSql, "CASCADA_COMPLETE_AGGREGATE");
-        String outerSql = null;
-        if (derived != null) {
-            derived.setOperand(0, new SqlIdentifier(outerToken, SqlParserPos.ZERO));
-            outerSql = CalciteSql.unparse(root);
-        }
-        return new ExactCubeQuery(from.names.getLast(), timeColumn, new CubeInterval(lower, upper),
+        String pinned = relations.statement(path, null, null);
+        String outerSql = direct ? null : relations.statement(path, inner, outerToken);
+        return new ExactCubeQuery(path, timeColumn, new CubeInterval(lower, upper),
                 String.join(" AND ", predicates.stream().map(p -> "(" + p + ")").toList()),
-                grain, input, measures, projections, order, limit, outerSql, outerToken);
-    }
-
-    private static SqlSelect select(SqlNode root) {
-        SqlNode body = root instanceof SqlOrderBy order ? order.query : root;
-        require(body instanceof SqlSelect);
-        return (SqlSelect) body;
+                predicateTypes, allKeyFilters ? List.copyOf(keyFilters) : List.of(),
+                grain, groupAliases, input, measures, projections, order, limit, outerSql, outerToken, pinned, sourceToken);
     }
 
     private static boolean coreSelect(SqlSelect select) {
         return !select.hasHints() && !select.isKeywordPresent(SqlSelectKeyword.STREAM)
                 && select.getQualify() == null && select.getWindowList().isEmpty();
-    }
-
-    private static boolean plainOuter(SqlSelect select, SqlNode root) {
-        return coreSelect(select) && safeOuter(select.getSelectList()) && safeOuter(select.getWhere())
-                && safeOuter(select.getGroup()) && safeOuter(select.getHaving())
-                && safeOuter(select.getOrderList())
-                && (!(root instanceof SqlOrderBy order) || safeOuter(order.orderList));
-    }
-
-    private static boolean safeOuter(SqlNode node) {
-        if (node == null || node instanceof SqlLiteral || node instanceof SqlIdentifier) return true;
-        if (node instanceof SqlNodeList list) return list.stream().allMatch(ExactCubeSqlAdapter::safeOuter);
-        return node instanceof SqlCall call
-                && (PREDICATES.contains(call.getKind()) || OUTER_OPERATORS.contains(call.getKind())
-                    || call.getOperator() instanceof SqlFunction function && function.getNameAsId().isSimple()
-                        && OUTER_FUNCTIONS.contains(function.getName().toUpperCase(Locale.ROOT)))
-                && call.getOperandList().stream().allMatch(ExactCubeSqlAdapter::safeOuter);
     }
 
     private static void flatten(SqlNode node, List<SqlNode> out) {
@@ -211,8 +237,76 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
         }
     }
 
+    private static void predicateTypes(SqlNode node, Map<String, String> types) {
+        if (node instanceof SqlIdentifier id) {
+            requireType(types, id, "boolean");
+            return;
+        }
+        if (node instanceof SqlLiteral literal) {
+            require(literal.getTypeName() == SqlTypeName.BOOLEAN || literal.getTypeName() == SqlTypeName.NULL);
+            return;
+        }
+        var call = (SqlCall) node;
+        switch (call.getKind()) {
+            case AND, OR, NOT -> call.getOperandList().forEach(operand -> predicateTypes(operand, types));
+            case IS_NULL, IS_NOT_NULL -> {
+                require(call.operand(0) instanceof SqlIdentifier);
+                requireType(types, call.operand(0), "");
+            }
+            default -> {
+                SqlNode first = call.operand(0);
+                SqlNode second = call.operand(1);
+                if (second instanceof SqlIdentifier) {
+                    SqlNode temporary = first;
+                    first = second;
+                    second = temporary;
+                }
+                require(first instanceof SqlIdentifier && second instanceof SqlLiteral);
+                var literal = (SqlLiteral) second;
+                String required = switch (literal.getTypeName()) {
+                    case NULL -> "";
+                    case CHAR -> "string";
+                    case BOOLEAN -> "boolean";
+                    case DECIMAL -> {
+                        number(second); // integer literal representable without narrowing or rounding
+                        yield "integral";
+                    }
+                    default -> throw new IllegalArgumentException("unsupported typed predicate literal");
+                };
+                requireType(types, (SqlIdentifier) first, required);
+            }
+        }
+    }
+
+    private static void requireType(Map<String, String> types, SqlIdentifier id, String required) {
+        types.merge(id.getSimple(), required, (previous, next) -> {
+            if (previous.isEmpty()) return next;
+            require(next.isEmpty() || previous.equals(next));
+            return previous;
+        });
+    }
+
+    private static CubeKeyFilter keyFilter(SqlNode node) {
+        if (!(node instanceof SqlCall call) || !(call.operand(0) instanceof SqlIdentifier id)) return null;
+        return switch (call.getKind()) {
+            case IS_NULL -> new CubeKeyFilter(id.getSimple(), CubeKeyFilterOperator.IS_NULL, null);
+            case IS_NOT_NULL -> new CubeKeyFilter(id.getSimple(), CubeKeyFilterOperator.IS_NOT_NULL, null);
+            case EQUALS -> {
+                if (call.operand(1) instanceof SqlCharStringLiteral literal
+                        && literal.getNlsString().getCharsetName() == null
+                        && literal.getNlsString().getCollation() == null
+                        && literal.getNlsString().getValue().matches("[A-Za-z0-9 _.:-]{0,64}")) {
+                    yield new CubeKeyFilter(id.getSimple(), CubeKeyFilterOperator.STRING_EQUALS,
+                            literal.getNlsString().getValue());
+                }
+                yield null;
+            }
+            default -> null;
+        };
+    }
+
     private static boolean predicate(SqlNode node) {
-        if (node instanceof SqlIdentifier id) return id.isSimple() && !id.isStar();
+        if (node instanceof SqlIdentifier id) return !id.isStar();
         if (node instanceof SqlLiteral) return true;
         return node instanceof SqlCall call && PREDICATES.contains(call.getKind())
                 && call.getOperandList().stream().allMatch(ExactCubeSqlAdapter::predicate);
@@ -234,6 +328,14 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
             result.add(new CubeSort(label, descending, nullsFirst == null ? !descending : nullsFirst));
         }
         return result;
+    }
+
+    private static String column(SqlNode node, String qualifier) {
+        require(node instanceof SqlIdentifier);
+        var id = (SqlIdentifier) node;
+        if (id.isSimple()) return simple(id);
+        require(id.names.size() == 2 && qualifier != null && qualifier.equals(id.names.getFirst()));
+        return simple(new SqlIdentifier(id.names.getLast(), id.getParserPosition()));
     }
 
     private static String simple(SqlNode node) {

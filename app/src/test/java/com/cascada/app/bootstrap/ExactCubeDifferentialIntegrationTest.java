@@ -288,6 +288,74 @@ class ExactCubeDifferentialIntegrationTest {
         }
     }
 
+    @Test void thirtyDayTopKUsesLookbackBucketsThenOtherShapesThenOnlyTheRemainingSparkGap() {
+        String original = path;
+        path = scratch.resolve("thirty-day-dashboard").toUri().toString();
+        spark.sql("""
+                SELECT day.id * 86400L AS ts, 'x' AS device, subscriber.id AS subscriber_id,
+                       pmod(subscriber.id, 3) AS shop, pmod(day.id, 2) AS market,
+                       CASE WHEN subscriber.id < 10 THEN CAST(60 - subscriber.id AS INT)
+                            WHEN (subscriber.id - 10) DIV 10 = day.id THEN 100 ELSE 0 END AS amount
+                FROM range(30) day CROSS JOIN range(310) subscriber
+                UNION ALL
+                SELECT 0L, 'y', 0L, 0L, 0L, 900
+                UNION ALL
+                SELECT 5L * 86400L, 'y', 0L, 0L, 0L, 0 FROM range(9)
+                """).write().format("delta").save(path);
+        String query = aggregate("AVG", "device, subscriber_id", 0, 30, "")
+                + " ORDER BY value DESC, device NULLS FIRST, subscriber_id NULLS FIRST LIMIT 10";
+        try (var factory = factory(SCOPE, true)) {
+            // Verify the ordinary warmer writes the fifteen most recent days for the same query hash.
+            var canonical = canonicalize(query);
+            var hash = new com.cascada.cache.application.service.hashing.QueryHashGenerator().generateQueryHash(canonical, 300);
+            var warmer = factory.warmCacheUseCase();
+            warmer.recordQuery(hash, canonical);
+            assertThat(warmer.warmLookbackWindow(30 * DAY, Duration.ofDays(15)).bucketsWarmed()).isEqualTo(15);
+            var sameQueryKeys = java.util.stream.LongStream.range(15, 30).mapToObj(day ->
+                    com.cascada.cache.domain.key.CacheKeyFactory.buildBucketKey(hash, day * DAY, DAY)).toList();
+            factory.cacheBackendForShutdown().visitKeys(sameQueryKeys, (index, bucket) ->
+                    assertThat(bucket).hasValueSatisfying(frame -> assertThat(frame.rowCount()).isEqualTo(310)));
+
+            var expectedKeys = new ArrayList<>(sameQueryKeys);
+            expectedKeys.addAll(warm(factory, aggregate("AVG", "device, subscriber_id, shop", 0, 5, ""), 0, 5));
+            var subscriberOnlyKeys = warm(factory, aggregate("AVG", "subscriber_id", 5, 15, ""), 5, 15);
+
+            // The best global x group is never in a daily top ten.
+            String localRanks = "WITH daily AS (SELECT ts, device, subscriber_id, AVG(amount) AS mean FROM "
+                    + SOURCE + " GROUP BY ts, device, subscriber_id), ranked AS (SELECT *, ROW_NUMBER() "
+                    + "OVER (PARTITION BY ts ORDER BY mean DESC, device, subscriber_id) AS pos FROM daily) "
+                    + "SELECT ts FROM ranked WHERE device = 'x' AND subscriber_id = 0 AND pos <= 10";
+            assertThat(oracle.execute(pinned(localRanks, 0)).isEmpty()).isTrue();
+
+            var entry = factory.executeLogicalQueryUseCase();
+            tracked.calls.clear();
+            var mixed = entry.query(query);
+            check(query, 0, true, mixed, "exact-cube");
+            assertThat(mixed.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
+                    .containsExactlyInAnyOrderElementsOf(expectedKeys).doesNotContainAnyElementsOf(subscriberOnlyKeys);
+            assertThat(mixed.exactCubeTrace().residualSql()).singleElement().asString()
+                    .contains("VERSION AS OF 0", "`ts` >= " + 5 * DAY, "`ts` < " + 15 * DAY,
+                            "SUM(`amount`)", "COUNT(`amount`)", "GROUP BY `device`, `subscriber_id`")
+                    .doesNotContain("ORDER BY", "LIMIT");
+            assertThat(tracked.calls).containsExactlyElementsOf(mixed.exactCubeTrace().residualSql());
+            assertThat(mixed.frame().rows().getFirst()).containsEntry("device", "y").containsEntry("value", 90.0);
+            assertThat(mixed.frame().rows().get(1)).containsEntry("device", "x")
+                    .containsEntry("subscriber_id", 0L).containsEntry("value", 60.0);
+
+            expectedKeys.addAll(warm(factory, aggregate("AVG", "device, subscriber_id, shop, market", 5, 15, ""), 5, 15));
+            tracked.calls.clear();
+            var covered = entry.query(query);
+            check(query, 0, true, covered, "exact-cube");
+            assertThat(covered.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
+                    .containsExactlyInAnyOrderElementsOf(expectedKeys).doesNotContainAnyElementsOf(subscriberOnlyKeys);
+            assertThat(covered.exactCubeTrace().residualSql()).isEmpty();
+            assertThat(tracked.calls).isEmpty();
+            System.out.println("THIRTY_DAY_CUBE own=15 mixedOther=5 mixedSparkDays=10 fullOther=15 fullSparkSql=0");
+        } finally {
+            path = original;
+        }
+    }
+
     @Test void ignoresOldBucketProvenanceAfterTheOrdinaryKeyIsOverwritten() {
         String producer = aggregate("AVG", "region, device", 0, 1, "");
         String consumer = aggregate("AVG", "region", 0, 1, "");
@@ -551,10 +619,14 @@ class ExactCubeDifferentialIntegrationTest {
         throw new AssertionError("expected a Spark SQL error");
     }
 
-    private List<String> warm(CascadaEngineFactory factory, String sql, long low, long high) {
+    private com.cascada.cache.domain.model.query.CanonicalQueryObject canonicalize(String sql) {
         var catalog = new TableCatalog().register(RegisteredTable.of(SOURCE, path, Map.of("ts", "ts"), "ts"));
         String physical = new LogicalToPhysicalSqlTranslator(300, catalog).translateToPhysicalSql(sql);
-        var canonical = new CalciteCanonicalObjectFactory().canonicalize(physical);
+        return new CalciteCanonicalObjectFactory().canonicalize(physical);
+    }
+
+    private List<String> warm(CascadaEngineFactory factory, String sql, long low, long high) {
+        var canonical = canonicalize(sql);
         var hash = new com.cascada.cache.application.service.hashing.QueryHashGenerator().generateQueryHash(canonical, 300);
         var warmer = (com.cascada.cache.application.service.WarmingOrchestrator) factory.warmCacheUseCase();
         assertThat(warmer.warmSinglePattern(hash, canonical, low * DAY, high * DAY - 1, false).bucketsWarmed())

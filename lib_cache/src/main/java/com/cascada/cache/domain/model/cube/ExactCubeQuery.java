@@ -7,7 +7,7 @@ import java.util.Set;
 public record ExactCubeQuery(String path, String timeColumn, CubeInterval interval, String predicate,
                              List<String> grain, String input, Set<CubeMeasure> measures,
                              List<CubeProjection> projections, List<CubeSort> order, Integer limit,
-                             String outerSql, String outerRelation, String pinnedSqlTemplate, String sourceToken) {
+                             String outerSql, String outerRelation) {
     public ExactCubeQuery {
         grain = List.copyOf(grain);
         measures = Set.copyOf(measures);

@@ -60,11 +60,6 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
     }
 
     @Override
-    public String pinnedStatement(ExactCubeQuery query, ExactCubeSource source) {
-        return ExactCubeSql.direct(query, source);
-    }
-
-    @Override
     public String stateStatement(ExactCubeQuery query, ExactCubeSource source, CubeInterval range, Set<CubeMeasure> measures) {
         return ExactCubeSql.state(query, source, range, measures);
     }
@@ -168,15 +163,7 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
         require(limit == null || limit >= 0 && !order.isEmpty());
         require(derived == null || (order.isEmpty() && limit == null));
 
-        String sourceToken = SqlTrees.unusedSentinel(physicalSql, "CASCADA_PINNED_SOURCE");
         String outerToken = SqlTrees.unusedSentinel(physicalSql, "CASCADA_COMPLETE_AGGREGATE");
-        var sourcePlaceholder = new SqlIdentifier(sourceToken, SqlParserPos.ZERO);
-        if (inner.getFrom() == source) {
-            inner.setFrom(sourcePlaceholder);
-        } else {
-            ((SqlCall) inner.getFrom()).setOperand(0, sourcePlaceholder);
-        }
-        String pinned = CalciteSql.unparse(root);
         String outerSql = null;
         if (derived != null) {
             derived.setOperand(0, new SqlIdentifier(outerToken, SqlParserPos.ZERO));
@@ -184,7 +171,7 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
         }
         return new ExactCubeQuery(from.names.getLast(), timeColumn, new CubeInterval(lower, upper),
                 String.join(" AND ", predicates.stream().map(p -> "(" + p + ")").toList()),
-                grain, input, measures, projections, order, limit, outerSql, outerToken, pinned, sourceToken);
+                grain, input, measures, projections, order, limit, outerSql, outerToken);
     }
 
     private static SqlSelect select(SqlNode root) {

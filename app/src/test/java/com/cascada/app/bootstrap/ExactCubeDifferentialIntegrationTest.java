@@ -41,7 +41,7 @@ import java.time.Clock;
 import java.util.Set;
 import com.cascada.cache.application.model.config.CacheExecutionConfiguration;
 import com.cascada.cache.application.model.query.QueryResult;
-import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
+import com.cascada.cache.application.port.out.LatestQueryExecutorPort;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import com.cascada.cache.fixture.ValkeyTestDatabase;
@@ -76,7 +76,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Exercises the production logical-entry composition root with independent pinned Spark SQL. */
+/** Exercises the production logical-entry composition root with independent latest-version Spark SQL. */
 @EnabledIfEnvironmentVariable(named = ValkeyTestDatabase.ENVIRONMENT_VARIABLE, matches = ".+")
 @EnabledIfSystemProperty(named = "cascada.spark.integration", matches = "true")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -153,8 +153,8 @@ class ExactCubeDifferentialIntegrationTest {
                 + " AND ts < " + 13 * DAY;
         try (var factory = factory(SCOPE, true)) {
             var entry = factory.executeLogicalQueryUseCase();
-            check(sum, 0, false, entry.query(sum), "pinned-build");
-            check(count, 0, false, entry.query(count), "pinned-build");
+            check(sum, 0, false, entry.query(sum), "latest-build");
+            check(count, 0, false, entry.query(count), "latest-build");
             tracked.calls.clear();
             var none = entry.query(grouped);
             check(grouped, 0, false, none, "exact-cube");
@@ -179,8 +179,8 @@ class ExactCubeDifferentialIntegrationTest {
                 + ") q WHERE q.value IS NOT NULL HAVING COUNT(*) > 0";
         try (var factory = factory(SCOPE, true)) {
             var entry = factory.executeLogicalQueryUseCase();
-            check(sum, 0, false, entry.query(sum), "pinned-build");
-            check(count, 0, false, entry.query(count), "pinned-build");
+            check(sum, 0, false, entry.query(sum), "latest-build");
+            check(count, 0, false, entry.query(count), "latest-build");
 
             tracked.calls.clear();
             var result = entry.query(avg);
@@ -198,7 +198,8 @@ class ExactCubeDifferentialIntegrationTest {
             });
             assertThat(trace.residualSql()).hasSize(1);
             String residual = trace.residualSql().getFirst();
-            assertThat(residual).contains("SUM(`amount`)", "VERSION AS OF 0", "`ts` >= 518400", "`ts` < 777600")
+            assertThat(residual).contains("SUM(`amount`)", "`ts` >= 518400", "`ts` < 777600")
+                    .doesNotContain("VERSION AS OF")
                     .doesNotContain("COUNT(`amount`)");
             assertThat(tracked.calls).containsExactly(residual);
             System.out.println("EXACT_CUBE_MIXED fragments=" + trace.fragments().stream().map(fragment ->
@@ -209,7 +210,7 @@ class ExactCubeDifferentialIntegrationTest {
                     + " planningNanos=" + trace.planningNanos());
 
             String countHead = aggregate("COUNT", "region", 0, 6, "");
-            check(countHead, 0, false, entry.query(countHead), "pinned-build");
+            check(countHead, 0, false, entry.query(countHead), "latest-build");
             tracked.calls.clear();
             check(full, 0, true, entry.query(full), "exact-cube");
             assertThat(tracked.calls).isEmpty();
@@ -228,12 +229,12 @@ class ExactCubeDifferentialIntegrationTest {
         try (var restarted = factory(SCOPE, true); var isolated = factory("another-policy", true);
              var disabled = factory(SCOPE, false)) {
             check(avg, 0, true, restarted.executeLogicalQueryUseCase().query(avg), "exact-cube");
-            check(avg, 0, true, isolated.executeLogicalQueryUseCase().query(avg), "pinned-spark");
+            check(avg, 0, true, isolated.executeLogicalQueryUseCase().query(avg), "latest-spark");
             check(avg, 0, true, disabled.executeLogicalQueryUseCase().query(avg), null);
         }
     }
 
-    @Test void seededCompoundDeclinesStillMatchPinnedSpark() {
+    @Test void seededCompoundDeclinesStillMatchLatestSpark() {
         org.junit.jupiter.api.Assumptions.assumeTrue(Long.getLong("cascada.exact.fixture.rows", 64) <= 10000,
                 "exhaustive join corpus uses the tiny fixture");
         var bounds = "ts >= 0 AND ts < " + HIGH * DAY;
@@ -304,7 +305,7 @@ class ExactCubeDifferentialIntegrationTest {
         String count = aggregate("COUNT", "region", 0, HIGH, "");
         String sumAll = aggregate("SUM", "region", 0, HIGH, "");
         var expected = new ByteArrayOutputStream();
-        QueryResponseEncoder.json(oracle.execute(pinned(query, 0)), expected);
+        QueryResponseEncoder.json(oracle.execute(latestSql(query)), expected);
         var expectedJson = json.readTree(expected.toByteArray());
 
         try (var factory = factory(SCOPE, true)) {
@@ -316,7 +317,7 @@ class ExactCubeDifferentialIntegrationTest {
                 return result;
             };
             try (var http = new QueryHttpServer(server, entry);
-                 var direct = new QueryHttpServer(server, sql -> new QueryResult(oracle.execute(pinned(sql, 0)), false));
+                 var direct = new QueryHttpServer(server, sql -> new QueryResult(oracle.execute(latestSql(sql)), false));
                  var grpcService = new QueryGrpcService(entry, server);
                  var threads = Executors.newFixedThreadPool(2)) {
                 http.start();
@@ -330,7 +331,7 @@ class ExactCubeDifferentialIntegrationTest {
                     // One no-cache request also warms the HTTP connection and Spark code generation.
                     assertThat(json.readTree(client.send(queryRequest, HttpResponse.BodyHandlers.ofByteArray()).body()))
                             .isEqualTo(expectedJson);
-                    sample("pinned-spark", client, directRequest, expectedJson, json, null);
+                    sample("latest-spark", client, directRequest, expectedJson, json, null);
                     sample("cold", client, queryRequest, expectedJson, json, receipts);
                     long startBuild = System.nanoTime();
                     raw.query(count);
@@ -405,7 +406,7 @@ class ExactCubeDifferentialIntegrationTest {
         var traces = receipts == null ? List.<com.cascada.cache.application.model.query.ExactCubeTrace>of()
                 : receipts.stream().map(QueryResult::exactCubeTrace).toList();
         if (receipts != null) {
-            String expectedRoute = route.equals("mixed") || route.equals("fully-covered") ? "exact-cube" : "pinned-spark";
+            String expectedRoute = route.equals("mixed") || route.equals("fully-covered") ? "exact-cube" : "latest-spark";
             assertThat(traces).hasSize(repetitions).allSatisfy(trace -> assertThat(trace.route()).isEqualTo(expectedRoute));
             assertThat(tracked.calls).hasSize(route.equals("fully-covered") ? 0 : repetitions);
             if (route.equals("fully-covered")) assertThat(jobs).isZero();
@@ -425,7 +426,45 @@ class ExactCubeDifferentialIntegrationTest {
         return ordered[(int) Math.ceil(quantile * ordered.length) - 1] / 1_000_000.0;
     }
 
-    @Test void writerAfterPlanningAndEvictedGenerationRecoverAtPinnedVersion() throws Exception {
+    @Test void writerDuringBuildAndFullyCachedReadRestartsAgainstLatest() {
+        String original = path;
+        path = scratch.resolve("freshness-facts").toUri().toString();
+        spark.sql(fixtureSql).write().format("delta").save(path);
+        String sum = aggregate("SUM", "region", 0, 6, "");
+        try (var factory = factory(SCOPE, true)) {
+            var entry = factory.executeLogicalQueryUseCase();
+            tracked.beforeExecute.set(() -> appendFreshnessRow("during-build"));
+            tracked.calls.clear();
+            var changedBuild = entry.query(sum);
+            check(sum, 1, false, changedBuild, "latest-spark");
+            assertThat(changedBuild.exactCubeTrace().reason()).isEqualTo("recovery:CubeSourceChangedException");
+            assertThat(tracked.calls).hasSize(2);
+            check(sum, 1, false, entry.query(sum), "latest-build");
+            check(sum, 1, false, entry.query(sum), "exact-cube");
+
+            // Fire on the recheck, after the request used only cached state from version 1.
+            tracked.beforeSourceObservation.set(() ->
+                    tracked.beforeSourceObservation.set(() -> appendFreshnessRow("during-cache-hit")));
+            tracked.calls.clear();
+            var changedHit = entry.query(sum);
+            check(sum, 2, false, changedHit, "latest-spark");
+            assertThat(changedHit.exactCubeTrace().reason()).isEqualTo("recovery:CubeSourceChangedException");
+            assertThat(changedHit.exactCubeTrace().fragments()).hasSize(1);
+            assertThat(changedHit.exactCubeTrace().residualSql()).isEmpty();
+            assertThat(tracked.calls).hasSize(1);
+        } finally {
+            tracked.beforeExecute.set(null);
+            tracked.beforeSourceObservation.set(null);
+            path = original;
+        }
+    }
+
+    private void appendFreshnessRow(String region) {
+        spark.newSession().sql("INSERT INTO delta.`" + path + "` VALUES (0L, '" + region + "', 'writer', 1)")
+                .collectAsList();
+    }
+
+    @Test void writerAfterPlanningAndEvictedGenerationRecoverAgainstLatest() throws Exception {
         String original = path;
         path = scratch.resolve("race-facts").toUri().toString();
         spark.sql(fixtureSql).write().format("delta").save(path);
@@ -437,16 +476,19 @@ class ExactCubeDifferentialIntegrationTest {
             var entry = factory.executeLogicalQueryUseCase();
             entry.query(sum);
             entry.query(count);
-            tracked.beforePinned.set(() -> spark.newSession().sql("INSERT INTO delta.`" + path
+            tracked.beforeExecute.set(() -> spark.newSession().sql("INSERT INTO delta.`" + path
                     + "` VALUES (518400L, 'external-row', 'writer', 700)").collectAsList());
             tracked.calls.clear();
             var racing = entry.query(avg);
-            check(avg, 0, true, racing, "exact-cube");
-            assertThat(tracked.calls).containsExactly(racing.exactCubeTrace().residualSql().getFirst());
-            assertThat(tracked.calls.getFirst()).contains("VERSION AS OF 0");
+            check(avg, 1, true, racing, "latest-spark");
+            assertThat(racing.exactCubeTrace().reason()).isEqualTo("recovery:CubeSourceChangedException");
+            assertThat(racing.frame().rows()).anySatisfy(row -> assertThat(row.get("region")).isEqualTo("external-row"));
+            assertThat(tracked.calls).hasSize(2);
+            assertThat(tracked.calls.getFirst()).isEqualTo(racing.exactCubeTrace().residualSql().getFirst());
+            assertThat(tracked.calls.getLast()).contains("AVG(amount)");
             tracked.calls.clear();
-            check(avg, 1, true, entry.query(avg), "pinned-spark");
-            assertThat(tracked.calls).singleElement().asString().contains("VERSION AS OF 1");
+            check(avg, 1, true, entry.query(avg), "latest-spark");
+            assertThat(tracked.calls).singleElement().asString().doesNotContain("VERSION AS OF");
 
             entry.query(sum);
             entry.query(count);
@@ -482,26 +524,26 @@ class ExactCubeDifferentialIntegrationTest {
                             SCOPE, Clock.systemUTC(), DAY, Duration.ofHours(1)));
             tracked.calls.clear();
             var recovered = faultEntry.query(avg);
-            check(avg, 1, true, recovered, "pinned-spark");
+            check(avg, 1, true, recovered, "latest-spark");
             assertThat(recovered.exactCubeTrace().reason()).startsWith("recovery:");
             assertThat(recovered.exactCubeTrace().fragments()).hasSize(1);
-            assertThat(tracked.calls).singleElement().asString().contains("VERSION AS OF 1");
+            assertThat(tracked.calls).singleElement().asString().doesNotContain("VERSION AS OF");
 
             spark.newSession().sql("UPDATE delta.`" + path + "` SET ts = 518400, amount = 8 "
                     + "WHERE region = 'zero'").collectAsList();
-            check(avg, 2, true, entry.query(avg), "pinned-spark");
+            check(avg, 2, true, entry.query(avg), "latest-spark");
             spark.newSession().sql("DELETE FROM delta.`" + path + "` WHERE region = 'external-row'").collectAsList();
-            check(avg, 3, true, entry.query(avg), "pinned-spark");
+            check(avg, 3, true, entry.query(avg), "latest-spark");
 
-            String oldTableId = tracked.bind(path, SCOPE).orElseThrow().tableId();
+            String oldTableId = tracked.currentSource(path, SCOPE).orElseThrow().tableId();
             Files.move(Path.of(URI.create(path)), scratch.resolve("retired-race-facts"));
             spark.sql(fixtureSql).selectExpr("ts", "region", "device", "amount + 100 AS amount")
                     .write().format("delta").save(path);
-            var recreated = tracked.bind(path, SCOPE).orElseThrow();
+            var recreated = tracked.currentSource(path, SCOPE).orElseThrow();
             assertThat(recreated.tableId()).isNotEqualTo(oldTableId);
             assertThat(recreated.version()).isZero();
-            check(avg, 0, true, entry.query(avg), "pinned-spark");
-            System.out.println("EXACT_CUBE_RACE pinnedVersion=0 appendVersion=1 moveVersion=2 deleteVersion=3 "
+            check(avg, 0, true, entry.query(avg), "latest-spark");
+            System.out.println("EXACT_CUBE_RACE observedVersion=0 recoveredOnVersion=1 moveVersion=2 deleteVersion=3 "
                     + "recreatedVersion=0 evictedAfterPlan=" + generation);
         } finally {
             path = original;
@@ -515,7 +557,7 @@ class ExactCubeDifferentialIntegrationTest {
                         + "FROM " + SOURCE + " WHERE amount > 0");
         try (var factory = factory(SCOPE, true)) {
             for (String sql : statements) {
-                String expected = sparkCondition(() -> oracle.execute(pinned(sql, 0)));
+                String expected = sparkCondition(() -> oracle.execute(latestSql(sql)));
                 assertThat(sparkCondition(() -> factory.executeLogicalQueryUseCase().query(sql))).isEqualTo(expected);
             }
         }
@@ -548,7 +590,7 @@ class ExactCubeDifferentialIntegrationTest {
         try (var factory = factory(SCOPE, true)) {
             var entry = factory.executeLogicalQueryUseCase();
             tracked.calls.clear();
-            check(fits, 0, false, entry.query(fits), "pinned-build");
+            check(fits, 0, false, entry.query(fits), "latest-build");
             assertThat(tracked.calls).singleElement().asString().doesNotContain("LIMIT");
             tracked.calls.clear();
             var covered = entry.query(fits);
@@ -558,7 +600,7 @@ class ExactCubeDifferentialIntegrationTest {
                     .satisfies(fragment -> assertThat(fragment.rows()).isEqualTo(12_000));
             assertThat(tracked.calls).isEmpty();
 
-            check(larger, 0, false, entry.query(larger), "pinned-build");
+            check(larger, 0, false, entry.query(larger), "latest-build");
             assertThat(tracked.calls).singleElement().asString().doesNotContain("LIMIT");
             tracked.calls.clear();
             var largeCover = entry.query(larger);
@@ -579,11 +621,14 @@ class ExactCubeDifferentialIntegrationTest {
     }
 
     private void check(String sql, long version, boolean ordered, QueryResult actual, String route) {
-        var expected = oracle.execute(pinned(sql, version));
+        var expected = oracle.execute(latestSql(sql));
         String message = "seed=" + SEED + " version=" + version + " SQL=" + sql;
         try {
             assertThat(actual.exactCubeTrace() == null ? null : actual.exactCubeTrace().route())
                     .as("%s trace=%s", message, actual.exactCubeTrace()).isEqualTo(route);
+            if ("exact-cube".equals(route) || "latest-build".equals(route)) {
+                assertThat(actual.exactCubeTrace().version()).as(message).isEqualTo(version);
+            }
             assertThat(actual.frame().columnNames()).as(message).isEqualTo(expected.columnNames());
             assertThat(actual.frame().columnTypes()).as(message).isEqualTo(expected.columnTypes());
             assertThat(actual.frame().rowCount()).as(message).isEqualTo(expected.rowCount());
@@ -613,7 +658,7 @@ class ExactCubeDifferentialIntegrationTest {
             reproduction.put("seed", SEED);
             reproduction.put("sql", sql);
             reproduction.put("fixtureSql", fixtureSql);
-            reproduction.put("pinnedVersion", version);
+            reproduction.put("expectedLatestVersion", version);
             reproduction.put("trace", result == null ? null : result.exactCubeTrace());
             reproduction.put("sparkSubmissions", List.copyOf(tracked.calls));
             reproduction.put("firstDifference", mismatch.getMessage());
@@ -630,8 +675,8 @@ class ExactCubeDifferentialIntegrationTest {
         return counts;
     }
 
-    private String pinned(String sql, long version) {
-        return sql.replaceAll("\\b" + SOURCE + "\\b", "delta.`" + path + "` VERSION AS OF " + version);
+    private String latestSql(String sql) {
+        return sql.replaceAll("\\b" + SOURCE + "\\b", "delta.`" + path + "`");
     }
 
     private static String aggregate(String operation, String grain, long low, long high, String filter) {
@@ -639,31 +684,26 @@ class ExactCubeDifferentialIntegrationTest {
                 + " WHERE ts >= " + low * DAY + " AND ts < " + high * DAY + filter + " GROUP BY " + grain;
     }
 
-    private static final class TrackingExecutor implements PinnedQueryExecutorPort {
+    private static final class TrackingExecutor implements LatestQueryExecutorPort {
         final List<String> calls = new CopyOnWriteArrayList<>();
-        final AtomicReference<Runnable> beforePinned = new AtomicReference<>();
+        final AtomicReference<Runnable> beforeExecute = new AtomicReference<>();
+        final AtomicReference<Runnable> beforeSourceObservation = new AtomicReference<>();
         private final SparkDeltaQueryExecutor spark;
 
         TrackingExecutor(SparkDeltaQueryExecutor spark) {
             this.spark = spark;
         }
 
-        @Override public Optional<ExactCubeSource> bind(String path, String scope) {
-            return spark.bind(path, scope);
-        }
-
-        @Override public ResultFrame executePinned(ExactCubeSource source, String sql) {
-            trackPinned(sql);
-            return spark.executePinned(source, sql);
-        }
-
-        private void trackPinned(String sql) {
-            Runnable hook = beforePinned.getAndSet(null);
+        @Override public Optional<ExactCubeSource> currentSource(String path, String scope) {
+            Runnable hook = beforeSourceObservation.getAndSet(null);
             if (hook != null) hook.run();
-            calls.add(sql);
+            return spark.currentSource(path, scope);
         }
 
         @Override public ResultFrame execute(String sql) {
+            Runnable hook = beforeExecute.getAndSet(null);
+            if (hook != null) hook.run();
+            assertThat(sql).doesNotContain("VERSION AS OF");
             calls.add(sql);
             return spark.execute(sql);
         }

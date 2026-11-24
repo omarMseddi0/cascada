@@ -11,8 +11,6 @@ import java.util.Optional;
 public interface ExactCubeSqlPort {
     Optional<ExactCubeQuery> recognize(String physicalSql);
 
-    String pinnedStatement(ExactCubeQuery query, ExactCubeSource source);
-
     String stateStatement(ExactCubeQuery query, ExactCubeSource source, CubeInterval range, Set<CubeMeasure> measures);
 
     String outerStatement(ExactCubeQuery query, ExactCubeSource source, ResultFrame aggregate);

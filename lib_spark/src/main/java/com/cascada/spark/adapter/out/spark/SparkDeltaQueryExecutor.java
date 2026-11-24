@@ -3,7 +3,7 @@ package com.cascada.spark.adapter.out.spark;
 import com.cascada.spark.adapter.out.model.spark.SessionLease;
 import com.cascada.cache.application.execution.QueryCancellation;
 import com.cascada.cache.application.execution.QueryExecutionScope;
-import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
+import com.cascada.cache.application.port.out.LatestQueryExecutorPort;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import com.cascada.cache.domain.frame.ResultFrame;
 import com.cascada.spark.domain.SparkSessionConfig;
@@ -20,7 +20,6 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.delta.DeltaLog;
-import org.apache.spark.sql.delta.Snapshot;
 import org.apache.spark.sql.execution.QueryExecution;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.execution.SQLExecution;
@@ -29,7 +28,7 @@ import scala.Option;
 /** Runs physical SQL on the shared Spark/Delta session and exposes the cache's primitive frame contract.
  * Spark 4.1.1 and its native runtime are supplied by the Java 21 driver/executor image.
  */
-public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, AutoCloseable {
+public final class SparkDeltaQueryExecutor implements LatestQueryExecutorPort, AutoCloseable {
 
     private static final Logger LOGGER = Logger.getLogger(SparkDeltaQueryExecutor.class.getName());
 
@@ -68,15 +67,15 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
     }
 
     @Override
-    public Optional<ExactCubeSource> bind(String registeredPath, String accessScope) {
+    public Optional<ExactCubeSource> currentSource(String registeredPath, String accessScope) {
         QueryCancellation.requireCurrentActive();
         var log = DeltaLog.forTable(sparkSession, registeredPath);
-        Snapshot snapshot = log.update(false, Option.empty(), Option.empty());
-        if (snapshot.version() < 0) return Optional.empty();
-        log.protocolRead(snapshot.protocol());
+        var current = log.update(false, Option.empty(), Option.empty());
+        if (current.version() < 0) return Optional.empty();
+        log.protocolRead(current.protocol());
         Map<String, String> types = new HashMap<>();
         var foldedNames = new HashSet<String>();
-        for (var field : snapshot.schema().fields()) {
+        for (var field : current.schema().fields()) {
             if (!foldedNames.add(field.name().toLowerCase(Locale.ROOT))) return Optional.empty();
             String type = field.dataType().catalogString();
             if (type.equals("string") && !field.dataType().equals(DataTypes.StringType)) {
@@ -84,12 +83,8 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
             }
             types.put(field.name(), type);
         }
-        return Optional.of(new ExactCubeSource(registeredPath, snapshot.metadata().id(), snapshot.version(),
-                snapshot.schema().json(), semantics(), accessScope, types));
-    }
-
-    private Snapshot snapshot(String path) {
-        return DeltaLog.forTable(sparkSession, path).update(false, Option.empty(), Option.empty());
+        return Optional.of(new ExactCubeSource(registeredPath, current.metadata().id(), current.version(),
+                current.schema().json(), semantics(), accessScope, types));
     }
 
     private String semantics() {
@@ -98,23 +93,6 @@ public final class SparkDeltaQueryExecutor implements PinnedQueryExecutorPort, A
                 conf.get("spark.sql.caseSensitive"), conf.get("spark.sql.session.timeZone"),
                 conf.get("spark.sql.parser.escapedStringLiterals"),
                 conf.get("spark.sql.groupByAliases"), conf.get("spark.sql.orderByOrdinal"));
-    }
-
-    @Override
-    public ResultFrame executePinned(ExactCubeSource binding, String physicalSql) {
-        ensureSameTable(binding);
-        ResultFrame answer = execute(physicalSql);
-        ensureSameTable(binding);
-        return answer;
-    }
-
-    private void ensureSameTable(ExactCubeSource binding) {
-        QueryCancellation.requireCurrentActive();
-        Snapshot current = snapshot(binding.path());
-        if (current.version() < binding.version() || !current.metadata().id().equals(binding.tableId())
-                || !semantics().equals(binding.semantics())) {
-            throw new IllegalStateException("Delta table or Spark semantics changed after admission");
-        }
     }
 
     @Override

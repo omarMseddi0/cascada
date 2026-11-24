@@ -6,13 +6,14 @@ import com.cascada.cache.application.model.query.ExactCubeTrace;
 import com.cascada.cache.application.model.query.QueryResult;
 import com.cascada.cache.application.port.out.ExactCubeSqlPort;
 import com.cascada.cache.application.port.out.ExactCubeStorePort;
-import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
+import com.cascada.cache.application.port.out.LatestQueryExecutorPort;
 import com.cascada.cache.domain.model.cube.ExactCubeFragment;
 import com.cascada.cache.domain.model.cube.CubePopulation;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
+import com.cascada.cache.exception.CubeSourceChangedException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -24,19 +25,19 @@ import java.util.Set;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 
-/** Coordinates the opt-in, snapshot-bound route at logical SQL admission. */
+/** Coordinates the opt-in exact cube route over the current Delta state. */
 public final class ExactCubeExecution {
     private static final Logger LOGGER = Logger.getLogger(ExactCubeExecution.class.getName());
     private static final Set<String> INTEGRALS = Set.of("tinyint", "smallint", "int");
     private final ExactCubeSqlPort sql;
     private final ExactCubeStorePort store;
-    private final PinnedQueryExecutorPort executor;
+    private final LatestQueryExecutorPort executor;
     private final String accessScope;
     private final Clock clock;
     private final long bucketSeconds;
     private final Duration ttl;
 
-    public ExactCubeExecution(ExactCubeSqlPort sql, ExactCubeStorePort store, PinnedQueryExecutorPort executor,
+    public ExactCubeExecution(ExactCubeSqlPort sql, ExactCubeStorePort store, LatestQueryExecutorPort executor,
                               String accessScope, Clock clock, long bucketSeconds, Duration ttl) {
         this.sql = sql;
         this.store = store;
@@ -51,20 +52,20 @@ public final class ExactCubeExecution {
         var recognized = sql.recognize(physicalSql);
         if (recognized.isEmpty()) return existing("unproven-sql-shape", fallback);
         ExactCubeQuery query = recognized.get();
-        Optional<ExactCubeSource> binding;
+        Optional<ExactCubeSource> observed;
         try {
-            binding = executor.bind(query.path(), accessScope);
+            observed = executor.currentSource(query.path(), accessScope);
         } catch (Exception unavailable) {
             QueryCancellation.rethrowIfCancelled(unavailable);
-            LOGGER.fine(() -> "Exact cube declined during snapshot admission: " + unavailable.getClass().getSimpleName());
-            return existing("snapshot-admission-unavailable", fallback);
+            LOGGER.fine(() -> "Exact cube declined during source metadata lookup: " + unavailable.getClass().getSimpleName());
+            return existing("source-metadata-unavailable", fallback);
         }
-        if (binding.isEmpty()) return existing("unbound-source", fallback);
-        var source = binding.get();
+        if (observed.isEmpty()) return existing("source-metadata-unavailable", fallback);
+        var source = observed.get();
         var population = new CubePopulation(source, query.timeColumn(), query.predicate(), query.input());
         String rejection = rejection(query, source);
-        if (rejection != null) return direct(query, source, rejection, List.of(), List.of(), 0);
-        return executeBound(query, population);
+        if (rejection != null) return direct(physicalSql, rejection, List.of(), List.of(), 0);
+        return executeObserved(physicalSql, query, population);
     }
 
     private static QueryResult existing(String reason, Supplier<QueryResult> fallback) {
@@ -90,8 +91,7 @@ public final class ExactCubeExecution {
         return null;
     }
 
-    private QueryResult executeBound(ExactCubeQuery query, CubePopulation population) {
-        var source = population.source();
+    private QueryResult executeObserved(String physicalSql, ExactCubeQuery query, CubePopulation population) {
         var reads = new ArrayList<ExactCubeFragment>();
         var submitted = new ArrayList<String>();
         long planningStarted = System.nanoTime();
@@ -114,9 +114,9 @@ public final class ExactCubeExecution {
         } catch (Exception failure) {
             QueryCancellation.rethrowIfCancelled(failure);
             failureReason = "recovery:" + failure.getClass().getSimpleName();
-            LOGGER.fine(() -> "Exact cube restarted at Delta version " + source.version() + ": " + failure.getMessage());
+            LOGGER.fine(() -> "Exact cube restarted against latest Delta data: " + failure.getMessage());
         }
-        return direct(query, source, failureReason, reads, submitted, planningNanos);
+        return direct(physicalSql, failureReason, reads, submitted, planningNanos);
     }
 
     private QueryResult compose(ExactCubeQuery query, CubePopulation population, ExactCubePlan plan,
@@ -149,51 +149,59 @@ public final class ExactCubeExecution {
         for (var entry : residuals.entrySet()) {
             String residual = sql.stateStatement(query, source, entry.getKey(), entry.getValue());
             submitted.add(residual);
-            state.add(executor.executePinned(source, residual), query.grain(), entry.getValue(), entry.getValue());
+            state.add(executor.execute(residual), query.grain(), entry.getValue(), entry.getValue());
         }
+        requireCurrentSource(source);
         var result = state.finish();
         String outer = null;
         if (query.outerSql() != null) {
             outer = sql.outerStatement(query, source, result);
-            result = executor.executePinned(source, outer);
+            result = executor.execute(outer);
+            requireCurrentSource(source);
         }
-        QueryCancellation.requireCurrentActive();
-        return new QueryResult(result, true, trace("exact-cube", "verified", source, reads, submitted, outer, planningNanos));
+        return new QueryResult(result, true, trace("exact-cube", "verified", source.version(), reads, submitted, outer, planningNanos));
     }
 
     private QueryResult build(ExactCubeQuery query, CubePopulation population, long planningNanos) {
         String fence = store.publicationFence();
         var source = population.source();
         String statement = sql.stateStatement(query, source, query.interval(), query.measures());
-        var frame = executor.executePinned(source, statement);
+        var frame = executor.execute(statement);
         var state = new ExactCubeState(query, source);
         state.add(frame, query.grain(), query.measures(), query.measures());
         var answer = state.finish();
+        requireCurrentSource(source);
         try {
             store.publish(population, query.interval(), query.grain(), query.measures(), frame, ttl, fence);
         } catch (Exception unavailable) {
             QueryCancellation.rethrowIfCancelled(unavailable);
             LOGGER.fine(() -> "Exact cube publication skipped: " + unavailable.getClass().getSimpleName());
         }
-        return new QueryResult(answer, false, trace("pinned-build", "no-manifest", source, List.of(),
+        return new QueryResult(answer, false, trace("latest-build", "no-manifest", source.version(), List.of(),
                 List.of(), null, planningNanos));
     }
 
-    private QueryResult direct(ExactCubeQuery query, ExactCubeSource source, String reason,
-                               List<ExactCubeFragment> reads, List<String> submitted, long planningNanos) {
-        String statement = sql.pinnedStatement(query, source);
-        var result = executor.executePinned(source, statement);
-        return new QueryResult(result, false, trace("pinned-spark", reason, source, reads, submitted, null, planningNanos));
+    private void requireCurrentSource(ExactCubeSource observed) {
+        QueryCancellation.requireCurrentActive();
+        if (executor.currentSource(observed.path(), observed.accessScope()).filter(observed::equals).isEmpty()) {
+            throw new CubeSourceChangedException();
+        }
     }
 
-    private static ExactCubeTrace trace(String route, String reason, ExactCubeSource source,
+    private QueryResult direct(String physicalSql, String reason, List<ExactCubeFragment> reads,
+                               List<String> submitted, long planningNanos) {
+        var result = executor.execute(physicalSql);
+        return new QueryResult(result, false, trace("latest-spark", reason, -1, reads, submitted, null, planningNanos));
+    }
+
+    private static ExactCubeTrace trace(String route, String reason, long observedVersion,
                                          List<ExactCubeFragment> reads, List<String> submitted,
                                          String outer, long planningNanos) {
-        LOGGER.fine(() -> "Exact cube route=" + route + " reason=" + reason + " version=" + source.version()
+        LOGGER.fine(() -> "Exact cube route=" + route + " reason=" + reason + " version=" + observedVersion
                 + " generations=" + reads.stream().map(ExactCubeFragment::generation).toList()
                 + " compressed_bytes=" + reads.stream().mapToLong(ExactCubeFragment::compressedBytes).sum()
                 + " decoded_bytes=" + reads.stream().mapToLong(ExactCubeFragment::decodedBytes).sum()
                 + " residuals=" + submitted.size() + " planning_ns=" + planningNanos);
-        return new ExactCubeTrace(route, reason, source.version(), reads, submitted, outer, planningNanos);
+        return new ExactCubeTrace(route, reason, observedVersion, reads, submitted, outer, planningNanos);
     }
 }

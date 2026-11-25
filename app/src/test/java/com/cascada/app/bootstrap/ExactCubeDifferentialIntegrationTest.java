@@ -308,7 +308,7 @@ class ExactCubeDifferentialIntegrationTest {
             assertThat(tracked.calls).isEmpty();
 
             var result = entry.query(consumer);
-            assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore + 2);
+            assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore + 1);
             check(consumer, 0, true, result, "exact-cube");
             assertThat(result.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
                     .containsExactlyInAnyOrderElementsOf(keys);
@@ -339,7 +339,7 @@ class ExactCubeDifferentialIntegrationTest {
             assertThat(result.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
                     .containsExactlyInAnyOrder(directBucket, otherShape);
             assertThat(result.exactCubeTrace().residualSql()).isEmpty();
-            assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore + 2);
+            assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore + 1);
             assertThat(tracked.calls).isEmpty();
         }
     }
@@ -749,27 +749,35 @@ class ExactCubeDifferentialIntegrationTest {
         }
     }
 
-    @Test void discardsCompositionWhenTheSourceChangesBeforeTheOrdinaryResidualRead() {
+    @Test void keepsSelectedBucketsAndRunsOnlyTheOrdinaryResidualWhenDeltaAdvances() {
         String original = path;
         path = scratch.resolve("bucket-race").toUri().toString();
         spark.sql(fixtureSql).write().format("delta").save(path);
         String query = aggregate("AVG", "region", 0, HIGH, "") + " ORDER BY region NULLS FIRST";
         try (var factory = factory(SCOPE, true)) {
             warm(factory, aggregate("AVG", "region, device", 0, 6, ""), 0, 6);
-            var before = oracle.execute(physical(query));
+            long checksBefore = tracked.sourceChecks.sum();
             tracked.beforeExecute.set(() -> spark.newSession().sql("INSERT INTO delta.`" + path
-                    + "` VALUES (518400L, 'external-row', 'writer', 700)").collectAsList());
+                    + "` VALUES (518400L, 'added-in-gap', 'writer', 700),"
+                    + " (0L, 'added-in-cached-range', 'writer', 900)").collectAsList());
             tracked.calls.clear();
+
             var result = factory.executeLogicalQueryUseCase().query(query);
-            check(query, 1, true, result, "latest-spark");
             var trace = result.exactCubeTrace();
-            assertThat(trace.reason()).isEqualTo("recovery:CubeSourceChangedException");
+            assertThat(trace.route()).isEqualTo("exact-cube");
+            assertThat(trace.version()).isZero();
             assertThat(trace.fragments()).hasSize(6);
             assertThat(trace.residualSql()).singleElement().asString()
                     .contains("SUM(`amount`)", "COUNT(`amount`)", "`ts` >= 518400");
-            assertThat(tracked.calls).containsExactly(trace.residualSql().getFirst(), translated(query));
-            assertThat(result.frame().rows()).isNotEqualTo(before.rows()).anySatisfy(row ->
-                    assertThat(row).containsEntry("region", "external-row"));
+            assertThat(tracked.calls).containsExactlyElementsOf(trace.residualSql());
+            assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore + 1);
+
+            // Compare with a Spark oracle for the chosen bucket state and the latest gap rows.
+            String composedPopulation = "SELECT region, AVG(amount) AS value FROM " + SOURCE
+                    + " WHERE ts >= 0 AND ts < 777600 AND NOT (region <=> 'added-in-cached-range')"
+                    + " GROUP BY region ORDER BY region NULLS FIRST";
+            assertSameFrame(oracle.execute(physical(composedPopulation)), result.frame(), true, query);
+            assertThat(result.frame().rows()).anySatisfy(row -> assertThat(row).containsEntry("region", "added-in-gap"));
             check(query, 1, true, factory.executeLogicalQueryUseCase().query(query), "existing");
         } finally {
             path = original;

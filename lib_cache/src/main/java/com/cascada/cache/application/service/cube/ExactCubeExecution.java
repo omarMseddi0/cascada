@@ -217,7 +217,7 @@ public final class ExactCubeExecution {
             }).toList();
             result = executor.executeWithAggregate(outer, query.outerRelation(), result, types);
         }
-        requireCurrentSource(source);
+        QueryCancellation.requireCurrentActive();
         return new QueryResult(result, true, trace("exact-cube", "verified", source, reads, submitted, outer, planningNanos));
     }
 
@@ -240,7 +240,7 @@ public final class ExactCubeExecution {
 
     public ResultFrame executeWarmBucket(String bucketSql, BucketCubeBinding binding) {
         var result = executor.execute(bucketSql);
-        requireCurrentSource(binding.population().source());
+        requireUnchangedWarmSource(binding.population().source());
         return result;
     }
 
@@ -250,7 +250,7 @@ public final class ExactCubeExecution {
                 new CubeInterval(start, Math.incrementExact(end)), binding.grain(), binding.averageAlias());
     }
 
-    private void requireCurrentSource(ExactCubeSource observed) {
+    private void requireUnchangedWarmSource(ExactCubeSource observed) {
         QueryCancellation.requireCurrentActive();
         if (executor.currentSource(observed.path(), observed.accessScope()).filter(observed::equals).isEmpty()) {
             throw new CubeSourceChangedException();

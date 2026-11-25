@@ -17,19 +17,16 @@ import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.SqlSelectKeyword;
 import org.apache.calcite.sql.SqlWith;
 import org.apache.calcite.sql.SqlWithItem;
-import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.util.SqlShuttle;
 
 /** Finds independent aggregate relations while leaving resolution of the surrounding SQL to Spark. */
 final class ExactCubeRelations {
     private final SqlNode root;
-    private final String sourceToken;
     private final Map<SqlSelect, Map<String, SqlWithItem>> scopes = new IdentityHashMap<>();
     private final Map<SqlWithItem, Map<String, SqlWithItem>> definitionScopes = new IdentityHashMap<>();
 
-    ExactCubeRelations(SqlNode root, String sourceToken) {
+    ExactCubeRelations(SqlNode root) {
         this.root = root;
-        this.sourceToken = sourceToken;
     }
 
     List<SqlSelect> aggregates() {
@@ -122,7 +119,7 @@ final class ExactCubeRelations {
     }
 
     String statement(String path, SqlSelect replacement, String relation) {
-        SqlNode substitute = replacement == null ? null : CalciteSql.parseQuery("SELECT * FROM " + relation);
+        SqlNode substitute = CalciteSql.parseQuery("SELECT * FROM " + relation);
         var rewriter = new SqlShuttle() {
             private final Set<String> ctes = new java.util.HashSet<>();
 
@@ -160,12 +157,12 @@ final class ExactCubeRelations {
                 }
                 if (node instanceof SqlIdentifier table) {
                     if (table.isSimple()) {
-                        require(ctes.contains(table.getSimple()) || table.getSimple().equals(sourceToken));
+                        require(ctes.contains(table.getSimple()));
                         return table;
                     }
                     require(table.names.size() == 2 && table.names.getFirst().equalsIgnoreCase("delta")
                             && table.names.getLast().equals(path));
-                    return new SqlIdentifier(sourceToken, SqlParserPos.ZERO);
+                    return table;
                 }
                 if (node instanceof SqlJoin join) {
                     var copy = (SqlJoin) join.clone(join.getParserPosition());

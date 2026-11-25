@@ -70,7 +70,6 @@ public final class NativeDeltaValidation {
             oracle.sql("SELECT CAST(20000 AS BIGINT) id,CAST(-1 AS BIGINT) ts,'G0' g,CAST(1.25 AS DECIMAL(18,2)) amount,CAST(1 AS BIGINT) units")
                     .write().format("delta").mode("append").save(path);
             compare(nativeSession,oracle,"snapshot-current", "SELECT COUNT(*) n,SUM(amount) total,MIN(ts) lo,MAX(ts) hi FROM "+table,true);
-            compare(nativeSession,oracle,"time-travel-v0", "SELECT COUNT(*) n,SUM(amount) total FROM "+table+" VERSION AS OF 0",true);
             oracle.sql("ALTER TABLE "+table+" ADD COLUMNS (score BIGINT)").collectAsList();
             oracle.sql("UPDATE "+table+" SET score=units*2 WHERE id%5=0").collectAsList();
             compare(nativeSession,oracle,"schema-evolution", "SELECT g,COUNT(score) present,SUM(score) total FROM "+table+" GROUP BY g ORDER BY g NULLS FIRST",true);
@@ -81,7 +80,6 @@ public final class NativeDeltaValidation {
             oracle.range(100).selectExpr("id","CAST(id AS BIGINT) ts", "CAST(id AS DECIMAL(18,2)) amount")
                     .write().format("delta").option("overwriteSchema","true").mode("overwrite").save(path);
             compare(nativeSession,oracle,"overwrite-snapshot", "SELECT COUNT(*) n,SUM(amount) total,MIN(ts) lo,MAX(ts) hi FROM "+table,true);
-            compare(nativeSession,oracle,"time-travel-after-overwrite", "SELECT g,COUNT(*) n,SUM(amount) total FROM "+table+" VERSION AS OF 0 GROUP BY g ORDER BY g NULLS FIRST",true);
             String mapped="delta.`/benchmark-data/native-delta-mapped`";
             oracle.sql("CREATE TABLE "+mapped+" (`odd column` BIGINT, amount DECIMAL(18,2)) USING DELTA TBLPROPERTIES ('delta.columnMapping.mode'='name')").collectAsList();
             oracle.sql("INSERT INTO "+mapped+" VALUES (1,2.50),(2,3.75)").collectAsList();

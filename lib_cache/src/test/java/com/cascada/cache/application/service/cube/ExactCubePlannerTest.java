@@ -203,7 +203,7 @@ final class ExactCubePlannerTest {
 
     private static ExactCubeQuery query(Set<CubeMeasure> measures, List<String> grain, CubeInterval interval) {
         return new ExactCubeQuery("path", "ts", interval, "", Map.of(), List.of(), grain, Set.of(), "amount", measures, List.of(), List.of(),
-                null, null, null, "", "");
+                null, null, null);
     }
 
     private static ExactCubeFragment fragment(String id, long start, long end, List<String> grain,

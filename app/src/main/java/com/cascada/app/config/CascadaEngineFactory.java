@@ -20,7 +20,7 @@ import com.cascada.cache.application.port.out.CoverageIndexPort;
 import com.cascada.cache.application.port.out.GapQueryRewriterPort;
 import com.cascada.cache.application.port.out.LogicalSqlTranslatorPort;
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
+import com.cascada.cache.application.port.out.LatestQueryExecutorPort;
 import com.cascada.cache.application.service.cube.ExactCubeExecution;
 import com.cascada.sql.adapter.out.calcite.ExactCubeSqlAdapter;
 import com.cascada.cache.application.port.out.SqlCanonicalizerPort;
@@ -124,10 +124,10 @@ public final class CascadaEngineFactory implements AutoCloseable {
         GapQueryRewriterPort gapQueryRewriter = createGapQueryRewriter();
         // The current registered-source deployment grants the same table visibility to every SQL caller.
         // Deployments with different effective policies must configure separate scope identities.
-        ExactCubeExecution exactCube = exactCubeEnabled && queryExecutor instanceof PinnedQueryExecutorPort pinned
+        ExactCubeExecution exactCube = exactCubeEnabled && queryExecutor instanceof LatestQueryExecutorPort latest
                 && accessScope != null && !accessScope.isBlank()
                 ? new ExactCubeExecution(new ExactCubeSqlAdapter(batchPaths(),
-                        settings.cacheExecution().timeColumnName()), cacheBackend.exactCubeStore(), pinned,
+                        settings.cacheExecution().timeColumnName()), cacheBackend.exactCubeStore(), latest,
                         accessScope, Clock.systemUTC(), settings.cacheExecution().bucketSeconds(),
                         settings.cacheExecution().mergeWorkerCount(), mergeTasks)
                 : null;

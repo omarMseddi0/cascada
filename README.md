@@ -29,9 +29,9 @@ The reactor targets Java 21, Spark 4.1.1, Scala 2.13, and Delta Lake 4.1.0. The 
 
 ## Exact cube composition
 
-Set `CASCADA_EXACT_CUBE_ENABLED=true` to opt in. The exact route uses Valkey manifests scoped to a registered Delta table, its pinned version, SQL semantics, and the configured `CASCADA_EXACT_CUBE_ACCESS_SCOPE`. The default scope assumes all query callers have the same table visibility.
+Set `CASCADA_EXACT_CUBE_ENABLED=true` to opt in. The exact route uses Valkey manifests scoped to a registered Delta table, the observed current source metadata, SQL semantics, and the configured `CASCADA_EXACT_CUBE_ACCESS_SCOPE`. The default scope assumes all query callers have the same table visibility.
 
-Queries with complete coverage under their own query hash use the ordinary bucket merge before Delta binding or cross-shape planning. The normal warmer stores each bucket payload once. Eligible integral AVG buckets also get index metadata pointing to that bucket key and its verified Delta snapshot. The ordinary AVG route and cross-shape composition read the same stored SUM and COUNT ingredients. Composition uses the normal Valkey bucket reader and the shared partitioned frame accumulator. It can also supply a typed relation inside a CTE, join, or subquery. Filter narrowing requires the relevant key to survive in the stored grain. Existing bucket values are compressed whole frames, so row filtering is applied after decoding the selected buckets.
+Queries with complete coverage under their own query hash use the ordinary bucket merge before Delta metadata lookup or cross-shape planning. The normal warmer stores each bucket payload once. Eligible integral AVG buckets also get index metadata pointing to that bucket key and the observed source metadata. Spark always reads the current Delta data. Exact composition verifies that the source stayed unchanged while combining buckets with Spark results. The ordinary AVG route and cross-shape composition read the same stored SUM and COUNT ingredients. Composition uses the normal Valkey bucket reader and the shared partitioned frame accumulator. It can also supply a typed relation inside a CTE, join, or subquery. Filter narrowing requires the relevant key to survive in the stored grain. Existing bucket values are compressed whole frames, so row filtering is applied after decoding the selected buckets.
 
 For the qualification suite, use JDK 21 and an isolated disposable Valkey database:
 
@@ -40,7 +40,7 @@ export CASCADA_TEST_VALKEY_URI=redis://127.0.0.1:6379/15
 mvn -Plocal-spark -Dcascada.spark.integration=true -Dcascada.cache.spark.integration=true test
 ```
 
-The exact-cube tests emit route, residual, source-version, and HTTP last-byte measurements. The four- and six-shape benchmark warms ordinary buckets and checks their key identities and the result against pinned Spark.
+The exact-cube tests emit route, residual, source-version, and HTTP last-byte measurements. The four- and six-shape benchmark warms ordinary buckets and checks their key identities and the result against ordinary Spark reads.
 
 ## Configuration and API
 

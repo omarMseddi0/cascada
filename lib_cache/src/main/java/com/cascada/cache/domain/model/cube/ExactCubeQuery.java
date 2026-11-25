@@ -9,7 +9,7 @@ public record ExactCubeQuery(String path, String timeColumn, CubeInterval interv
                              Map<String, String> predicateTypes, List<CubeKeyFilter> keyFilters,
                              List<String> grain, Set<String> groupAliases, String input, Set<CubeMeasure> measures,
                              List<CubeProjection> projections, List<CubeSort> order, Integer limit,
-                             String outerSql, String outerRelation, String pinnedSqlTemplate, String sourceToken) {
+                             String outerSql, String outerRelation) {
     public ExactCubeQuery {
         predicateTypes = Map.copyOf(predicateTypes);
         keyFilters = List.copyOf(keyFilters);

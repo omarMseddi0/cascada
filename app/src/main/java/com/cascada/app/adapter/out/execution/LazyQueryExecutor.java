@@ -1,7 +1,7 @@
 package com.cascada.app.adapter.out.execution;
 
 import com.cascada.cache.application.port.out.QueryExecutorPort;
-import com.cascada.cache.application.port.out.PinnedQueryExecutorPort;
+import com.cascada.cache.application.port.out.LatestQueryExecutorPort;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import java.util.List;
 import java.util.Optional;
@@ -11,7 +11,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
 
 /** Starts the execution tier only when a query or warming operation needs it. */
-public final class LazyQueryExecutor implements PinnedQueryExecutorPort, AutoCloseable {
+public final class LazyQueryExecutor implements LatestQueryExecutorPort, AutoCloseable {
     private final Supplier<? extends QueryExecutorPort> factory;
     private QueryExecutorPort delegate;
     private final java.util.concurrent.locks.ReentrantLock initialization = new java.util.concurrent.locks.ReentrantLock();
@@ -33,36 +33,23 @@ public final class LazyQueryExecutor implements PinnedQueryExecutorPort, AutoClo
     }
 
     @Override
-    public Optional<ExactCubeSource> bind(String path, String accessScope) {
+    public Optional<ExactCubeSource> currentSource(String path, String accessScope) {
         lifecycle.readLock().lock();
         try {
-            return initializedExecutor() instanceof PinnedQueryExecutorPort pinned
-                    ? pinned.bind(path, accessScope) : Optional.empty();
+            return initializedExecutor() instanceof LatestQueryExecutorPort latest
+                    ? latest.currentSource(path, accessScope) : Optional.empty();
         } finally {
             lifecycle.readLock().unlock();
         }
     }
 
     @Override
-    public ResultFrame executePinned(ExactCubeSource binding, String physicalSql) {
-        lifecycle.readLock().lock();
-        try {
-            if (initializedExecutor() instanceof PinnedQueryExecutorPort pinned) {
-                return pinned.executePinned(binding, physicalSql);
-            }
-            throw new IllegalStateException("executor does not support pinned Delta reads");
-        } finally {
-            lifecycle.readLock().unlock();
-        }
-    }
-
-    @Override
-    public ResultFrame executeWithAggregate(ExactCubeSource source, String sql, String relation,
+    public ResultFrame executeWithAggregate(String sql, String relation,
                                             ResultFrame frame, List<String> types) {
         lifecycle.readLock().lock();
         try {
-            if (initializedExecutor() instanceof PinnedQueryExecutorPort pinned) {
-                return pinned.executeWithAggregate(source, sql, relation, frame, types);
+            if (initializedExecutor() instanceof LatestQueryExecutorPort latest) {
+                return latest.executeWithAggregate(sql, relation, frame, types);
             }
             throw new IllegalStateException("executor does not support typed aggregate relations");
         } finally {

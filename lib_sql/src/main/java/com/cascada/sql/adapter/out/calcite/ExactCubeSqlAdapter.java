@@ -2,7 +2,6 @@ package com.cascada.sql.adapter.out.calcite;
 
 import com.cascada.cache.application.port.out.ExactCubeSqlPort;
 import com.cascada.cache.domain.model.cube.ExactCubeQuery;
-import com.cascada.cache.domain.model.cube.ExactCubeSource;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeKeyFilter;
 import com.cascada.cache.domain.model.cube.CubeKeyFilterOperator;
@@ -58,57 +57,39 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
     }
 
     @Override
-    public String pinnedStatement(ExactCubeQuery query, ExactCubeSource source) {
-        return ExactCubeSql.direct(query, source);
-    }
-
-    @Override
-    public String stateStatement(ExactCubeQuery query, ExactCubeSource source, CubeInterval range, Set<CubeMeasure> measures) {
-        return ExactCubeSql.state(query, source, range, measures);
-    }
-
-    @Override
-    public String pinnedBucketStatement(String sql, ExactCubeSource source) {
-        String token = SqlTrees.unusedSentinel(sql, "CASCADA_BUCKET_PIN");
-        return new ExactCubeRelations(CalciteSql.parseQuery(sql), token).statement(source.path(), null, null)
-                .replace(token, ExactCubeSql.relation(source));
-    }
-
-    @Override
-    public String outerStatement(ExactCubeQuery query, ExactCubeSource source) {
-        return ExactCubeSql.outer(query, source);
+    public String stateStatement(ExactCubeQuery query, CubeInterval range, Set<CubeMeasure> measures) {
+        return ExactCubeSql.state(query, range, measures);
     }
 
     private ExactCubeQuery extract(String physicalSql) {
         SqlNode root = CalciteSql.parseQuery(physicalSql);
         SqlNode body = root instanceof SqlOrderBy order ? order.query : root;
-        String sourceToken = SqlTrees.unusedSentinel(physicalSql, "CASCADA_PINNED_SOURCE");
         String outerToken = SqlTrees.unusedSentinel(physicalSql, "CASCADA_COMPLETE_AGGREGATE");
 
-        var relations = new ExactCubeRelations(root, sourceToken);
+        var relations = new ExactCubeRelations(root);
         // Try the top-level aggregate first so ordinary hits need no graph traversal.
         if (body instanceof SqlSelect select) {
-            var direct = candidate(root, relations, select, true, sourceToken, outerToken);
+            var direct = candidate(root, relations, select, true, outerToken);
             if (direct != null) return direct;
         }
         for (SqlSelect select : relations.aggregates()) {
-            var nested = candidate(root, relations, select, select == body, sourceToken, outerToken);
+            var nested = candidate(root, relations, select, select == body, outerToken);
             if (nested != null) return nested;
         }
         throw new IllegalArgumentException("no independent aggregate relation");
     }
 
     private ExactCubeQuery candidate(SqlNode root, ExactCubeRelations relations, SqlSelect inner, boolean direct,
-                                     String sourceToken, String outerToken) {
+                                     String outerToken) {
         try {
-            return aggregate(root, relations, inner, direct, sourceToken, outerToken);
+            return aggregate(root, relations, inner, direct, outerToken);
         } catch (IllegalArgumentException | ArithmeticException | UnsupportedSqlException ineligible) {
             return null;
         }
     }
 
     private ExactCubeQuery aggregate(SqlNode root, ExactCubeRelations relations, SqlSelect inner, boolean direct,
-                                     String sourceToken, String outerToken) {
+                                     String outerToken) {
         require(coreSelect(inner) && !inner.isDistinct() && inner.getHaving() == null);
         SqlNode from = inner.getFrom();
         SqlNode unaliased = SqlTrees.stripAlias(from);
@@ -221,12 +202,11 @@ public final class ExactCubeSqlAdapter implements ExactCubeSqlPort {
         require(limit == null || limit >= 0 && !order.isEmpty());
         require(direct || (order.isEmpty() && limit == null));
 
-        String pinned = relations.statement(path, null, null);
         String outerSql = direct ? null : relations.statement(path, inner, outerToken);
         return new ExactCubeQuery(path, timeColumn, new CubeInterval(lower, upper),
                 String.join(" AND ", predicates.stream().map(p -> "(" + p + ")").toList()),
                 predicateTypes, allKeyFilters ? List.copyOf(keyFilters) : List.of(),
-                grain, groupAliases, input, measures, projections, order, limit, outerSql, outerToken, pinned, sourceToken);
+                grain, groupAliases, input, measures, projections, order, limit, outerSql, outerToken);
     }
 
     private static boolean coreSelect(SqlSelect select) {

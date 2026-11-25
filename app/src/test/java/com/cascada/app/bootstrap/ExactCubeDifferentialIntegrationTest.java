@@ -174,7 +174,7 @@ class ExactCubeDifferentialIntegrationTest {
                         tracked.calls.clear();
                         try {
                             var result = entry.query(sql);
-                            check(sql, 0, consumer.contains("LIMIT 5 OFFSET 1"), result, expectedRoute);
+                            check(sql, consumer.contains("LIMIT 5 OFFSET 1"), result, expectedRoute);
                             if (route == 0) {
                                 assertThat(result.exactCubeTrace().fragments()).isNotEmpty();
                                 assertThat(result.exactCubeTrace().residualSql()).isEmpty();
@@ -182,7 +182,7 @@ class ExactCubeDifferentialIntegrationTest {
                             }
                             passed[route]++;
                         } catch (Exception | AssertionError failure) {
-                            saveMismatch(sql, 0, null, failure);
+                            saveMismatch(sql, null, failure);
                             failures.add(new AssertionError(sql, failure));
                         }
                     }
@@ -253,7 +253,7 @@ class ExactCubeDifferentialIntegrationTest {
                         assertSameFrame(sparkResult, actual.frame(), test.getValue(), layout + " " + sql);
                         if (!layout.equals("cold")) {
                             var trace = actual.exactCubeTrace();
-                            assertThat(trace.version()).isZero();
+
                             assertThat(trace.fragments()).isNotEmpty();
                             if (layout.equals("partial")) {
                                 assertThat(trace.residualSql()).singleElement().asString()
@@ -267,7 +267,7 @@ class ExactCubeDifferentialIntegrationTest {
                         }
                         verified++;
                     } catch (Exception | AssertionError failure) {
-                        saveMismatch(sql, 0, actual, new AssertionError("layout=" + layout + " " + failure, failure));
+                        saveMismatch(sql, actual, new AssertionError("layout=" + layout + " " + failure, failure));
                         failures.add(new AssertionError(layout + " " + sql, failure));
                     }
                 }
@@ -294,7 +294,7 @@ class ExactCubeDifferentialIntegrationTest {
              var connection = inspector.connect()) {
             var entry = factory.executeLogicalQueryUseCase();
             tracked.calls.clear();
-            check(producer, 0, false, entry.query(producer), "existing");
+            check(producer, false, entry.query(producer), "existing");
             var commands = connection.sync();
             assertThat(commands.keys("QC:V4:exact:v1:frame:*")).isEmpty();
             var keys = warm(factory, producer, 0, HIGH);
@@ -302,14 +302,14 @@ class ExactCubeDifferentialIntegrationTest {
             tracked.calls.clear();
             long checksBefore = tracked.sourceChecks.sum();
             var direct = entry.query(producer);
-            check(producer, 0, false, direct, "same-query-cache");
+            check(producer, false, direct, "same-query-cache");
             assertThat(direct.servedThroughCache()).isTrue();
             assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore);
             assertThat(tracked.calls).isEmpty();
 
             var result = entry.query(consumer);
             assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore + 1);
-            check(consumer, 0, true, result, "exact-cube");
+            check(consumer, true, result, "exact-cube");
             assertThat(result.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
                     .containsExactlyInAnyOrderElementsOf(keys);
             assertThat(result.exactCubeTrace().residualSql()).isEmpty();
@@ -320,7 +320,7 @@ class ExactCubeDifferentialIntegrationTest {
             var normal = factory(SCOPE, false);
             try (normal) {
                 tracked.calls.clear();
-                check(producer, 0, false, normal.executeLogicalQueryUseCase().query(producer), null);
+                check(producer, false, normal.executeLogicalQueryUseCase().query(producer), null);
                 assertThat(tracked.calls).isEmpty();
             }
         }
@@ -335,7 +335,7 @@ class ExactCubeDifferentialIntegrationTest {
             tracked.calls.clear();
             long checksBefore = tracked.sourceChecks.sum();
             var result = factory.executeLogicalQueryUseCase().query(query);
-            check(query, 0, false, result, "exact-cube");
+            check(query, false, result, "exact-cube");
             assertThat(result.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
                     .containsExactlyInAnyOrder(directBucket, otherShape);
             assertThat(result.exactCubeTrace().residualSql()).isEmpty();
@@ -371,7 +371,7 @@ class ExactCubeDifferentialIntegrationTest {
                     String sql = "SELECT region, AVG(amount) AS value" + bounds + filter + " GROUP BY region";
                     tracked.calls.clear();
                     var result = entry.query(sql);
-                    check(sql, 0, false, result, "exact-cube");
+                    check(sql, false, result, "exact-cube");
                     var trace = result.exactCubeTrace();
                     assertThat(trace.fragments()).extracting(ExactCubeFragment::bucketKey)
                             .containsExactlyInAnyOrderElementsOf(selected).doesNotContainAnyElementsOf(wrong);
@@ -391,7 +391,7 @@ class ExactCubeDifferentialIntegrationTest {
                         + "(shop = 3 OR shop IS NULL) GROUP BY region";
                 tracked.calls.clear();
                 var declined = entry.query(disjunction);
-                check(disjunction, 0, false, declined, "existing");
+                check(disjunction, false, declined, "existing");
                 assertThat(declined.exactCubeTrace().fragments()).isEmpty();
                 assertThat(tracked.calls).hasSize(1);
                 System.out.println("HEAD_TAIL_REUSE cases=7 cached=4 spark=head+gap+tail unsafeOr=declined");
@@ -427,7 +427,7 @@ class ExactCubeDifferentialIntegrationTest {
                 tracked.calls.clear();
                 long checksBefore = tracked.sourceChecks.sum();
                 var result = factory.executeLogicalQueryUseCase().query(query);
-                check(query, 0, query.contains("ORDER BY"), result, "existing");
+                check(query, query.contains("ORDER BY"), result, "existing");
                 assertThat(result.servedThroughCache()).isFalse();
                 assertThat(result.exactCubeTrace().reason()).isEqualTo("unproven-sql-shape");
                 assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore);
@@ -462,7 +462,7 @@ class ExactCubeDifferentialIntegrationTest {
 
             tracked.calls.clear();
             var answer = factory.executeLogicalQueryUseCase().query(query);
-            check(query, 0, false, answer, "exact-cube");
+            check(query, false, answer, "exact-cube");
             var trace = answer.exactCubeTrace();
             assertThat(trace.fragments()).extracting(ExactCubeFragment::bucketKey)
                     .containsExactlyInAnyOrderElementsOf(expectedKeys)
@@ -525,7 +525,7 @@ class ExactCubeDifferentialIntegrationTest {
             var entry = factory.executeLogicalQueryUseCase();
             tracked.calls.clear();
             var mixed = entry.query(query);
-            check(query, 0, true, mixed, "exact-cube");
+            check(query, true, mixed, "exact-cube");
             assertThat(mixed.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
                     .containsExactlyInAnyOrderElementsOf(expectedKeys).doesNotContainAnyElementsOf(subscriberOnlyKeys);
             assertThat(mixed.exactCubeTrace().residualSql()).singleElement().asString()
@@ -540,7 +540,7 @@ class ExactCubeDifferentialIntegrationTest {
             expectedKeys.addAll(warm(factory, aggregate("AVG", "device, subscriber_id, shop, market", 5, 15, ""), 5, 15));
             tracked.calls.clear();
             var covered = entry.query(query);
-            check(query, 0, true, covered, "exact-cube");
+            check(query, true, covered, "exact-cube");
             assertThat(covered.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
                     .containsExactlyInAnyOrderElementsOf(expectedKeys).doesNotContainAnyElementsOf(subscriberOnlyKeys);
             assertThat(covered.exactCubeTrace().residualSql()).isEmpty();
@@ -624,7 +624,7 @@ class ExactCubeDifferentialIntegrationTest {
             for (int i = 0; i < requests.size(); i++) {
                 var actual = requests.get(i).get();
                 assertThat(actual.exactCubeTrace().route()).isEqualTo("latest-spark");
-                assertThat(actual.exactCubeTrace().version()).isEqualTo(-1);
+
                 assertThat(actual.exactCubeTrace().reason()).startsWith("recovery:");
                 assertSameFrame(oracle.execute(physical(queries.get(i))), actual.frame(), i < 2, queries.get(i));
             }
@@ -680,13 +680,13 @@ class ExactCubeDifferentialIntegrationTest {
                 warm(factory, twoDayProducer, 1, 2);
                 String mixedQuery = aggregate("AVG", "region", 0, 2, "");
                 var mixed = factory.executeLogicalQueryUseCase().query(mixedQuery);
-                check(mixedQuery, 0, false, mixed, "latest-spark");
+                check(mixedQuery, false, mixed, "latest-spark");
                 assertThat(mixed.exactCubeTrace().residualSql()).hasSize(1);
                 assertThat(mixed.exactCubeTrace().reason()).startsWith("recovery:");
 
                 // The ordinary bucket merge also encounters the lossy grouping keys in its gap.
                 try (var ordinary = factory(SCOPE, false)) {
-                    check(twoDayProducer, 0, false, ordinary.executeLogicalQueryUseCase().query(twoDayProducer), null);
+                    check(twoDayProducer, false, ordinary.executeLogicalQueryUseCase().query(twoDayProducer), null);
                 }
             }
         } finally {
@@ -701,12 +701,12 @@ class ExactCubeDifferentialIntegrationTest {
         try (var factory = factory(SCOPE, true)) {
             String key = warm(factory, producer, 0, 1).getFirst();
             var entry = factory.executeLogicalQueryUseCase();
-            check(consumer, 0, false, entry.query(consumer), "exact-cube");
+            check(consumer, false, entry.query(consumer), "exact-cube");
             var backend = factory.cacheBackendForShutdown();
             backend.store(key, ResultFrame.builder().column("corrupted", ColumnType.LONG).row(1L).build(), Duration.ofHours(1));
             tracked.calls.clear();
             var result = entry.query(consumer);
-            check(consumer, 0, false, result, "latest-spark");
+            check(consumer, false, result, "latest-spark");
             assertThat(tracked.calls).containsExactly(translated(consumer));
             assertThat(backend.multiGet(List.of(key)).getFirst()).hasValueSatisfying(frame ->
                     assertThat(frame.columnNames()).containsExactly("corrupted"));
@@ -722,10 +722,10 @@ class ExactCubeDifferentialIntegrationTest {
             var entry = factory.executeLogicalQueryUseCase();
             tracked.calls.clear();
             var groupedResult = entry.query(grouped);
-            check(grouped, 0, false, groupedResult, "exact-cube");
+            check(grouped, false, groupedResult, "exact-cube");
             assertThat(groupedResult.frame().rowCount()).isZero();
             var scalarResult = entry.query(scalar);
-            check(scalar, 0, false, scalarResult, "exact-cube");
+            check(scalar, false, scalarResult, "exact-cube");
             assertThat(scalarResult.frame().rowCount()).isEqualTo(1);
             assertThat(scalarResult.frame().isNullAt(0, 0)).isTrue();
             assertThat(tracked.calls).isEmpty();
@@ -744,7 +744,7 @@ class ExactCubeDifferentialIntegrationTest {
                 org.assertj.core.api.Assertions.assertThatThrownBy(() -> entry.query(consumer))
                         .isInstanceOf(java.util.concurrent.CancellationException.class);
             }
-            check(consumer, 0, false, entry.query(consumer), "exact-cube");
+            check(consumer, false, entry.query(consumer), "exact-cube");
             assertThat(factory.cacheBackendForShutdown().existsForKeys(keys)).containsExactly(true);
         }
     }
@@ -765,7 +765,7 @@ class ExactCubeDifferentialIntegrationTest {
             var result = factory.executeLogicalQueryUseCase().query(query);
             var trace = result.exactCubeTrace();
             assertThat(trace.route()).isEqualTo("exact-cube");
-            assertThat(trace.version()).isZero();
+
             assertThat(trace.fragments()).hasSize(6);
             assertThat(trace.residualSql()).singleElement().asString()
                     .contains("SUM(`amount`)", "COUNT(`amount`)", "`ts` >= 518400");
@@ -778,40 +778,70 @@ class ExactCubeDifferentialIntegrationTest {
                     + " GROUP BY region ORDER BY region NULLS FIRST";
             assertSameFrame(oracle.execute(physical(composedPopulation)), result.frame(), true, query);
             assertThat(result.frame().rows()).anySatisfy(row -> assertThat(row).containsEntry("region", "added-in-gap"));
-            check(query, 1, true, factory.executeLogicalQueryUseCase().query(query), "existing");
+            tracked.calls.clear();
+            var later = factory.executeLogicalQueryUseCase().query(query);
+            assertThat(later.exactCubeTrace().route()).isEqualTo("exact-cube");
+            assertThat(later.exactCubeTrace().fragments()).isEqualTo(trace.fragments());
+            assertThat(tracked.calls).containsExactlyElementsOf(later.exactCubeTrace().residualSql());
+            assertSameFrame(result.frame(), later.frame(), true, query);
         } finally {
             path = original;
         }
     }
 
-    @Test void warmingDoesNotPublishABucketUnderMetadataThatChangedBeforeTheRead() {
+    @Test void closedHourWarmingAndCrossShapeReuseSurviveCommitsToTheLiveHour() {
         String original = path;
-        path = scratch.resolve("warming-race").toUri().toString();
-        spark.sql(fixtureSql).write().format("delta").save(path);
-        String producer = aggregate("AVG", "region, device", 0, 1, "");
-        String consumer = aggregate("AVG", "region", 0, 1, "");
-        try (var factory = factory(SCOPE, true)) {
+        path = scratch.resolve("hourly-stream").toUri().toString();
+        spark.sql("""
+                SELECT * FROM VALUES
+                  (0L, 'closed', 'x', 10), (3599L, 'closed', 'y', 30), (3600L, 'live', 'x', 100)
+                AS rows(ts, region, device, amount)
+                """).write().format("delta").save(path);
+        long hour = Duration.ofHours(1).getSeconds();
+        String bounds = " FROM " + SOURCE + " WHERE ts >= 0 AND ts < " + hour;
+        String producer = "SELECT region, device, AVG(amount) AS value" + bounds + " GROUP BY region, device";
+        String consumer = "SELECT region, AVG(amount) AS value" + bounds + " GROUP BY region";
+        var config = new CacheExecutionConfiguration(hour, 300, "ts");
+        var settings = new EngineSettings(config, valkey.uri(), SOURCE, path, true, 8);
+        try (var factory = new CascadaEngineFactory(settings, new LazyQueryExecutor(() -> tracked),
+                ApplicationSettings.defaults(), true, SCOPE)) {
             var canonical = canonicalize(producer);
             var hash = new com.cascada.cache.application.service.hashing.QueryHashGenerator().generateQueryHash(canonical, 300);
-            String key = com.cascada.cache.domain.key.CacheKeyFactory.buildBucketKey(hash, 0, DAY);
-            var warmer = (com.cascada.cache.application.service.WarmingOrchestrator) factory.warmCacheUseCase();
-            tracked.beforeExecute.set(() -> spark.newSession().sql("INSERT INTO delta.`" + path
-                    + "` VALUES (0L, 'added-during-warming', 'x', 700)").collectAsList());
-            org.assertj.core.api.Assertions.assertThatThrownBy(
-                    () -> warmer.warmSinglePattern(hash, canonical, 0, DAY - 1, false))
-                    .isInstanceOf(com.cascada.cache.exception.CubeSourceChangedException.class);
-            assertThat(factory.cacheBackendForShutdown().existsForKeys(List.of(key))).containsExactly(false);
+            var key = com.cascada.cache.domain.key.CacheKeyFactory.buildBucketKey(hash, 0, hour);
+            var liveKey = com.cascada.cache.domain.key.CacheKeyFactory.buildBucketKey(hash, hour, hour);
+            var warmer = factory.warmCacheUseCase();
+            warmer.recordQuery(hash, canonical);
+            long checksBefore = tracked.sourceChecks.sum();
+            tracked.beforeExecute.set(() -> appendLiveHourRows(hour + 180));
+            assertThat(warmer.warmLookbackWindow(hour + 180, Duration.ofHours(1)).bucketsWarmed()).isEqualTo(1);
+            assertThat(tracked.sourceChecks.sum()).isEqualTo(checksBefore + 1);
+            assertThat(factory.cacheBackendForShutdown().existsForKeys(List.of(key, liveKey))).containsExactly(true, false);
 
-            warm(factory, producer, 0, 1);
+            var entry = factory.executeLogicalQueryUseCase();
+            for (long commitSeconds : List.of(hour + 360, hour + 540)) {
+                appendLiveHourRows(commitSeconds);
+                tracked.calls.clear();
+                var result = entry.query(consumer);
+                check(consumer, false, result, "exact-cube");
+                assertThat(result.exactCubeTrace().fragments()).extracting(ExactCubeFragment::bucketKey)
+                        .containsExactly(key);
+                assertThat(tracked.calls).isEmpty();
+            }
+
+            warmer.recordQuery(hash, canonical);
             tracked.calls.clear();
-            var result = factory.executeLogicalQueryUseCase().query(consumer);
-            check(consumer, 1, false, result, "exact-cube");
-            assertThat(result.frame().rows()).anySatisfy(row ->
-                    assertThat(row).containsEntry("region", "added-during-warming"));
+            var repeat = warmer.warmLookbackWindow(hour + 540, Duration.ofHours(1));
+            assertThat(repeat.bucketsWarmed()).isZero();
+            assertThat(repeat.bucketsSkipped()).isEqualTo(1);
             assertThat(tracked.calls).isEmpty();
         } finally {
             path = original;
         }
+    }
+
+    private void appendLiveHourRows(long timestamp) {
+        spark.newSession().sql("INSERT INTO delta.`" + path
+                + "` VALUES (" + timestamp + "L, 'live', 'x', 700)").collectAsList();
     }
 
     @Test void seededCompoundDeclinesStillMatchOrdinarySpark() {
@@ -860,10 +890,10 @@ class ExactCubeDifferentialIntegrationTest {
                 try {
                     answer = entry.query(sql);
                 } catch (Exception candidateError) {
-                    saveMismatch(sql, 0, null, candidateError);
+                    saveMismatch(sql, null, candidateError);
                     throw new AssertionError("Cascada failed for " + sql, candidateError);
                 }
-                check(sql, 0, sql.contains(" LIMIT "), answer, "existing");
+                check(sql, sql.contains(" LIMIT "), answer, "existing");
                 assertThat(answer.exactCubeTrace().reason()).isEqualTo("unproven-sql-shape");
                 assertThat(tracked.calls).hasSize(1);
             }
@@ -1028,16 +1058,16 @@ class ExactCubeDifferentialIntegrationTest {
         return new CascadaEngineFactory(settings, new LazyQueryExecutor(() -> tracked), application, enabled, scope);
     }
 
-    private void check(String sql, long version, boolean ordered, QueryResult actual, String route) {
+    private void check(String sql, boolean ordered, QueryResult actual, String route) {
         var expected = oracle.execute(physical(sql));
-        String message = "seed=" + SEED + " version=" + version + " SQL=" + sql;
+        String message = "seed=" + SEED + " SQL=" + sql;
         try {
             assertThat(actual.exactCubeTrace() == null ? null : actual.exactCubeTrace().route())
                     .as("%s trace=%s", message, actual.exactCubeTrace()).isEqualTo(route);
-            if ("exact-cube".equals(route)) assertThat(actual.exactCubeTrace().version()).isEqualTo(version);
+
             assertSameFrame(expected, actual.frame(), ordered, message);
         } catch (AssertionError mismatch) {
-            saveMismatch(sql, version, actual, mismatch);
+            saveMismatch(sql, actual, mismatch);
             throw mismatch;
         }
     }
@@ -1053,7 +1083,7 @@ class ExactCubeDifferentialIntegrationTest {
         }
     }
 
-    private void saveMismatch(String sql, long version, QueryResult result, Throwable mismatch) {
+    private void saveMismatch(String sql, QueryResult result, Throwable mismatch) {
         try {
             var directory = Path.of(System.getProperty("cascada.exact.mismatch.dir", "target/exact-cube-mismatches"));
             Files.createDirectories(directory);
@@ -1061,7 +1091,6 @@ class ExactCubeDifferentialIntegrationTest {
             reproduction.put("seed", SEED);
             reproduction.put("sql", sql);
             reproduction.put("fixtureSql", fixtureSql);
-            reproduction.put("expectedSourceVersion", version);
             reproduction.put("trace", result == null ? null : result.exactCubeTrace());
             reproduction.put("sparkSubmissions", List.copyOf(tracked.calls));
             reproduction.put("firstDifference", mismatch.getMessage());

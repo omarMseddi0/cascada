@@ -27,7 +27,7 @@ class ValkeyExactCubeIndexIntegrationTest {
     @RegisterExtension final ValkeyTestDatabase valkey = new ValkeyTestDatabase();
 
     @Test void indexesAndReadsTheSameOrdinaryBucket() {
-        var source = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
+        var source = new ExactCubeSource("facts", "table", "schema", "semantics", "policy", Map.of(), true);
         var population = new CubePopulation(source, "ts", "", "amount");
         var range = new CubeInterval(0, 86400);
         var measure = Set.of(CubeMeasure.SUM);
@@ -62,7 +62,7 @@ class ValkeyExactCubeIndexIntegrationTest {
     }
 
     @Test void looksUpDisjointTimeRangesInOneValkeyIndexRequest() {
-        var source = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
+        var source = new ExactCubeSource("facts", "table", "schema", "semantics", "policy", Map.of(), true);
         var population = new CubePopulation(source, "ts", "", "amount");
         var backend = valkey.cache(new PortableFrameSerializer());
         var store = backend.exactCubeStore();
@@ -90,7 +90,7 @@ class ValkeyExactCubeIndexIntegrationTest {
     }
 
     @Test void rejectsSameLengthTamperingAndDoesNotDeleteTheReplacementValue() {
-        var source = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
+        var source = new ExactCubeSource("facts", "table", "schema", "semantics", "policy", Map.of(), true);
         var population = new CubePopulation(source, "ts", "", "amount");
         var interval = new CubeInterval(0, 86400);
         var measures = Set.of(CubeMeasure.SUM);
@@ -120,13 +120,12 @@ class ValkeyExactCubeIndexIntegrationTest {
     }
 
     @Test void keepsANearMatchOutOfEachIndependentProvenanceBoundary() {
-        var exact = new ExactCubeSource("facts", "table", 12, "schema", "semantics", "policy", Map.of(), true);
+        var exact = new ExactCubeSource("facts", "table", "schema", "semantics", "policy", Map.of(), true);
         var wrongSources = List.of(
-                new ExactCubeSource("facts", "table", 11, "schema", "semantics", "policy", Map.of(), true),
-                new ExactCubeSource("facts", "table", 12, "schema", "semantics", "other-policy", Map.of(), true),
-                new ExactCubeSource("facts", "recreated-table", 12, "schema", "semantics", "policy", Map.of(), true),
-                new ExactCubeSource("facts", "table", 12, "other-schema", "semantics", "policy", Map.of(), true),
-                new ExactCubeSource("facts", "table", 12, "schema", "other-semantics", "policy", Map.of(), true));
+                new ExactCubeSource("facts", "table", "schema", "semantics", "other-policy", Map.of(), true),
+                new ExactCubeSource("facts", "recreated-table", "schema", "semantics", "policy", Map.of(), true),
+                new ExactCubeSource("facts", "table", "other-schema", "semantics", "policy", Map.of(), true),
+                new ExactCubeSource("facts", "table", "schema", "other-semantics", "policy", Map.of(), true));
         var interval = new CubeInterval(0, 86400);
         var grain = List.of("region");
         var measures = Set.of(CubeMeasure.SUM);

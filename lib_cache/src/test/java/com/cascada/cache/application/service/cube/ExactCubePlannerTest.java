@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 final class ExactCubePlannerTest {
     private static final CubePopulation POPULATION = new CubePopulation(
-            new ExactCubeSource("path", "table", 0, "schema", "semantics", "scope",
+            new ExactCubeSource("path", "table", "schema", "semantics", "scope",
                     Map.of("region", "string", "device", "bigint"), true), "ts", "", "amount");
     private static final CubeInterval WINDOW = new CubeInterval(0, 9);
 

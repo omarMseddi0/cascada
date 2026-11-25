@@ -76,7 +76,7 @@ public final class SparkDeltaQueryExecutor implements LatestQueryExecutorPort, A
         QueryCancellation.requireCurrentActive();
         var log = DeltaLog.forTable(sparkSession, registeredPath);
         var snapshot = log.update(false, Option.empty(), Option.empty());
-        if (snapshot.version() < 0) return Optional.empty();
+        if (!log.tableExists()) return Optional.empty();
         log.protocolRead(snapshot.protocol());
         Map<String, String> types = new HashMap<>();
         var foldedNames = new HashSet<String>();
@@ -88,7 +88,7 @@ public final class SparkDeltaQueryExecutor implements LatestQueryExecutorPort, A
             }
             types.put(field.name(), type);
         }
-        return Optional.of(new ExactCubeSource(registeredPath, snapshot.metadata().id(), snapshot.version(),
+        return Optional.of(new ExactCubeSource(registeredPath, snapshot.metadata().id(),
                 snapshot.schema().json(), semantics(), accessScope, types,
                 Boolean.parseBoolean(sparkSession.conf().get("spark.sql.groupByAliases"))));
     }

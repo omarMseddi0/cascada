@@ -74,7 +74,7 @@ public final class ExecuteCachedQueryService implements ExecuteCachedQueryUseCas
         return cacheExecutionEngine.tryReadComplete(canonicalObject, queryHash).map(frame -> {
             recordForWarming(queryHash, canonicalObject);
             return new QueryResult(frame, true,
-                    new ExactCubeTrace("same-query-cache", "complete-bucket-coverage", -1, List.of(), List.of(), null, 0));
+                    new ExactCubeTrace("same-query-cache", "complete-bucket-coverage", List.of(), List.of(), null, 0));
         });
     }
 

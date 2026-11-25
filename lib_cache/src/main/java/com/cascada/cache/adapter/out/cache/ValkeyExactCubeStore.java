@@ -178,7 +178,7 @@ final class ValkeyExactCubeStore implements ExactCubeStorePort {
 
     private static String index(CubePopulation population, String fence) {
         var source = population.source();
-        var fields = List.of(fence, source.path(), source.tableId(), Long.toString(source.version()), source.schema(),
+        var fields = List.of(fence, source.path(), source.tableId(), source.schema(),
                 source.semantics(), source.accessScope(), population.timeColumn(), population.predicate(), population.input());
         StringBuilder key = new StringBuilder();
         fields.forEach(field -> key.append(field.length()).append(':').append(field));

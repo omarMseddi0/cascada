@@ -475,8 +475,7 @@ public final class WarmingOrchestrator implements WarmCacheUseCase {
                 configuration.fixedStepSeconds());
         var binding = exactCube == null || generation.isEmpty() ? Optional.<BucketCubeBinding>empty()
                 : exactCube.bindWarmBucket(canonicalObject.physicalSql());
-        ResultFrame frame = binding.isPresent() ? exactCube.executeWarmBucket(bucketSql, binding.get())
-                : sparkExecutor.execute(bucketSql);
+        ResultFrame frame = sparkExecutor.execute(bucketSql);
         boolean decimalComposite = !canonicalObject.metadata().compositeAliases().isEmpty()
                 && frame.columnTypes().containsValue(ColumnType.DECIMAL);
         if (frame.hasLossyStrings() || decimalComposite || frame.rowCount() > configuration.maximumCachedRows()) {

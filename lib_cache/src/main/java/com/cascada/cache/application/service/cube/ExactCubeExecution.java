@@ -19,7 +19,6 @@ import com.cascada.cache.domain.model.cube.ExactCubeQuery;
 import com.cascada.cache.domain.model.cube.CubeInterval;
 import com.cascada.cache.domain.model.cube.CubeMeasure;
 import com.cascada.cache.domain.model.cube.ExactCubeSource;
-import com.cascada.cache.exception.CubeSourceChangedException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -82,7 +81,7 @@ public final class ExactCubeExecution {
         LOGGER.fine(() -> "Exact cube declined: " + reason);
         QueryResult result = fallback.get();
         return new QueryResult(result.frame(), result.servedThroughCache(), new ExactCubeTrace(
-                "existing", reason, -1, List.of(), List.of(), null, 0));
+                "existing", reason, List.of(), List.of(), null, 0));
     }
 
     private String rejection(ExactCubeQuery query, ExactCubeSource source) {
@@ -218,7 +217,7 @@ public final class ExactCubeExecution {
             result = executor.executeWithAggregate(outer, query.outerRelation(), result, types);
         }
         QueryCancellation.requireCurrentActive();
-        return new QueryResult(result, true, trace("exact-cube", "verified", source, reads, submitted, outer, planningNanos));
+        return new QueryResult(result, true, trace("exact-cube", "verified", reads, submitted, outer, planningNanos));
     }
 
     /** Only ordinary AVG buckets with the original grouping columns can be indexed. */
@@ -238,40 +237,27 @@ public final class ExactCubeExecution {
                         query.grain(), averages.getFirst().label()));
     }
 
-    public ResultFrame executeWarmBucket(String bucketSql, BucketCubeBinding binding) {
-        var result = executor.execute(bucketSql);
-        requireUnchangedWarmSource(binding.population().source());
-        return result;
-    }
-
     public boolean storeWarmBucket(String key, ResultFrame frame, Duration ttl, String generation,
                                    long start, long end, BucketCubeBinding binding) {
         return store.storeBucket(key, frame, ttl, generation, binding.population(),
                 new CubeInterval(start, Math.incrementExact(end)), binding.grain(), binding.averageAlias());
     }
 
-    private void requireUnchangedWarmSource(ExactCubeSource observed) {
-        QueryCancellation.requireCurrentActive();
-        if (executor.currentSource(observed.path(), observed.accessScope()).filter(observed::equals).isEmpty()) {
-            throw new CubeSourceChangedException();
-        }
-    }
-
     private QueryResult direct(String physicalSql, String reason,
                                List<ExactCubeFragment> reads, List<String> submitted, long planningNanos) {
         var result = executor.execute(physicalSql);
         return new QueryResult(result, false,
-                new ExactCubeTrace("latest-spark", reason, -1, reads, submitted, null, planningNanos));
+                new ExactCubeTrace("latest-spark", reason, reads, submitted, null, planningNanos));
     }
 
-    private static ExactCubeTrace trace(String route, String reason, ExactCubeSource source,
+    private static ExactCubeTrace trace(String route, String reason,
                                          List<ExactCubeFragment> reads, List<String> submitted,
                                          String outer, long planningNanos) {
-        LOGGER.fine(() -> "Exact cube route=" + route + " reason=" + reason + " version=" + source.version()
+        LOGGER.fine(() -> "Exact cube route=" + route + " reason=" + reason
                 + " generations=" + reads.stream().map(ExactCubeFragment::generation).toList()
                 + " compressed_bytes=" + reads.stream().mapToLong(ExactCubeFragment::compressedBytes).sum()
                 + " decoded_bytes=" + reads.stream().mapToLong(ExactCubeFragment::decodedBytes).sum()
                 + " residuals=" + submitted.size() + " planning_ns=" + planningNanos);
-        return new ExactCubeTrace(route, reason, source.version(), reads, submitted, outer, planningNanos);
+        return new ExactCubeTrace(route, reason, reads, submitted, outer, planningNanos);
     }
 }
